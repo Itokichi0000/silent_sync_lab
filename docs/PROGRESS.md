@@ -100,7 +100,7 @@ Phase 2 以降の前提として未解決のもの:
   | `lab-cli`（E2E 9、鍵の読み込み 1） | 10 |
   - fmt: 差分なし。clippy: 警告なし（`-D warnings`）。
   - 検査の無効化チェック: 27 件すべてテストで検出（生存 0）。
-  - CI ワークフローは作成したが、**GitHub Actions 上での実行結果はまだ確認していない**。
+  - CI（GitHub Actions）: コミット `a24c146` の実行が成功したことを確認（run 44863625853）。レビュー対応後のコミットの結果は Actions の履歴を参照。
 - **出力証拠**: `docs/logs/phase1_cargo_fmt.log`, `phase1_cargo_clippy.log`, `phase1_cargo_test.log`, `phase1_mutation_check.log`
 - **調べた上流資料・commit SHA**: Phase 0 と同じ。加えて `rust-bitcoin 0.32.7` の `Witness::taproot_control_block` / `Block::bip34_block_height` / `check_witness_commitment` の実装を確認。
 - **安全性で気をつけたこと**:
