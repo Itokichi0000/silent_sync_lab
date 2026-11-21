@@ -8,12 +8,14 @@
 //!
 //! ```
 //! use silent_sync::{
-//!     cross_check, new_store_meta, scan_range, sync, sync_with_progress, BlockRef,
-//!     ChainIdentity, DetectedOutput, EvidenceKind, MemoryStore, Network, ReceiveScanner,
-//!     ReceiverKeys, ScanError, ScanSource, SilentPaymentAddress, StoreError, StoreMeta,
-//!     SyncError, SyncOptions, SyncReport, SyncStore, VerificationReport,
+//!     audit_store, cross_check, new_store_meta, scan_range, sync, sync_with_progress,
+//!     AuditError, AuditOptions, BlockRef, ChainIdentity, DetectedOutput, EvidenceKind,
+//!     MemoryStore, Network, ReceiveScanner, ReceiverKeys, ScanError, ScanSource,
+//!     SilentPaymentAddress, StoreAuditReport, StoreError, StoreMeta, SyncError, SyncOptions,
+//!     SyncReport, SyncStore, VerificationReport,
 //! };
-//! # let _ = (scan_range, sync, sync_with_progress, cross_check, new_store_meta);
+//! # let _ = (scan_range, sync, sync_with_progress, cross_check, new_store_meta, audit_store);
+//! # fn audit(_: (AuditError, AuditOptions, StoreAuditReport)) {}
 //! # fn names(_: (BlockRef, ChainIdentity, DetectedOutput, EvidenceKind, MemoryStore, Network)) {}
 //! # fn more(_: (ScanError, StoreError, StoreMeta, SyncError, SyncOptions, SyncReport)) {}
 //! # fn rest(_: (&ReceiveScanner, &ReceiverKeys, &SilentPaymentAddress, &dyn ScanSource)) {}
@@ -129,13 +131,14 @@
 #[cfg(test)]
 mod tests {
     use silent_sync::{
+        audit_store,
         bitcoin::secp256k1::{Secp256k1, SecretKey},
         models::BlockRef,
         network::ChainIdentity,
         source::{ScanBatch, ScanSource, SourceCapabilities, SourceError},
         store::{MemoryStore, StoreError, SyncStore},
         sync::{new_store_meta, sync, SyncError, SyncOptions},
-        EvidenceKind, Network, ReceiveScanner, ReceiverKeys,
+        AuditError, AuditOptions, EvidenceKind, Network, ReceiveScanner, ReceiverKeys,
     };
 
     /// A source an embedder might write: here one that cannot be reached.
@@ -187,6 +190,19 @@ mod tests {
         let mut store = MemoryStore::new();
 
         // Not initialized: refused before the source is asked anything.
+        let audit = |store: &MemoryStore| {
+            audit_store(
+                &source,
+                &scanner,
+                &keys.wallet_id(),
+                store,
+                &AuditOptions::default(),
+            )
+        };
+        assert_eq!(
+            audit(&store),
+            Err(AuditError::Store(StoreError::NotInitialized))
+        );
         let options = SyncOptions::default().with_chunk_size(10);
         assert!(matches!(
             sync(&source, &scanner, &keys.wallet_id(), &mut store, &options),
@@ -205,6 +221,8 @@ mod tests {
         assert!(sync(&source, &scanner, &keys.wallet_id(), &mut store, &options).is_err());
         assert_eq!(store.checkpoint().expect("checkpoint"), None);
         assert!(store.detections().expect("detections").is_empty());
+        // Nothing stored: an audit has nothing to compare, and says so.
+        assert_eq!(audit(&store), Err(AuditError::NothingStored));
     }
 
     #[test]
@@ -213,7 +231,10 @@ mod tests {
         assert!("bitcoin".parse::<Network>().is_err());
         assert_eq!("regtest".parse::<Network>().ok(), Some(Network::Regtest));
         let keys = keys();
-        let shown = format!("{keys:?} {:?}", ReceiveScanner::new(&keys, &[]).expect("scanner"));
+        let shown = format!(
+            "{keys:?} {:?}",
+            ReceiveScanner::new(&keys, &[]).expect("scanner")
+        );
         assert!(shown.contains("<redacted>"));
         assert!(!shown.contains(&"21".repeat(32)), "the scan key is printed");
     }

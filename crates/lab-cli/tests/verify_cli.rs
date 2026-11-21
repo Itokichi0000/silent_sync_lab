@@ -3,13 +3,13 @@
 #![allow(clippy::unwrap_used)] // test code: a panic is the failure report
 
 use lab_testkit::{
-    fake_http::{FakeCoreRest, FakeOracle},
+    fake_http::{oracle_full_block_json, FakeCoreRest, FakeOracle},
     fixture_gen,
 };
 use silent_sync::source::{
     fixture::FixtureSource,
     local_index::{IndexPolicy, LocalTweakIndex},
-    ScanSource,
+    Evidence, ScanSource,
 };
 use std::process::Command;
 
@@ -365,4 +365,223 @@ fn oracle_backend_fails_closed_without_services() {
     ]);
     assert_eq!(code, Some(1));
     assert!(stderr.contains("chain mismatch"), "{stderr}");
+}
+
+/// The gap a cross-check leaves and an audit closes (fault I19, through the
+/// CLI): an index omits a payment while the store is being filled and answers
+/// honestly afterwards. `verify` asks again and sees nothing; `audit` compares
+/// what was stored with one's own node.
+#[test]
+fn audit_finds_what_an_index_omitted_only_while_syncing() {
+    let fixture = fixture_gen::generate();
+    let index = LocalTweakIndex::new(
+        FixtureSource::from_file(fixture.clone()).unwrap(),
+        IndexPolicy::Bip352,
+    )
+    .fetch_range(1, 8)
+    .unwrap();
+    let node = FakeCoreRest::serve(&fixture);
+    let oracle = FakeOracle::serve("regtest", &index.blocks);
+    let (core_url, oracle_url) = (node.url(), oracle.url());
+    let dir = std::env::temp_dir().join(format!("ssl-audit-cli-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("lab.sqlite3").display().to_string();
+    let through_oracle = |head: &[&str], tail: &[&str]| -> Vec<String> {
+        let mut args: Vec<String> = head.iter().map(|s| s.to_string()).collect();
+        args.extend(["--backend", "oracle-v2", "--oracle-url"].map(String::from));
+        args.push(oracle_url.clone());
+        args.extend(["--core-rest-url".to_string(), core_url.clone()]);
+        args.extend(tail.iter().map(|s| s.to_string()));
+        args
+    };
+    let against_node = |tail: &[&str]| -> Vec<String> {
+        let mut args: Vec<String> = ["audit", "--db", &db, "--backend", "core"]
+            .map(String::from)
+            .to_vec();
+        args.extend(["--core-rest-url".to_string(), core_url.clone()]);
+        args.extend(tail.iter().map(|s| s.to_string()));
+        args
+    };
+
+    // While the store is filled, the index has no entries for block 2.
+    let honest_block_2 = oracle.http.get(&FakeOracle::block_path(2));
+    let block_2 = &index.blocks[1];
+    let Evidence::TweakIndex(entries) = &block_2.evidence else {
+        panic!("tweak index expected");
+    };
+    assert!(!entries.is_empty());
+    oracle.http.set(
+        &FakeOracle::block_path(2),
+        oracle_full_block_json(2, Some(block_2.block.hash), &[]),
+    );
+    let args = through_oracle(
+        &["lab", "init"],
+        &[
+            "--birthday",
+            "1",
+            "--birthday-basis",
+            "fixture start",
+            "--label",
+            "1",
+            "--db",
+            &db,
+        ],
+    );
+    assert_eq!(run(&refs(&args)).0, Some(0));
+    let args = through_oracle(&["sync"], &["--json", "--db", &db]);
+    let synced = json(&refs(&args), 0);
+    assert_eq!(synced["caught_up"], true);
+    assert_eq!(synced["new_detections"].as_array().unwrap().len(), 6);
+    let stored_before = std::fs::read(&db).unwrap();
+
+    // Afterwards the index answers honestly: a cross-check finds nothing.
+    oracle.http.set(&FakeOracle::block_path(2), honest_block_2);
+    let args = through_oracle(
+        &["verify"],
+        &["--reference", "core", "--label", "1", "--json"],
+    );
+    let verified = json(&refs(&args), 0);
+    assert_eq!(verified["identical"], true);
+    assert_eq!(verified["agreed"], 7);
+
+    // The audit of the store against the node does.
+    let report = json(&refs(&against_node(&["--json"])), 4);
+    assert_eq!(report["identical"], false);
+    assert_eq!(report["store_backend"], "blindbit_oracle_v2_http");
+    assert_eq!(report["reference_backend"], "bitcoin_core_rest");
+    assert_eq!(report["reference_evidence"], "full_block_with_prevouts");
+    assert_eq!(
+        (
+            report["first_height"].as_u64(),
+            report["last_height"].as_u64(),
+            report["blocks_compared"].as_u64()
+        ),
+        (Some(1), Some(8), Some(8))
+    );
+    assert_eq!(
+        (
+            report["agreed"].as_u64(),
+            report["stored_only"].as_u64(),
+            report["reference_only"].as_u64(),
+            report["unexplained"].as_u64()
+        ),
+        (Some(6), Some(0), Some(1), Some(0))
+    );
+    let differences = report["differences"].as_array().unwrap();
+    assert_eq!(differences.len(), 1);
+    assert_eq!(differences[0]["height"], 2);
+    assert_eq!(differences[0]["only_in"], "reference");
+    assert_eq!(
+        differences[0]["explanation"]["kind"],
+        "store_omitted_output"
+    );
+    assert!(differences[0]["candidate"].is_null());
+    assert_eq!(
+        differences[0]["reference"]["provenance"]["evidence_kind"],
+        "full_block_with_prevouts"
+    );
+
+    // Text form, and the exit status that says "different".
+    let (code, stdout, stderr) = run(&refs(&against_node(&[])));
+    assert_eq!(code, Some(4), "{stderr}");
+    assert!(
+        stdout.contains("store filled from    : blindbit_oracle_v2_http")
+            && stdout.contains("reference            : bitcoin_core_rest [full_block]")
+            && stdout.contains("blocks compared      : 8")
+            && stdout.contains("agreed outputs       : 6")
+            && stdout.contains("only in reference    : 1")
+            && stdout.contains("store_omitted_output")
+            && stdout.contains("verdict              : DIFFERENT")
+            && !stdout.contains("index's claims"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("the store differs from the reference: 1 difference(s)"),
+        "{stderr}"
+    );
+    assert!(!stdout.to_lowercase().contains("balance"));
+
+    // A range that leaves out the block: nothing to report there.
+    let (code, stdout, _) = run(&refs(&against_node(&["--from", "3"])));
+    assert_eq!(code, Some(0));
+    assert!(
+        stdout.contains("range                : 3..=8")
+            && stdout.contains("blocks compared      : 6")
+            && stdout.contains("verdict              : identical"),
+        "{stdout}"
+    );
+
+    // Audited against the index itself, which now answers honestly, the
+    // difference shows as well — and the report says what such a reference
+    // is worth.
+    let mut args = through_oracle(&["audit"], &[]);
+    args.extend(["--db".to_string(), db.clone()]);
+    let (code, stdout, _) = run(&refs(&args));
+    assert_eq!(code, Some(4));
+    assert!(
+        stdout.contains("[tweak_index: UNVERIFIED index claim]")
+            && stdout.contains("only in reference    : 1")
+            && stdout.contains("index's claims"),
+        "{stdout}"
+    );
+
+    // What cannot be audited is an error without a result.
+    for (tail, needle) in [
+        (
+            &["--to", "9"][..],
+            "heights 1..=9 are not a range inside the stored blocks 1..=8",
+        ),
+        (&["--from", "0"][..], "not a range inside the stored blocks"),
+        (&["--from", "5", "--to", "4"][..], "not a range inside"),
+    ] {
+        let (code, stdout, stderr) = run(&refs(&against_node(tail)));
+        assert_eq!(code, Some(1), "{tail:?}");
+        assert!(
+            stdout.is_empty()
+                && stderr.contains(needle)
+                && stderr.contains("audit aborted: no result"),
+            "{tail:?}: {stderr}"
+        );
+    }
+    let (code, stdout, stderr) = run(&[
+        "audit",
+        "--db",
+        &db,
+        "--backend",
+        "core",
+        "--core-rest-url",
+        "http://127.0.0.1:9",
+    ]);
+    assert_eq!(code, Some(1));
+    assert!(
+        stdout.is_empty() && stderr.contains("source is unavailable"),
+        "{stderr}"
+    );
+    let (code, _, stderr) = run(&[
+        "--network",
+        "signet",
+        "audit",
+        "--db",
+        &db,
+        "--backend",
+        "core",
+    ]);
+    assert_eq!(code, Some(1));
+    assert!(stderr.contains("is for regtest"), "{stderr}");
+    let (code, _, stderr) = run(&[
+        "--network",
+        "mainnet",
+        "audit",
+        "--db",
+        &db,
+        "--backend",
+        "core",
+    ]);
+    assert_ne!(code, Some(0));
+    assert!(stderr.contains("mainnet"), "{stderr}");
+
+    // An audit only reads.
+    assert_eq!(std::fs::read(&db).unwrap(), stored_before);
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -17,8 +17,9 @@ Bitcoin [BIP352 (Silent Payments)](https://github.com/bitcoin/bips/blob/master/b
 |---|---|
 | BIP352 公式テストベクトル（v1.1.2、29 件）による受信検出の検証 | 送金・署名・残高表示（**対象外**） |
 | 4 種のデータ源からの検出: オフライン fixture、自分の Bitcoin Core（REST）、BlindBit Oracle v2（HTTP）、手元で計算した tweak インデックス | mainnet、実資金 |
-| 永続同期: チェックポイント、中断からの再開、reorg の巻き戻しと報告、birthday からの復元 | 自分のシード・鍵の取り込み（公開テスト鍵のみ） |
+| 永続同期: チェックポイント、中断からの再開、reorg の巻き戻しと報告（深さの上限つき）、birthday からの復元 | 自分のシード・鍵の取り込み（公開テスト鍵のみ） |
 | 2 つのデータ源の突き合わせ（`verify`）と、差分の tx 単位の説明 | リモート（ループバック以外）のサーバへの接続 |
+| 保存済みの検出結果を参照ソース（自分のノード）で照合する監査（`audit`） | 監査結果による証拠種別の格上げ |
 | ベンチマーク（JSON / CSV / Markdown）と故障注入 | 使用済みかどうかの追跡 |
 
 「検出した出力」は「未使用残高」でも「着金の確認」でもありません。
@@ -87,10 +88,16 @@ cargo run -p lab-cli -- received list --db /tmp/lab.sqlite3
 cargo run -p lab-cli -- verify --backend local-index --fixture fixtures/local/regtest_basic_v1.json --reference fixture --label 1
 ```
 
+保存済みの結果の監査（ストアが持つ範囲を参照ソースでスキャンし直して比べる。ストアは変更しません）:
+
+```bash
+cargo run -p lab-cli -- audit --db /tmp/lab.sqlite3 --backend fixture --fixture fixtures/local/regtest_basic_v1.json
+```
+
 - `--network` は `regtest`（既定）か `signet`。`mainnet` はエラーになります。
 - `--backend` は `fixture` / `core` / `oracle-v2` / `local-index`。`core` と `oracle-v2` は、この機械で動いている自分のノード・Oracle にループバック（`http://127.0.0.1:<port>`）で接続します。
-- `scan` はステートレス（何も保存しない）、`sync` はストアに保存して再開できます。
-- 終了コード: 0 成功、1 エラー、2 引数エラー、4 `verify` で差分あり。
+- `scan` はステートレス（何も保存しない）、`sync` はストアに保存して再開できます。`sync --max-reorg-depth <n|none>` で、巻き戻しを許す深さ（既定 100 ブロック）を変えられます。
+- 終了コード: 0 成功、1 エラー、2 引数エラー、4 `verify` / `audit` で差分あり。
 - `--json` で機械可読な出力になります。
 
 ### 実ノードを使うテストとベンチマーク

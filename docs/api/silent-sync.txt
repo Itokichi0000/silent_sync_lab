@@ -6,6 +6,55 @@ local-index = []
 low-level = []
 secret-output-tweaks = ["low-level"]
 
+## audit.rs
+#[derive(Debug, Clone, Default, PartialEq, Eq)] #[non_exhaustive] pub struct AuditOptions
+    pub first_height: Option<u32>,
+    pub last_height: Option<u32>,
+impl AuditOptions
+    pub fn with_first_height(mut self, first_height: Option<u32>) -> Self
+    pub fn with_last_height(mut self, last_height: Option<u32>) -> Self
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] #[non_exhaustive] pub enum AuditError
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Scan(#[from] ScanError),
+    #[error("the store is bound to a different {field}: stored `{stored}`, given `{given}`")]
+    BindingMismatch {
+        field: &'static str,
+        stored: String,
+        given: String,
+    },
+    #[error("the store holds no scanned blocks: there is nothing to audit")]
+    NothingStored,
+    #[error(
+        "heights {first}..={last} are not a range inside the stored blocks \
+         {first_stored}..={last_stored}"
+    )]
+    RangeOutsideStore {
+        first: u32,
+        last: u32,
+        first_stored: u32,
+        last_stored: u32,
+    },
+impl From<SourceError> for AuditError
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)] #[non_exhaustive] pub struct StoreAuditReport
+    pub chain: ChainIdentity,
+    pub store_backend: String,
+    pub reference_backend: String,
+    pub reference_evidence: EvidenceKind,
+    pub first_height: u32,
+    pub last_height: u32,
+    pub labels_scanned: Vec<u32>,
+    pub blocks_compared: u64,
+    pub agreed: u64,
+    pub stored_only: u64,
+    pub reference_only: u64,
+    pub differences: Vec<Difference>,
+    pub block_hash_mismatches: Vec<u32>,
+    pub identical: bool,
+    pub unexplained: u64,
+pub fn audit_store( reference: &dyn ScanSource, scanner: &ReceiveScanner, wallet_id: &str, store: &dyn SyncStore, options: &AuditOptions, ) -> Result<StoreAuditReport, AuditError>
+
 ## engine.rs
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] #[non_exhaustive] pub enum ScanError
     #[error(
@@ -52,7 +101,8 @@ pub const SCAN_CHUNK_BLOCKS: u32 = 100;
 pub const MAX_INDEXED_OUTPUTS_PER_BLOCK: usize = 4_000_000 / 172;
 
 ## lib.rs
-#![warn(missing_docs)] pub mod engine;
+#![warn(missing_docs)] pub mod audit;
+pub mod engine;
 pub mod models;
 pub mod network;
 pub mod protocol;
@@ -61,6 +111,7 @@ pub mod store;
 pub mod sync;
 pub mod verify;
 pub use bdk_sp::bitcoin;
+pub use audit::{audit_store, AuditError, AuditOptions, StoreAuditReport};
 pub use engine::{scan_range, ScanError, ScanReport};
 pub use models::{BlockRef, DetectedOutput, EvidenceKind, MatchProvenance};
 pub use network::{ChainIdentity, Network, NetworkError};
@@ -515,6 +566,7 @@ pub fn sync_with_progress( source: &dyn ScanSource, scanner: &ReceiveScanner, wa
     CandidateTweakDiffers,
     CandidateOmittedOutput,
     CandidateOutputDiffers,
+    StoreOmittedOutput,
     DetailsDiffer,
     Unexplained {
         note: String,

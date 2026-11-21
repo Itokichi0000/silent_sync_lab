@@ -378,4 +378,72 @@ fn verify_real_oracle_against_real_node() {
         stdout.contains("verdict              : identical"),
         "{stdout}"
     );
+
+    // A store filled through the real oracle, audited against the node: the
+    // output the oracle lists against the BIP352 rule is in the store, and
+    // the audit names it.
+    let dir = std::env::temp_dir().join(format!("ssl-regtest-audit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("lab.sqlite3").display().to_string();
+    let through_oracle = [
+        "--db",
+        &db,
+        "--backend",
+        "oracle-v2",
+        "--oracle-url",
+        &oracle_url,
+        "--core-rest-url",
+        &core_url,
+    ];
+    let mut init = vec!["lab", "init"];
+    init.extend(through_oracle);
+    init.extend([
+        "--birthday",
+        &from,
+        "--birthday-basis",
+        "first block after the test coins were funded",
+        "--label",
+        &label,
+    ]);
+    let (code, _, stderr) = run(&init);
+    assert_eq!(code, Some(0), "{stderr}");
+    let mut sync = vec!["sync"];
+    sync.extend(through_oracle);
+    let (code, _, stderr) = run(&sync);
+    assert_eq!(code, Some(0), "{stderr}");
+
+    let (code, stdout, stderr) = run(&[
+        "audit",
+        "--db",
+        &db,
+        "--backend",
+        "core",
+        "--core-rest-url",
+        &core_url,
+        "--json",
+    ]);
+    assert_eq!(code, Some(4), "{stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["store_backend"], "blindbit_oracle_v2_http");
+    assert_eq!(report["reference_backend"], "bitcoin_core_rest");
+    assert_eq!(report["first_height"], scenario.base_height + 1);
+    assert_eq!(report["last_height"], scenario.tip_height);
+    assert_eq!(report["agreed"], 7);
+    assert_eq!(report["stored_only"], 1);
+    assert_eq!(report["reference_only"], 0);
+    assert_eq!(report["unexplained"], 0);
+    assert!(report["block_hash_mismatches"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let diff = &report["differences"][0];
+    assert_eq!(diff["txid"], scenario.segwit_v2_txid.to_string());
+    assert_eq!(diff["only_in"], "candidate");
+    assert_eq!(diff["explanation"]["kind"], "reference_not_eligible");
+    assert_eq!(
+        diff["explanation"]["reason"],
+        "spends_unknown_segwit_version"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -42,6 +42,7 @@ H = "crates/silent-sync/src/source/http.rs"
 O = "crates/silent-sync/src/source/blindbit.rs"
 L = "crates/silent-sync/src/source/local_index.rs"
 V = "crates/silent-sync/src/verify.rs"
+A = "crates/silent-sync/src/audit.rs"
 E = "crates/silent-sync/src/engine.rs"
 P = "crates/silent-sync/src/protocol.rs"
 N = "crates/silent-sync/src/network.rs"
@@ -146,10 +147,24 @@ muts = [
     ("core: error text from chaininfo unbounded", C, "super::http::printable(&e.to_string())", "e.to_string()"),
     ("core: range lookup validates per block", C, "    fn block_refs(&self, from: u32, to: u32) -> Result<Vec<BlockRef>, SourceError> {\n        self.verified_refs(from, to)\n    }", "    fn block_refs(&self, from: u32, to: u32) -> Result<Vec<BlockRef>, SourceError> {\n        (from..=to).map(|height| self.block_ref(height)).collect()\n    }"),
     # --- persistent sync ---
+    # --- audit of a store against a reference ---
+    ("audit: binding unchecked", A, "if let Some(d) = binding_difference(&meta, reference.chain(), None, scanner, wallet_id) {", "if let Some(d) = binding_difference(&meta, reference.chain(), None, scanner, wallet_id).filter(|_| false) {"),
+    ("audit: empty range accepted", A, "if first > last || first < meta.birthday || last > checkpoint.height {", "if first < meta.birthday || last > checkpoint.height {"),
+    ("audit: range below the birthday accepted", A, "if first > last || first < meta.birthday || last > checkpoint.height {", "if first > last || last > checkpoint.height {"),
+    ("audit: range above the checkpoint accepted", A, "if first > last || first < meta.birthday || last > checkpoint.height {", "if first > last || first < meta.birthday {"),
+    ("audit: reference batch not checked", A, "check_batch(&reference_id, &batch.blocks, next, chunk_last)?;", "let _ = check_batch;"),
+    ("audit: reference chunks not linked", A, "if first_block.block.prev_hash != prev.hash {", "if false {"),
+    ("audit: duplicates only checked per block", A, "                &mut seen,\n            )?;", "                {\n                    seen.clear();\n                    &mut seen\n                },\n            )?;"),
+    ("audit: detection of another block accepted", A, "if let Some(d) = stored.iter().find(|d| d.block != stored_block) {", "if let Some(d) = stored.iter().find(|_| false) {"),
+    ("audit: stored block hash not compared", A, "let same_block = stored_block.hash == r_block.block.hash;", "let same_block = true;"),
+    ("audit: value differences ignored", A, "} else if s.value_sats != r.value_sats || s.label != r.label {", "} else if s.label != r.label {"),
+    ("audit: label differences ignored", A, "} else if s.value_sats != r.value_sats || s.label != r.label {", "} else if s.value_sats != r.value_sats {"),
+    ("audit: identical despite different block hashes", A, "report.identical = report.differences.is_empty() && report.block_hash_mismatches.is_empty();", "report.identical = report.differences.is_empty();"),
+    ("audit: identical despite differences", A, "report.identical = report.differences.is_empty() && report.block_hash_mismatches.is_empty();", "report.identical = report.block_hash_mismatches.is_empty();"),
     ("sync: zero chunk size accepted", S, "if options.chunk_size == 0 {", "if false {"),
-    ("sync: binding chain unchecked", S, "if meta.chain != source.chain() {", "if false {"),
+    ("sync: binding chain unchecked", S, "if meta.chain != chain {", "if false {"),
     ("sync: binding wallet unchecked", S, "if meta.wallet_id != wallet_id {", "if false {"),
-    ("sync: binding backend unchecked", S, "if meta.backend_id != source.backend_id() {", "if false {"),
+    ("sync: binding backend unchecked", S, "if meta.backend_id != backend_id {", "if false {"),
     ("sync: binding labels unchecked", S, "if meta.labels != labels {", "if false {"),
     ("sync: binding scanner version unchecked", S, "if meta.scanner_version != SCANNER_VERSION {", "if false {"),
     ("sync: reorg never detected", S, "if checkpoint.height <= source_tip.height && on_chain(checkpoint.height, checkpoint)? {", "if true {"),
@@ -227,6 +242,9 @@ muts = [
     ("cli: store network unchecked", M, "if meta.chain.network() != network {", "if false {"),
     ("cli: empty birthday basis accepted", M, "if birthday_basis.trim().is_empty() {", "if false {"),
     ("cli: reorg depth limit not passed on", M, "        .with_max_reorg_depth(args.max_reorg_depth.0);", "        ;"),
+    ("cli: audit succeeds despite differences", M, "    if audit.identical {\n        Ok(())", "    if true {\n        Ok(())"),
+    ("cli: audit first height not passed on", M, "        .with_first_height(args.from)\n", ""),
+    ("cli: audit last height not passed on", M, "        .with_last_height(args.to);", "        ;"),
     ("cli: verify succeeds despite differences", M, "    if report.identical {\n        Ok(())", "    if true {\n        Ok(())"),
     ("cli: doctor succeeds with an unusable backend", M, "    if usable {\n        Ok(())", "    if true {\n        Ok(())"),
 ]

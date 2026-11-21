@@ -5,7 +5,7 @@
 #![allow(clippy::unwrap_used)] // test code: a panic is the failure report
 
 use lab_testkit::{
-    fault_matrix::{self, Alone, ReplayingOracle, Verdict},
+    fault_matrix::{self, Alone, Audited, ReplayingOracle, Verdict},
     fixture_gen::{self, LABEL_USED},
 };
 use silent_sync::{
@@ -57,8 +57,9 @@ fn every_fault_has_the_documented_verdict() {
         // Claims no block can satisfy are refused, whoever they concern.
         ("I17", Refused),
         ("I18", Refused),
-        // A lie told once: the later cross-check gets the honest answer.
-        ("I19", NotDetected),
+        // A lie told once: the later cross-check gets the honest answer, and
+        // only the store that holds the result still shows it.
+        ("I19", ShownOnlyByStoreAudit),
         // Structure of a response.
         ("B01", Refused),
         ("B02", Refused),
@@ -71,12 +72,55 @@ fn every_fault_has_the_documented_verdict() {
 
     // Exactly one fault leaves a wrong result that a later cross-check does
     // not show: the one where the source no longer lies when asked again.
+    // Auditing the store shows it, and no fault escapes all three.
     assert_eq!(
         rows.iter()
-            .filter(|r| r.verdict == NotDetected)
+            .filter(|r| r.verdict == ShownOnlyByStoreAudit)
             .map(|r| r.id)
             .collect::<Vec<_>>(),
         vec!["I19"]
+    );
+    assert!(rows.iter().all(|r| r.verdict != NotDetected));
+
+    // What an audit of the stored result does, for every fault that let a
+    // scan succeed.
+    let audited = |id: &str| {
+        rows.iter()
+            .find(|r| r.id == id)
+            .unwrap()
+            .store_audit
+            .clone()
+    };
+    let differs = |kind: &str| Audited::Differences {
+        explanations: vec![kind.to_string()],
+    };
+    for row in &rows {
+        assert_eq!(
+            row.store_audit == Audited::NothingStored,
+            matches!(row.alone, Alone::Refused { .. }),
+            "{}: a store is audited exactly when the scan alone succeeded",
+            row.id
+        );
+    }
+    // Omissions, whatever caused them, are outputs the store lacks.
+    for id in ["F05", "I01", "I02", "I03", "I05", "I19"] {
+        assert_eq!(audited(id), differs("store_omitted_output"), "{id}");
+    }
+    assert_eq!(audited("I04"), differs("details_differ"));
+    assert_eq!(audited("I06"), differs("reference_transaction_missing"));
+    // Faults without effect leave nothing to find.
+    assert_eq!(audited("I09"), Audited::Identical);
+    assert_eq!(audited("I10"), Audited::Identical);
+    // What an audit cannot do. Hidden newest blocks: the store is correct as
+    // far as it goes, and an audit says nothing about heights it does not
+    // hold. Another chain that is longer than the reference: the audit
+    // cannot be carried out, which is an error and not "identical".
+    assert_eq!(audited("F06"), Audited::Identical);
+    assert_eq!(
+        audited("F12"),
+        Audited::Refused {
+            class: "range unavailable"
+        }
     );
     // The precise shape of the silent failures.
     let alone = |id: &str| rows.iter().find(|r| r.id == id).unwrap().alone.clone();

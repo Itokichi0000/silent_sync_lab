@@ -297,42 +297,56 @@ pub fn new_store_meta(
     }
 }
 
-fn check_binding(
+/// One part of a store's binding that differs from what a call was given.
+pub(crate) struct BindingDifference {
+    pub field: &'static str,
+    pub stored: String,
+    pub given: String,
+    pub hint: &'static str,
+}
+
+/// Compares a store's binding with what a call was given. `backend_id` is
+/// `None` when the call may legitimately use another backend than the one
+/// the store was filled from (auditing a store against a reference).
+pub(crate) fn binding_difference(
     meta: &StoreMeta,
-    source: &dyn ScanSource,
+    chain: ChainIdentity,
+    backend_id: Option<&str>,
     scanner: &ReceiveScanner,
     wallet_id: &str,
-) -> Result<(), SyncError> {
-    let mismatch = |field, stored: String, given: String, hint| {
-        Err(SyncError::BindingMismatch {
+) -> Option<BindingDifference> {
+    let differs = |field, stored: String, given: String, hint| {
+        Some(BindingDifference {
             field,
             stored,
             given,
             hint,
         })
     };
-    if meta.chain != source.chain() {
-        return mismatch(
+    if meta.chain != chain {
+        return differs(
             "chain",
             meta.chain.network().to_string(),
-            source.chain().network().to_string(),
+            chain.network().to_string(),
             "",
         );
     }
     if meta.wallet_id != wallet_id {
-        return mismatch("wallet", meta.wallet_id.clone(), wallet_id.to_string(), "");
+        return differs("wallet", meta.wallet_id.clone(), wallet_id.to_string(), "");
     }
-    if meta.backend_id != source.backend_id() {
-        return mismatch(
-            "backend",
-            meta.backend_id.clone(),
-            source.backend_id().to_string(),
-            "; use a separate store per backend",
-        );
+    if let Some(backend_id) = backend_id {
+        if meta.backend_id != backend_id {
+            return differs(
+                "backend",
+                meta.backend_id.clone(),
+                backend_id.to_string(),
+                "; use a separate store per backend",
+            );
+        }
     }
     let labels: Vec<u32> = scanner.labels().collect();
     if meta.labels != labels {
-        return mismatch(
+        return differs(
             "label set",
             format!("{:?}", meta.labels),
             format!("{labels:?}"),
@@ -341,14 +355,37 @@ fn check_binding(
         );
     }
     if meta.scanner_version != SCANNER_VERSION {
-        return mismatch(
+        return differs(
             "scanner version",
             meta.scanner_version.clone(),
             SCANNER_VERSION.to_string(),
             "; a new store (full rescan) is required",
         );
     }
-    Ok(())
+    None
+}
+
+fn check_binding(
+    meta: &StoreMeta,
+    source: &dyn ScanSource,
+    scanner: &ReceiveScanner,
+    wallet_id: &str,
+) -> Result<(), SyncError> {
+    match binding_difference(
+        meta,
+        source.chain(),
+        Some(source.backend_id()),
+        scanner,
+        wallet_id,
+    ) {
+        Some(d) => Err(SyncError::BindingMismatch {
+            field: d.field,
+            stored: d.stored,
+            given: d.given,
+            hint: d.hint,
+        }),
+        None => Ok(()),
+    }
 }
 
 /// Rolls the store back to the fork point if its checkpoint is not on the

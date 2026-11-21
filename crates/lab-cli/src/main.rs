@@ -10,6 +10,7 @@ mod lab_keys;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use silent_sync::{
+    audit::{audit_store, AuditOptions, StoreAuditReport},
     engine::{scan_range, ScanReport},
     models::{DetectedOutput, EvidenceKind},
     network::{ChainIdentity, Network},
@@ -97,6 +98,9 @@ enum Command {
     },
     /// Scan the same range through two backends and explain every difference.
     Verify(VerifyArgs),
+    /// Scan the stored range again through a reference backend and compare
+    /// the result with what the lab store holds. The store is only read.
+    Audit(AuditArgs),
     /// Inspect what was detected.
     Received {
         #[command(subcommand)]
@@ -286,6 +290,25 @@ struct VerifyArgs {
     json: bool,
 }
 
+#[derive(clap::Args)]
+struct AuditArgs {
+    #[command(flatten)]
+    db: DbArg,
+    /// The reference to compare the store with. Use your own node
+    /// (`--backend core`): an audit is worth as much as its reference.
+    #[command(flatten)]
+    reference: SourceArgs,
+    /// First height to audit [default: the store's birthday].
+    #[arg(long)]
+    from: Option<u32>,
+    /// Last height to audit [default: the stored checkpoint].
+    #[arg(long)]
+    to: Option<u32>,
+    /// Print the report as JSON on stdout.
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ReferenceBackend {
     Fixture,
@@ -427,6 +450,7 @@ fn run(cli: Cli) -> Result<(), Failure> {
             oracle_url,
         } => doctor(network, core_rest_url.as_deref(), oracle_url.as_deref()),
         Command::Verify(args) => verify(network, args),
+        Command::Audit(args) => audit_command(network, args),
         Command::Address {
             action: AddressAction::Show { label },
         } => address_show(network, label),
@@ -790,6 +814,117 @@ fn render_verification(report: &VerificationReport) -> String {
          it does not prove either is complete."
             .to_string(),
     );
+    out
+}
+
+fn audit_command(network: Network, args: AuditArgs) -> Result<(), Failure> {
+    let (store, meta) = open_store(network, &args.db.db)?;
+    let reference = open_source(network, &args.reference)?;
+    let keys = lab_keys::lab_receiver_keys().map_err(Failure::error)?;
+    // The label set is part of the store's binding, not a per-run choice.
+    let extra: Vec<u32> = meta.labels.iter().copied().filter(|&m| m != 0).collect();
+    let scanner = ReceiveScanner::new(&keys, &extra).map_err(fail)?;
+    eprintln!(
+        "auditing {} (filled from `{}`) against `{}` ({network})",
+        args.db.db.display(),
+        meta.backend_id,
+        reference.backend_id()
+    );
+    let options = AuditOptions::default()
+        .with_first_height(args.from)
+        .with_last_height(args.to);
+    let audit = audit_store(
+        reference.as_ref(),
+        &scanner,
+        &keys.wallet_id(),
+        &store,
+        &options,
+    )
+    .map_err(|e| Failure::error(format!("{e}\naudit aborted: no result")))?;
+
+    if args.json {
+        emit_json(&audit)?;
+    } else {
+        emit(&render_audit(&audit))?;
+    }
+    if audit.identical {
+        Ok(())
+    } else {
+        Err(Failure {
+            code: EXIT_DIFFERENCES,
+            message: format!(
+                "the store differs from the reference: {} difference(s) ({} only in the store, \
+                 {} only in the reference, {} unexplained), {} block(s) with different hashes",
+                audit.differences.len(),
+                audit.stored_only,
+                audit.reference_only,
+                audit.unexplained,
+                audit.block_hash_mismatches.len()
+            ),
+        })
+    }
+}
+
+fn render_audit(report: &StoreAuditReport) -> String {
+    let mut out = String::new();
+    let mut line = |text: String| {
+        let _ = writeln!(out, "{text}");
+    };
+    line(format!("store filled from    : {}", report.store_backend));
+    line(format!(
+        "reference            : {} [{}]",
+        report.reference_backend,
+        evidence_text(report.reference_evidence)
+    ));
+    line(format!("network              : {}", report.chain.network()));
+    line(format!(
+        "range                : {}..={}",
+        report.first_height, report.last_height
+    ));
+    line(format!(
+        "labels scanned       : {:?}",
+        report.labels_scanned
+    ));
+    line(format!("blocks compared      : {}", report.blocks_compared));
+    line(format!("agreed outputs       : {}", report.agreed));
+    line(format!("only in the store    : {}", report.stored_only));
+    line(format!("only in reference    : {}", report.reference_only));
+    line(format!("unexplained          : {}", report.unexplained));
+    if !report.block_hash_mismatches.is_empty() {
+        line(format!(
+            "block hash mismatches: heights {:?} (the store is on another chain there: sync it, \
+             then audit again)",
+            report.block_hash_mismatches
+        ));
+    }
+    for d in &report.differences {
+        let explanation = serde_json::to_string(&d.explanation).unwrap_or_default();
+        line(format!(
+            "  height {:>4}  {}:{}  {}",
+            d.height, d.txid, d.vout, explanation
+        ));
+    }
+    line(format!(
+        "verdict              : {}",
+        if report.identical {
+            "identical"
+        } else {
+            "DIFFERENT"
+        }
+    ));
+    line(
+        "note: agreement shows that the store holds what the reference shows for this receiver \
+         in this range. It says nothing about other heights, and it is worth as much as the \
+         reference."
+            .to_string(),
+    );
+    if report.reference_evidence != EvidenceKind::FullBlockWithPrevouts {
+        line(
+            "note: this reference did not supply full blocks; its answers are an index's \
+             claims. Audit against your own node for a result that rests on the chain itself."
+                .to_string(),
+        );
+    }
     out
 }
 

@@ -7,6 +7,7 @@ use lab_testkit::{
     test_source::Tamper,
 };
 use silent_sync::{
+    audit::{audit_store, AuditError, AuditOptions},
     engine::{scan_range, ScanError, SCAN_CHUNK_BLOCKS},
     network::{ChainIdentity, Network},
     protocol::ReceiveScanner,
@@ -382,6 +383,115 @@ fn cross_check_applies_the_range_rules_to_both_sides() {
         .0
     };
     let report = cross_check(&quiet(3), &quiet(4), &scanner(), regtest(), 1, 20).unwrap();
+    assert!(report.differences.is_empty());
+    assert_eq!(report.agreed, 0);
+    assert!(!report.block_hash_mismatches.is_empty());
+    assert!(!report.identical);
+}
+
+/// `audit_store` across chunk borders: the reference is held to the rules of
+/// a plain scan of the range, and blocks of another chain are never
+/// "identical".
+#[test]
+fn an_audit_across_chunk_borders_applies_the_range_rules() {
+    let wallet_id = fixture_gen::lab_receiver_keys().wallet_id();
+    let synced = |source: &FixtureSource| {
+        let mut store = MemoryStore::new();
+        store
+            .initialize(&new_store_meta(source, &scanner(), &wallet_id, 1, "test"))
+            .unwrap();
+        let report = sync(
+            source,
+            &scanner(),
+            &wallet_id,
+            &mut store,
+            &SyncOptions::default(),
+        )
+        .unwrap();
+        assert!(report.caught_up);
+        store
+    };
+    let audit = |reference: &dyn ScanSource, store: &MemoryStore| {
+        audit_store(
+            reference,
+            &scanner(),
+            &wallet_id,
+            store,
+            &AuditOptions::default(),
+        )
+    };
+
+    let (source, expected) = long_chain(&LongChain::standard(BLOCKS));
+    let store = synced(&source);
+    let report = audit(&source, &store).unwrap();
+    assert!(report.identical, "{:?}", report.differences);
+    assert_eq!(report.blocks_compared, u64::from(BLOCKS));
+    assert_eq!(report.agreed, expected.len() as u64);
+    assert!(report.agreed > 0);
+
+    // A reference whose second chunk comes from another chain.
+    let other = long_chain(&LongChain {
+        payment_every: 7,
+        ..LongChain::standard(BLOCKS)
+    })
+    .0;
+    let splice = Tamper::new(long_chain(&LongChain::standard(BLOCKS)).0, move |batch| {
+        let (Some(first), Some(last)) = (batch.blocks.first(), batch.blocks.last()) else {
+            return;
+        };
+        if first.block.height > SCAN_CHUNK_BLOCKS {
+            *batch = other
+                .fetch_range(first.block.height, last.block.height)
+                .unwrap();
+        }
+    });
+    match audit(&splice, &store) {
+        Err(AuditError::Scan(ScanError::InconsistentBatch { reason, .. })) => assert!(
+            reason.contains("block 101 does not link to block 100"),
+            "{reason}"
+        ),
+        other => panic!("{other:?}"),
+    }
+
+    // An index that lists one transaction again in a later block.
+    let replaying = Tamper::new(
+        LocalTweakIndex::new(
+            long_chain(&LongChain::standard(BLOCKS)).0,
+            IndexPolicy::Bip352,
+        ),
+        |batch| {
+            let entry = batch.blocks.iter().find_map(|b| match &b.evidence {
+                silent_sync::source::Evidence::TweakIndex(txs) if b.block.height == 3 => {
+                    txs.first().cloned()
+                }
+                _ => None,
+            });
+            for block in &mut batch.blocks {
+                if let (7, silent_sync::source::Evidence::TweakIndex(txs), Some(entry)) =
+                    (block.block.height, &mut block.evidence, &entry)
+                {
+                    txs.push(entry.clone());
+                }
+            }
+        },
+    );
+    assert!(matches!(
+        audit(&replaying, &store),
+        Err(AuditError::Scan(ScanError::InconsistentBatch { reason, .. }))
+            if reason.contains("appears more than once")
+    ));
+
+    // A store and a reference on different chains, neither with a payment
+    // for this receiver: no output to disagree about, and still not identical.
+    let quiet = |txs_per_block| {
+        long_chain(&LongChain {
+            blocks: 20,
+            txs_per_block,
+            payment_every: 1_000,
+        })
+        .0
+    };
+    let report = audit(&quiet(4), &synced(&quiet(3))).unwrap();
     assert!(report.differences.is_empty());
     assert_eq!(report.agreed, 0);
     assert!(!report.block_hash_mismatches.is_empty());

@@ -10,8 +10,9 @@
 //! ## What it does and does not do
 //!
 //! * **Does**: scan block ranges ([`scan_range`]), keep a resumable,
-//!   reorg-aware store up to date ([`sync()`]), and compare two data sources
-//!   ([`cross_check`]).
+//!   reorg-aware store up to date ([`sync()`]), compare two data sources
+//!   ([`cross_check`]), and compare what a store holds with a fresh scan
+//!   through a reference source ([`audit_store`]).
 //! * **Does not**: send, sign, track spent outputs or balances, or store
 //!   keys. A detected output is not a balance.
 //! * **Mainnet is not representable**: [`Network`] has no mainnet variant,
@@ -40,6 +41,12 @@
 //!   position and amount were **not** checked against the block: such a
 //!   server can omit a payment, alter one, or invent one, and nothing here
 //!   can tell. Do not treat these detections as confirmed payments.
+//!
+//! A store filled from an index can be checked afterwards: [`audit_store`]
+//! scans the stored range again through a reference — your own node — and
+//! reports every output the store lacks, has in addition, or holds with
+//! another amount or label. The stored detections keep the evidence kind
+//! they were found with; an audit reports, it does not upgrade them.
 //!
 //! ## Example
 //!
@@ -119,6 +126,7 @@
 //! `#[non_exhaustive]`, so new fields and variants are not breaking changes.
 #![warn(missing_docs)]
 
+pub mod audit;
 pub mod engine;
 pub mod models;
 pub mod network;
@@ -132,6 +140,7 @@ pub mod verify;
 /// so downstream crates cannot accidentally mix incompatible versions.
 pub use bdk_sp::bitcoin;
 
+pub use audit::{audit_store, AuditError, AuditOptions, StoreAuditReport};
 pub use engine::{scan_range, ScanError, ScanReport};
 pub use models::{BlockRef, DetectedOutput, EvidenceKind, MatchProvenance};
 pub use network::{ChainIdentity, Network, NetworkError};

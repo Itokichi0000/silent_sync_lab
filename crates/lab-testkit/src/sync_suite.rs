@@ -8,19 +8,25 @@
 
 use crate::{
     fixture_gen::{self, FORK_HEIGHT, LABEL_NOT_BACKED_UP, LABEL_USED},
-    test_source::TestSource,
+    test_source::{Tamper, TestSource},
 };
 use silent_sync::{
+    audit::{audit_store, AuditError, AuditOptions, StoreAuditReport},
     bitcoin::{hashes::Hash as _, OutPoint, Txid},
     engine::{scan_range, ScanError},
-    models::{BlockRef, DetectedOutput},
+    models::{BlockRef, DetectedOutput, EvidenceKind},
     network::{ChainIdentity, Network},
-    protocol::ReceiveScanner,
-    source::{ScanSource, SourceError},
-    store::{StoreError, SyncStore, SCANNER_VERSION},
+    protocol::{ReceiveScanner, TxScanOutcome},
+    source::{
+        fixture::FixtureSource,
+        local_index::{IndexPolicy, LocalTweakIndex},
+        Evidence, ScanBatch, ScanSource, SourceError,
+    },
+    store::{StoreError, StoreMeta, SyncStore, SCANNER_VERSION},
     sync::{
         new_store_meta, sync, sync_with_progress, StopReason, SyncError, SyncOptions, SyncReport,
     },
+    verify::{Difference, Explanation, Side},
 };
 
 pub type StoreFactory<'a> = &'a dyn Fn() -> Box<dyn SyncStore>;
@@ -1167,6 +1173,514 @@ pub fn block_refs(from: u32, to: u32) -> Vec<BlockRef> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// audit_store: what a store holds, compared with a reference scan
+// ---------------------------------------------------------------------------
+
+fn audit(
+    reference: &dyn ScanSource,
+    store: &dyn SyncStore,
+    options: &AuditOptions,
+) -> Result<StoreAuditReport, AuditError> {
+    audit_store(reference, &scanner(), &wallet_id(), store, options)
+}
+
+/// A store holding the main chain's blocks with `edit` applied to what an
+/// honest scan detects: the store of someone whose source lied, or whose
+/// file was altered.
+fn store_holding(
+    new_store: StoreFactory<'_>,
+    source: &TestSource,
+    edit: &dyn Fn(&mut Vec<DetectedOutput>),
+) -> Box<dyn SyncStore> {
+    let mut store = new_store();
+    init(store.as_mut(), source, 1);
+    let blocks = source.main_chain().block_refs(1, MAIN_TIP).expect("refs");
+    let mut detections = reference(source.main_chain(), 1, MAIN_TIP);
+    edit(&mut detections);
+    store.append(&blocks, &detections).expect("append");
+    store
+}
+
+/// Read-only view of a store that misreports what it holds: stands for a
+/// store whose own consistency rules were bypassed.
+struct Misreporting<'a> {
+    inner: &'a dyn SyncStore,
+    detections_claim_another_block: bool,
+    missing_block: Option<u32>,
+}
+
+impl SyncStore for Misreporting<'_> {
+    fn meta(&self) -> Result<Option<StoreMeta>, StoreError> {
+        self.inner.meta()
+    }
+    fn initialize(&mut self, _: &StoreMeta) -> Result<(), StoreError> {
+        Err(StoreError::Backend("read-only view".to_string()))
+    }
+    fn checkpoint(&self) -> Result<Option<BlockRef>, StoreError> {
+        self.inner.checkpoint()
+    }
+    fn block_at(&self, height: u32) -> Result<Option<BlockRef>, StoreError> {
+        if self.missing_block == Some(height) {
+            return Ok(None);
+        }
+        self.inner.block_at(height)
+    }
+    fn append(&mut self, _: &[BlockRef], _: &[DetectedOutput]) -> Result<(), StoreError> {
+        Err(StoreError::Backend("read-only view".to_string()))
+    }
+    fn rollback_to(&mut self, _: u32) -> Result<Vec<DetectedOutput>, StoreError> {
+        Err(StoreError::Backend("read-only view".to_string()))
+    }
+    fn detections(&self) -> Result<Vec<DetectedOutput>, StoreError> {
+        let mut all = self.inner.detections()?;
+        if self.detections_claim_another_block {
+            for d in &mut all {
+                d.block.hash = d.block.prev_hash;
+            }
+        }
+        Ok(all)
+    }
+    fn block_count(&self) -> Result<u64, StoreError> {
+        self.inner.block_count()
+    }
+}
+
+/// A synced store equals a fresh scan through a reference — whichever
+/// backend it was filled from, and whichever kind of reference is used.
+pub fn audit_of_an_honest_store_finds_no_difference(new_store: StoreFactory<'_>) {
+    let source = TestSource::new();
+    let mut store = new_store();
+    init(store.as_mut(), &source, 1);
+    run(&source, store.as_mut(), &options(3));
+    let before = (
+        store.checkpoint().expect("c"),
+        store.detections().expect("d"),
+        store.block_count().expect("n"),
+    );
+
+    let report = audit(&source, store.as_ref(), &AuditOptions::default()).expect("audit");
+    assert!(report.identical);
+    assert_eq!(
+        (
+            report.first_height,
+            report.last_height,
+            report.blocks_compared
+        ),
+        (1, MAIN_TIP, u64::from(MAIN_TIP))
+    );
+    assert_eq!(
+        (report.agreed, report.stored_only, report.reference_only),
+        (7, 0, 0)
+    );
+    assert!(report.differences.is_empty() && report.block_hash_mismatches.is_empty());
+    assert_eq!(report.unexplained, 0);
+    assert_eq!(report.store_backend, "fixture");
+    assert_eq!(report.reference_backend, "fixture");
+    assert_eq!(
+        report.reference_evidence,
+        EvidenceKind::FullBlockWithPrevouts
+    );
+    assert_eq!(report.labels_scanned, vec![0, LABEL_USED]);
+    assert_eq!(report.chain, ChainIdentity::for_network(Network::Regtest));
+
+    // Part of the stored range.
+    let part = AuditOptions::default()
+        .with_first_height(Some(3))
+        .with_last_height(Some(5));
+    let report = audit(&source, store.as_ref(), &part).expect("audit");
+    assert!(report.identical);
+    assert_eq!(
+        (
+            report.first_height,
+            report.last_height,
+            report.blocks_compared
+        ),
+        (3, 5, 3)
+    );
+    assert_eq!(
+        report.agreed,
+        reference(source.main_chain(), 3, 5).len() as u64
+    );
+    assert!(report.agreed > 0 && report.agreed < 7);
+
+    // Another backend as the reference: a tweak index over the same chain.
+    let index = LocalTweakIndex::new(
+        FixtureSource::from_file(fixture_gen::generate()).expect("fixture"),
+        IndexPolicy::Bip352,
+    );
+    let report = audit(&index, store.as_ref(), &AuditOptions::default()).expect("audit");
+    assert!(report.identical);
+    assert_eq!(report.agreed, 7);
+    assert_ne!(report.reference_backend, report.store_backend);
+    assert_eq!(report.reference_evidence, EvidenceKind::TweakIndex);
+
+    // A store filled from an index, audited against full blocks: the case
+    // the audit exists for.
+    let mut from_index = new_store();
+    init(from_index.as_mut(), &index, 1);
+    run(&index, from_index.as_mut(), &SyncOptions::default());
+    let report = audit(&source, from_index.as_ref(), &AuditOptions::default()).expect("audit");
+    assert!(report.identical);
+    assert_eq!(report.agreed, 7);
+    assert_eq!(report.store_backend, index.backend_id());
+    assert_eq!(report.reference_backend, "fixture");
+
+    // An audit only reads.
+    assert_eq!(
+        (
+            store.checkpoint().expect("c"),
+            store.detections().expect("d"),
+            store.block_count().expect("n"),
+        ),
+        before
+    );
+}
+
+/// Whatever the store lacks, has in addition, or holds differently is
+/// reported output by output, with the cause the reference blocks allow.
+pub fn audit_reports_what_a_store_lacks_adds_or_alters(new_store: StoreFactory<'_>) {
+    let source = TestSource::new();
+    let honest = reference(source.main_chain(), 1, MAIN_TIP);
+    assert_eq!(honest.len(), 7);
+    let find = |report: &StoreAuditReport, txid: Txid, vout: u32| -> Difference {
+        let found: Vec<&Difference> = report
+            .differences
+            .iter()
+            .filter(|d| d.txid == txid && d.vout == vout)
+            .collect();
+        assert_eq!(found.len(), 1, "{txid}:{vout} in {:?}", report.differences);
+        found[0].clone()
+    };
+
+    // A payment the store's source never reported.
+    let lacking = store_holding(new_store, &source, &|d| {
+        d.remove(2);
+    });
+    let report = audit(&source, lacking.as_ref(), &AuditOptions::default()).expect("audit");
+    assert!(!report.identical);
+    assert_eq!(
+        (report.agreed, report.stored_only, report.reference_only),
+        (6, 0, 1)
+    );
+    assert_eq!(report.unexplained, 0);
+    assert!(report.block_hash_mismatches.is_empty());
+    let missing = &honest[2];
+    let d = find(&report, missing.txid, missing.vout);
+    assert_eq!(d.height, missing.block.height);
+    assert_eq!(d.only_in, Some(Side::Reference));
+    assert_eq!(d.candidate, None);
+    assert_eq!(d.reference.as_ref(), Some(missing));
+    assert_eq!(d.explanation, Explanation::StoreOmittedOutput);
+
+    // The same payment hidden from an audit that does not cover its block.
+    let elsewhere = AuditOptions::default().with_last_height(Some(missing.block.height - 1));
+    assert!(
+        audit(&source, lacking.as_ref(), &elsewhere)
+            .expect("audit")
+            .identical,
+        "an audit says nothing about heights outside its range"
+    );
+
+    // An amount and a label that are not what the chain says.
+    let altered = store_holding(new_store, &source, &|d| {
+        d[0].value_sats += 1;
+        d[4].label = Some(LABEL_NOT_BACKED_UP);
+    });
+    let report = audit(&source, altered.as_ref(), &AuditOptions::default()).expect("audit");
+    assert!(!report.identical);
+    assert_eq!(
+        (report.agreed, report.stored_only, report.reference_only),
+        (5, 0, 0)
+    );
+    for i in [0, 4] {
+        let d = find(&report, honest[i].txid, honest[i].vout);
+        assert_eq!(d.only_in, None);
+        assert_eq!(d.explanation, Explanation::DetailsDiffer);
+        assert_eq!(d.reference.as_ref(), Some(&honest[i]));
+        assert_ne!(d.candidate.as_ref(), Some(&honest[i]));
+    }
+
+    // Outputs the reference does not detect, one for each cause it can name.
+    let full = source
+        .main_chain()
+        .fetch_range(1, MAIN_TIP)
+        .expect("blocks");
+    let not_eligible = full
+        .blocks
+        .iter()
+        .find_map(|b| {
+            let Evidence::FullBlock(txs) = &b.evidence else {
+                return None;
+            };
+            txs.iter().find_map(
+                |t| match scanner().scan_tx(&t.tx, &t.prevouts).expect("scan") {
+                    TxScanOutcome::NotEligible(_) => Some((b.block, t.tx.compute_txid())),
+                    _ => None,
+                },
+            )
+        })
+        .expect("the fixture has a transaction BIP352 says not to scan");
+    let invented_txid = Txid::from_byte_array([7; 32]);
+    let moved = honest[1].clone();
+    let added = store_holding(new_store, &source, &|d| {
+        // (1) a transaction that is not in the block at all;
+        let mut invented = d[0].clone();
+        invented.txid = invented_txid;
+        // (2) a transaction BIP352 says must not be scanned;
+        let mut ineligible = d[0].clone();
+        ineligible.block = not_eligible.0;
+        ineligible.txid = not_eligible.1;
+        ineligible.vout = 0;
+        // (3) a paying transaction, but an output that does not match.
+        d[1].vout += 50;
+        d.push(invented);
+        d.push(ineligible);
+    });
+    let report = audit(&source, added.as_ref(), &AuditOptions::default()).expect("audit");
+    assert!(!report.identical);
+    assert_eq!(
+        (report.agreed, report.stored_only, report.reference_only),
+        (6, 3, 1)
+    );
+    assert_eq!(report.unexplained, 0);
+    let d = find(&report, invented_txid, honest[0].vout);
+    assert_eq!(d.only_in, Some(Side::Candidate));
+    assert_eq!(d.reference, None);
+    assert_eq!(d.explanation, Explanation::ReferenceTransactionMissing);
+    let d = find(&report, not_eligible.1, 0);
+    assert_eq!(d.height, not_eligible.0.height);
+    assert!(
+        matches!(d.explanation, Explanation::ReferenceNotEligible { .. }),
+        "{:?}",
+        d.explanation
+    );
+    let d = find(&report, moved.txid, moved.vout + 50);
+    assert_eq!(d.only_in, Some(Side::Candidate));
+    assert_eq!(d.explanation, Explanation::ReferenceScannedNoMatch);
+    let d = find(&report, moved.txid, moved.vout);
+    assert_eq!(d.explanation, Explanation::StoreOmittedOutput);
+    let heights: Vec<u32> = report.differences.iter().map(|d| d.height).collect();
+    let mut ascending = heights.clone();
+    ascending.sort_unstable();
+    assert_eq!(heights, ascending, "differences are ordered by height");
+
+    // Against a reference that cannot show transactions, a stored-only
+    // output is reported, but not explained.
+    let index = LocalTweakIndex::new(
+        FixtureSource::from_file(fixture_gen::generate()).expect("fixture"),
+        IndexPolicy::Bip352,
+    );
+    let report = audit(&index, added.as_ref(), &AuditOptions::default()).expect("audit");
+    assert_eq!((report.stored_only, report.unexplained), (3, 3));
+}
+
+/// A store that is on another chain than the reference is told where; its
+/// detections there are not reported as agreeing.
+pub fn audit_names_the_blocks_of_another_chain(new_store: StoreFactory<'_>) {
+    let source = TestSource::new();
+    let mut store = new_store();
+    init(store.as_mut(), &source, 1);
+    run(&source, store.as_mut(), &SyncOptions::default());
+    source.on_fork.set(true);
+
+    let report = audit(&source, store.as_ref(), &AuditOptions::default()).expect("audit");
+    assert!(!report.identical);
+    assert_eq!(
+        report.block_hash_mismatches,
+        (FORK_HEIGHT + 1..=MAIN_TIP).collect::<Vec<u32>>()
+    );
+    assert_eq!(report.blocks_compared, u64::from(MAIN_TIP));
+    let below_fork = reference(source.main_chain(), 1, FORK_HEIGHT).len() as u64;
+    assert_eq!(report.agreed, below_fork);
+    assert!(!report.differences.is_empty());
+    assert!(report
+        .differences
+        .iter()
+        .all(|d| d.height > FORK_HEIGHT && d.explanation == Explanation::BlockHashDiffers));
+    // Every output either side has above the fork is listed.
+    let main_above = reference(source.main_chain(), FORK_HEIGHT + 1, MAIN_TIP);
+    let fork_above = reference(source.fork_chain(), FORK_HEIGHT + 1, MAIN_TIP);
+    let mut expected: Vec<(Txid, u32)> = main_above
+        .iter()
+        .chain(&fork_above)
+        .map(|d| (d.txid, d.vout))
+        .collect();
+    expected.sort();
+    expected.dedup();
+    let mut listed: Vec<(Txid, u32)> = report
+        .differences
+        .iter()
+        .map(|d| (d.txid, d.vout))
+        .collect();
+    listed.sort();
+    assert_eq!(listed, expected);
+
+    // Below the fork the two chains are the same chain.
+    let shared = AuditOptions::default().with_last_height(Some(FORK_HEIGHT));
+    assert!(
+        audit(&source, store.as_ref(), &shared)
+            .expect("audit")
+            .identical
+    );
+}
+
+/// An audit that cannot be carried out is an error, never "no difference".
+pub fn audit_refuses_what_it_cannot_carry_out(new_store: StoreFactory<'_>) {
+    let source = TestSource::new();
+    let all = AuditOptions::default();
+
+    // No binding, and nothing scanned yet.
+    let mut store = new_store();
+    assert_eq!(
+        audit(&source, store.as_ref(), &all),
+        Err(AuditError::Store(StoreError::NotInitialized))
+    );
+    init(store.as_mut(), &source, 3);
+    assert_eq!(
+        audit(&source, store.as_ref(), &all),
+        Err(AuditError::NothingStored)
+    );
+    run(&source, store.as_mut(), &SyncOptions::default());
+    assert!(
+        audit(&source, store.as_ref(), &all)
+            .expect("audit")
+            .identical
+    );
+
+    // Ranges that are empty or reach outside what is stored (3..=8).
+    for (first, last) in [
+        (Some(2), None),
+        (None, Some(MAIN_TIP + 1)),
+        (Some(6), Some(5)),
+        (Some(0), Some(0)),
+    ] {
+        let range = AuditOptions::default()
+            .with_first_height(first)
+            .with_last_height(last);
+        assert_eq!(
+            audit(&source, store.as_ref(), &range),
+            Err(AuditError::RangeOutsideStore {
+                first: first.unwrap_or(3),
+                last: last.unwrap_or(MAIN_TIP),
+                first_stored: 3,
+                last_stored: MAIN_TIP,
+            }),
+            "{first:?}..={last:?}"
+        );
+    }
+    for (first, last) in [(3, 3), (MAIN_TIP, MAIN_TIP), (3, MAIN_TIP)] {
+        let range = AuditOptions::default()
+            .with_first_height(Some(first))
+            .with_last_height(Some(last));
+        let report = audit(&source, store.as_ref(), &range).expect("audit");
+        assert_eq!(report.blocks_compared, u64::from(last - first + 1));
+    }
+
+    // Another receiver, another label set, another chain.
+    let other = fixture_gen::other_receiver_keys();
+    let other_scanner = ReceiveScanner::new(&other, &[LABEL_USED]).expect("scanner");
+    assert!(matches!(
+        audit_store(
+            &source,
+            &other_scanner,
+            &other.wallet_id(),
+            store.as_ref(),
+            &all
+        ),
+        Err(AuditError::BindingMismatch {
+            field: "wallet",
+            ..
+        })
+    ));
+    let more_labels = ReceiveScanner::new(
+        &fixture_gen::lab_receiver_keys(),
+        &[LABEL_USED, LABEL_NOT_BACKED_UP],
+    )
+    .expect("scanner");
+    assert!(matches!(
+        audit_store(&source, &more_labels, &wallet_id(), store.as_ref(), &all),
+        Err(AuditError::BindingMismatch {
+            field: "label set",
+            ..
+        })
+    ));
+    source
+        .chain_override
+        .set(Some(ChainIdentity::for_network(Network::Signet)));
+    assert!(matches!(
+        audit(&source, store.as_ref(), &all),
+        Err(AuditError::BindingMismatch { field: "chain", .. })
+    ));
+    source.chain_override.set(None);
+
+    // A reference that cannot serve the range, or serves it inconsistently.
+    source.visible_tip.set(Some(MAIN_TIP - 1));
+    assert!(matches!(
+        audit(&source, store.as_ref(), &all),
+        Err(AuditError::Scan(ScanError::Source(
+            SourceError::RangeUnavailable { .. }
+        )))
+    ));
+    source.visible_tip.set(None);
+    source.fetches_left.set(Some(0));
+    assert!(matches!(
+        audit(&source, store.as_ref(), &all),
+        Err(AuditError::Scan(ScanError::Source(
+            SourceError::Unavailable(_)
+        )))
+    ));
+    source.fetches_left.set(None);
+    source.drop_last_block.set(true);
+    assert!(matches!(
+        audit(&source, store.as_ref(), &all),
+        Err(AuditError::Scan(ScanError::InconsistentBatch { .. }))
+    ));
+    source.drop_last_block.set(false);
+    // The same transaction listed in two blocks of the range.
+    let replaying = Tamper::new(TestSource::new(), |batch: &mut ScanBatch| {
+        let Some(paying) = batch.blocks.iter().find_map(|b| match &b.evidence {
+            Evidence::FullBlock(txs) => txs.get(1).cloned(),
+            _ => None,
+        }) else {
+            return;
+        };
+        if let Some(Evidence::FullBlock(txs)) = batch.blocks.last_mut().map(|b| &mut b.evidence) {
+            if !txs.contains(&paying) {
+                txs.push(paying);
+            }
+        }
+    });
+    assert!(matches!(
+        audit(&replaying, store.as_ref(), &all),
+        Err(AuditError::Scan(ScanError::InconsistentBatch { .. }))
+    ));
+
+    // A store that misreports itself is an error, not a difference.
+    let claims_other_blocks = Misreporting {
+        inner: store.as_ref(),
+        detections_claim_another_block: true,
+        missing_block: None,
+    };
+    match audit(&source, &claims_other_blocks, &all) {
+        Err(AuditError::Store(StoreError::Invariant(reason))) => {
+            assert!(reason.contains("belongs to block"), "{reason}")
+        }
+        other => panic!("{other:?}"),
+    }
+    let lacks_a_block = Misreporting {
+        inner: store.as_ref(),
+        detections_claim_another_block: false,
+        missing_block: Some(5),
+    };
+    match audit(&source, &lacks_a_block, &all) {
+        Err(AuditError::Store(StoreError::Invariant(reason))) => {
+            assert!(reason.contains("no stored block at height 5"), "{reason}")
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 /// Expands to one `#[test]` per suite case, each run against stores produced
 /// by `$factory` (an expression of type `fn() -> Box<dyn SyncStore>`).
 #[macro_export]
@@ -1191,6 +1705,10 @@ macro_rules! sync_store_suite {
             a_store_only_syncs_what_it_is_bound_to,
             short_batches_are_refused_by_sync,
             stores_reject_inconsistent_appends,
+            audit_of_an_honest_store_finds_no_difference,
+            audit_reports_what_a_store_lacks_adds_or_alters,
+            audit_names_the_blocks_of_another_chain,
+            audit_refuses_what_it_cannot_carry_out,
         );
     };
     (@cases $factory:expr; $($case:ident,)*) => {

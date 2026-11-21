@@ -3,15 +3,18 @@
 //! Every fault is injected into what a backend *receives* — the bytes a fake
 //! Bitcoin Core REST server or a fake BlindBit Oracle answers with, or the
 //! batch a source hands to the engine — and the real adapters and the real
-//! engine are run on it. For each fault two things are observed:
+//! engine are run on it. For each fault three things are observed:
 //!
 //! * **alone**: a scan through the faulty source only;
 //! * **cross-check**: `verify::cross_check` of the faulty source against an
-//!   honest full-block source.
+//!   honest full-block source;
+//! * **store audit**: what the scan alone reported is put into a store — as
+//!   a sync through the faulty source would have — and `audit::audit_store`
+//!   compares that store with an honest full-block source.
 //!
-//! From the two, a verdict is derived: refused (fail-closed), no effect,
-//! silent alone but shown by a cross-check, or not detected by either. The
-//! verdicts are asserted in `crates/silent-sync/tests/fault_matrix.rs` and
+//! From these, a verdict is derived: refused (fail-closed), no effect,
+//! silent alone but shown by a cross-check, shown only by auditing the
+//! store, or not detected by any of them. The verdicts are asserted in `crates/silent-sync/tests/fault_matrix.rs` and
 //! rendered into `docs/FAULT_INJECTION.md`.
 //!
 //! The honest baseline is the basic fixture (8 blocks, 7 outputs for a wallet
@@ -23,6 +26,7 @@ use crate::{
     test_source::Tamper,
 };
 use silent_sync::{
+    audit::{audit_store, AuditError, AuditOptions},
     bitcoin::{
         consensus::encode::{deserialize, serialize},
         Block, ScriptBuf, Witness,
@@ -37,7 +41,9 @@ use silent_sync::{
         local_index::{IndexPolicy, LocalTweakIndex},
         ScanBatch, ScanSource, SourceError,
     },
-    verify::{cross_check, Explanation},
+    store::{MemoryStore, SyncStore},
+    sync::new_store_meta,
+    verify::{cross_check, Difference, Explanation},
 };
 use std::collections::BTreeSet;
 
@@ -95,6 +101,20 @@ pub enum CrossChecked {
     },
 }
 
+/// What an audit of a store holding the faulty source's result, against an
+/// honest full-block source, did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Audited {
+    /// The scan alone failed, so nothing would have been stored.
+    NothingStored,
+    /// The audit could not be carried out.
+    Refused { class: &'static str },
+    /// The store holds exactly what the reference shows for the stored range.
+    Identical,
+    /// Differences were reported; their explanation kinds, deduplicated.
+    Differences { explanations: Vec<String> },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     /// The faulty source alone already fails the scan.
@@ -104,7 +124,12 @@ pub enum Verdict {
     /// Alone, a wrong result is reported as a success; a cross-check against
     /// an honest full-block source reports the difference (or fails).
     SilentAloneShownByCrossCheck,
-    /// A wrong result is reported and the cross-check does not show it.
+    /// A wrong result is reported and a later cross-check does not show it
+    /// (the source answers honestly when asked again); auditing the store
+    /// that holds the result does.
+    ShownOnlyByStoreAudit,
+    /// A wrong result is reported and neither a cross-check nor an audit of
+    /// the store shows it.
     NotDetected,
 }
 
@@ -114,7 +139,10 @@ impl Verdict {
             Verdict::Refused => "refused (fail-closed)",
             Verdict::NoEffect => "no effect",
             Verdict::SilentAloneShownByCrossCheck => "NOT detected alone; shown by a cross-check",
-            Verdict::NotDetected => "NOT detected (neither alone nor by a later cross-check)",
+            Verdict::ShownOnlyByStoreAudit => {
+                "NOT detected alone or by a later cross-check; shown by an audit of the store"
+            }
+            Verdict::NotDetected => "NOT detected (alone, by a cross-check or by a store audit)",
         }
     }
 }
@@ -128,8 +156,11 @@ pub struct Row {
     pub fault: &'static str,
     pub alone: Alone,
     pub cross_check: CrossChecked,
+    pub store_audit: Audited,
     pub verdict: Verdict,
 }
+
+type Observed = (Alone, CrossChecked, Audited);
 
 fn regtest() -> ChainIdentity {
     ChainIdentity::for_network(Network::Regtest)
@@ -179,17 +210,87 @@ fn honest() -> Vec<(Key, (u64, Option<u32>))> {
         .collect()
 }
 
-/// Runs the two observations on a faulty source. `opened` is the result of
+/// The explanation kinds of a list of differences, deduplicated.
+fn explanation_kinds(differences: &[Difference], block_hash_mismatches: &[u32]) -> Vec<String> {
+    let kinds: BTreeSet<String> = differences
+        .iter()
+        .map(|d| match &d.explanation {
+            Explanation::Unexplained { .. } => "unexplained".to_string(),
+            other => serde_json::to_value(other)
+                .ok()
+                .and_then(|v| v["kind"].as_str().map(str::to_string))
+                .unwrap_or_default(),
+        })
+        .collect();
+    let mut explanations: Vec<String> = kinds.into_iter().collect();
+    if !block_hash_mismatches.is_empty() && explanations.is_empty() {
+        explanations.push("block_hash_differs".to_string());
+    }
+    explanations
+}
+
+/// Puts what a scan through the faulty source reported into a store, as a
+/// sync through that source would have, and audits the store against an
+/// honest full-block source.
+fn audit_of_stored_result(
+    source: &dyn ScanSource,
+    report: &silent_sync::engine::ScanReport,
+) -> Audited {
+    let wallet_id = fixture_gen::lab_receiver_keys().wallet_id();
+    let mut store = MemoryStore::new();
+    let stored = store
+        .initialize(&new_store_meta(source, &scanner(), &wallet_id, 1, "test"))
+        .map_err(|_| "store refused the binding")
+        .and_then(|()| {
+            source
+                .block_refs(report.first_block.height, report.last_block.height)
+                .map_err(|e| class_of_source(&e))
+        })
+        .and_then(|blocks| {
+            store
+                .append(&blocks, &report.detected_received_outputs)
+                .map_err(|_| "store refused the result")
+        });
+    if let Err(class) = stored {
+        return Audited::Refused { class };
+    }
+    let reference = FixtureSource::from_file(fixture_gen::generate()).expect("fixture");
+    match audit_store(
+        &reference,
+        &scanner(),
+        &wallet_id,
+        &store,
+        &AuditOptions::default(),
+    ) {
+        Err(AuditError::Scan(e)) => Audited::Refused {
+            class: class_of(&e),
+        },
+        Err(_) => Audited::Refused {
+            class: "audit error",
+        },
+        Ok(report) if report.identical => Audited::Identical,
+        Ok(report) => Audited::Differences {
+            explanations: explanation_kinds(&report.differences, &report.block_hash_mismatches),
+        },
+    }
+}
+
+/// Runs the three observations on a faulty source. `opened` is the result of
 /// connecting to it (connecting can already be refused).
-fn observe(opened: Result<Box<dyn ScanSource>, SourceError>) -> (Alone, CrossChecked) {
+fn observe(opened: Result<Box<dyn ScanSource>, SourceError>) -> Observed {
     let source = match opened {
         Ok(source) => source,
         Err(e) => {
             let class = class_of_source(&e);
-            return (Alone::Refused { class }, CrossChecked::Refused { class });
+            return (
+                Alone::Refused { class },
+                CrossChecked::Refused { class },
+                Audited::NothingStored,
+            );
         }
     };
     let truth = honest();
+    let mut audited = Audited::NothingStored;
 
     // Alone: up to the height the source itself reports as its tip.
     let alone = match source
@@ -201,6 +302,7 @@ fn observe(opened: Result<Box<dyn ScanSource>, SourceError>) -> (Alone, CrossChe
             class: class_of(&e),
         },
         Ok(report) => {
+            audited = audit_of_stored_result(source.as_ref(), &report);
             let found: Vec<(Key, (u64, Option<u32>))> = report
                 .detected_received_outputs
                 .iter()
@@ -238,29 +340,14 @@ fn observe(opened: Result<Box<dyn ScanSource>, SourceError>) -> (Alone, CrossChe
             class: class_of(&e),
         },
         Ok(report) if report.identical => CrossChecked::Identical,
-        Ok(report) => {
-            let kinds: BTreeSet<String> = report
-                .differences
-                .iter()
-                .map(|d| match &d.explanation {
-                    Explanation::Unexplained { .. } => "unexplained".to_string(),
-                    other => serde_json::to_value(other)
-                        .ok()
-                        .and_then(|v| v["kind"].as_str().map(str::to_string))
-                        .unwrap_or_default(),
-                })
-                .collect();
-            let mut explanations: Vec<String> = kinds.into_iter().collect();
-            if !report.block_hash_mismatches.is_empty() && explanations.is_empty() {
-                explanations.push("block_hash_differs".to_string());
-            }
-            CrossChecked::Differences { explanations }
-        }
+        Ok(report) => CrossChecked::Differences {
+            explanations: explanation_kinds(&report.differences, &report.block_hash_mismatches),
+        },
     };
-    (alone, cross)
+    (alone, cross, audited)
 }
 
-fn verdict(alone: &Alone, cross: &CrossChecked) -> Verdict {
+fn verdict(alone: &Alone, cross: &CrossChecked, audited: &Audited) -> Verdict {
     match (alone, cross) {
         (Alone::Refused { .. }, _) => Verdict::Refused,
         (Alone::HonestResult, CrossChecked::Identical) => Verdict::NoEffect,
@@ -273,8 +360,12 @@ fn verdict(alone: &Alone, cross: &CrossChecked) -> Verdict {
             Verdict::SilentAloneShownByCrossCheck
         }
         // The cross-check asks the source again: a source that lied before
-        // and answers honestly now is not exposed by it.
-        (Alone::WrongResult { .. }, CrossChecked::Identical) => Verdict::NotDetected,
+        // and answers honestly now is not exposed by it. What it made the
+        // user store still differs from the chain.
+        (Alone::WrongResult { .. }, CrossChecked::Identical) => match audited {
+            Audited::Differences { .. } => Verdict::ShownOnlyByStoreAudit,
+            _ => Verdict::NotDetected,
+        },
     }
 }
 
@@ -291,14 +382,14 @@ fn core(node: &FakeCoreRest) -> Result<Box<dyn ScanSource>, SourceError> {
 }
 
 /// A fault applied to a fake Bitcoin Core REST server.
-fn core_fault(apply: &dyn Fn(&mut FakeCoreRest)) -> (Alone, CrossChecked) {
+fn core_fault(apply: &dyn Fn(&mut FakeCoreRest)) -> Observed {
     let mut node = FakeCoreRest::serve(&fixture());
     apply(&mut node);
     observe(core(&node))
 }
 
 /// A fault applied to a fake oracle; headers come from an honest fake node.
-fn oracle_fault(apply: &dyn Fn(&FakeOracle, &FakeCoreRest)) -> (Alone, CrossChecked) {
+fn oracle_fault(apply: &dyn Fn(&FakeOracle, &FakeCoreRest)) -> Observed {
     let fixture = fixture();
     let node = FakeCoreRest::serve(&fixture);
     let index = LocalTweakIndex::new(
@@ -366,7 +457,7 @@ fn edit_oracle_block(oracle: &FakeOracle, height: u32, edit: &dyn Fn(&mut serde_
 }
 
 /// A fault applied to the batches of an otherwise honest full-block source.
-fn batch_fault(tamper: impl Fn(&mut ScanBatch) + 'static) -> (Alone, CrossChecked) {
+fn batch_fault(tamper: impl Fn(&mut ScanBatch) + 'static) -> Observed {
     let source = FixtureSource::from_file(fixture()).expect("fixture");
     observe(Ok(Box::new(Tamper::new(source, tamper))))
 }
@@ -382,8 +473,8 @@ fn entries(v: &mut serde_json::Value) -> &mut Vec<serde_json::Value> {
 /// Runs every fault and returns the observations.
 pub fn run() -> Vec<Row> {
     let mut rows = Vec::new();
-    let mut add = |id, case, target, fault, (alone, cross): (Alone, CrossChecked)| {
-        let verdict = verdict(&alone, &cross);
+    let mut add = |id, case, target, fault, (alone, cross, store_audit): Observed| {
+        let verdict = verdict(&alone, &cross, &store_audit);
         rows.push(Row {
             id,
             case,
@@ -391,6 +482,7 @@ pub fn run() -> Vec<Row> {
             fault,
             alone,
             cross_check: cross,
+            store_audit,
             verdict,
         });
     };
@@ -857,20 +949,32 @@ fn cross_text(cross: &CrossChecked) -> String {
     }
 }
 
+fn audit_text(audited: &Audited) -> String {
+    match audited {
+        Audited::NothingStored => "— (nothing stored)".to_string(),
+        Audited::Refused { class } => format!("fails ({class})"),
+        Audited::Identical => "identical".to_string(),
+        Audited::Differences { explanations } => {
+            format!("differences: `{}`", explanations.join("`, `"))
+        }
+    }
+}
+
 /// The table of `docs/FAULT_INJECTION.md`.
 pub fn render_markdown(rows: &[Row]) -> String {
     let mut out = String::new();
-    out.push_str("| ID | Case | Injected into | Fault | Faulty source alone | Cross-check against an honest full-block source | Verdict |\n");
-    out.push_str("|---|---|---|---|---|---|---|\n");
+    out.push_str("| ID | Case | Injected into | Fault | Faulty source alone | Cross-check against an honest full-block source | Audit of a store holding the result, against an honest full-block source | Verdict |\n");
+    out.push_str("|---|---|---|---|---|---|---|---|\n");
     for row in rows {
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
             row.id,
             row.case,
             row.target.as_str(),
             row.fault,
             alone_text(&row.alone),
             cross_text(&row.cross_check),
+            audit_text(&row.store_audit),
             row.verdict.as_str(),
         ));
     }

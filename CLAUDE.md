@@ -26,8 +26,9 @@ crates/silent-sync/   同期コア（SDK 候補）。CLI・表示・ストレー
   src/protocol.rs     上流スキャナのラッパー（適格性、K_max 補正、panic 封じ込め、tweak インデックスからのスキャン）
   src/engine.rs       scan_range（ステートレス）、バッチ整合性検査、インデックス申告の上限検査
   src/store.rs        SyncStore トレイト、全実装共通の不変条件 check_append、MemoryStore
-  src/sync.rs         永続同期（再開、reorg、中断時の部分レポート）
+  src/sync.rs         永続同期（再開、reorg と深さの上限、中断時の部分レポート）
   src/verify.rs       cross_check（2 ソースの突き合わせと差分の説明）
+  src/audit.rs        audit_store（保存済みの検出結果と参照ソースの再スキャンの照合。ストアは読むだけ）
   src/source/         ScanSource トレイト、Evidence（FullBlock / TweakIndex）、fixture アダプタ
   src/source/block_check.rs   フルブロック共通の構造検査
   src/source/http.rs          ループバック専用 HTTP（IPv4 リテラル + ポート、上限つき）

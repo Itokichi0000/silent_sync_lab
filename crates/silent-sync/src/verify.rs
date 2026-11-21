@@ -28,7 +28,8 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Side {
-    /// The source being checked.
+    /// What is being checked: the candidate source of [`cross_check`], or
+    /// the store of [`audit_store`](crate::audit::audit_store).
     Candidate,
     /// The source it is checked against.
     Reference,
@@ -63,6 +64,11 @@ pub enum Explanation {
     CandidateOmittedOutput,
     /// Reference-only: the candidate lists this output with another key or value.
     CandidateOutputDiffers,
+    /// Reference-only, when a store is audited: the store has no record of
+    /// this output although it holds the block. The evidence the store was
+    /// filled from is not kept, so the cause cannot be narrowed down further
+    /// (the store's source omitted the payment, or the store was altered).
+    StoreOmittedOutput,
     /// Both detected the output but disagree on value or label.
     DetailsDiffer,
     /// None of the above could be established from the evidence at hand.
@@ -84,7 +90,7 @@ pub struct Difference {
     pub vout: u32,
     /// The side that detected it alone; `None` when both did, differently.
     pub only_in: Option<Side>,
-    /// What the candidate detected.
+    /// What the candidate detected (for an audit: what the store holds).
     pub candidate: Option<DetectedOutput>,
     /// What the reference detected.
     pub reference: Option<DetectedOutput>,
@@ -129,7 +135,7 @@ fn key(d: &DetectedOutput) -> OutPoint {
 }
 
 /// Explains an output only the candidate detected, from the reference block.
-fn explain_candidate_only(
+pub(crate) fn explain_candidate_only(
     scanner: &ReceiveScanner,
     reference: &BlockEvidence,
     d: &DetectedOutput,
