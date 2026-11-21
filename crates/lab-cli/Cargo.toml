@@ -4,6 +4,7 @@ description = "Thin experimental CLI over sync-core. NOT FOR MAINNET OR REAL FUN
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [[bin]]

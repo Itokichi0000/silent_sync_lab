@@ -66,7 +66,7 @@
 | データ | 入手元 | ライセンス |
 |---|---|---|
 | `fixtures/bip352/send_and_receive_test_vectors.json` | bitcoin/bips `fdcd8024595bc1e97db73883e716dbb91627c371` | BSD-2-Clause |
-| `fixtures/local/regtest_basic_v1.json` | 本リポジトリの生成器 | 本リポジトリのライセンスに従う（未定、DECISIONS O-001） |
+| `fixtures/local/regtest_basic_v1.json` | 本リポジトリの生成器 | 本リポジトリのライセンスに従う（MIT OR Apache-2.0。DECISIONS D-038） |
 
 ## リポジトリに含めない外部バイナリ（テストとベンチマーク用）
 
