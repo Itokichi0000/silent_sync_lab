@@ -192,35 +192,22 @@ mod tests {
         let mut store = MemoryStore::new();
 
         // Not initialized: refused before the source is asked anything.
-        let audit = |store: &MemoryStore| {
-            audit_store(
-                &source,
-                &scanner,
-                &keys.wallet_id(),
-                store,
-                &AuditOptions::default(),
-            )
-        };
+        let audit =
+            |store: &MemoryStore| audit_store(&source, &scanner, store, &AuditOptions::default());
         assert_eq!(
             audit(&store),
             Err(AuditError::Store(StoreError::NotInitialized))
         );
         let options = SyncOptions::default().with_chunk_size(10);
         assert!(matches!(
-            sync(&source, &scanner, &keys.wallet_id(), &mut store, &options),
+            sync(&source, &scanner, &mut store, &options),
             Err(SyncError::Store(StoreError::NotInitialized))
         ));
         store
-            .initialize(&new_store_meta(
-                &source,
-                &scanner,
-                &keys.wallet_id(),
-                1,
-                "probe",
-            ))
+            .initialize(&new_store_meta(&source, &scanner, 1, "probe"))
             .expect("initialize");
         // The source is down: an error, and nothing is recorded.
-        assert!(sync(&source, &scanner, &keys.wallet_id(), &mut store, &options).is_err());
+        assert!(sync(&source, &scanner, &mut store, &options).is_err());
         assert_eq!(store.checkpoint().expect("checkpoint"), None);
         assert!(store.detections().expect("detections").is_empty());
         // Nothing stored: an audit has nothing to compare, and says so.
@@ -230,14 +217,7 @@ mod tests {
         let fewer = ReceiveScanner::new(&keys, &[]).expect("scanner");
         let mut fresh = MemoryStore::new();
         assert!(matches!(
-            rescan_into(
-                &source,
-                &fewer,
-                &keys.wallet_id(),
-                &store,
-                &mut fresh,
-                &options
-            ),
+            rescan_into(&source, &fewer, &store, &mut fresh, &options),
             Err(RescanError::LabelsRemoved { .. })
         ));
         assert_eq!(fresh.meta().expect("meta"), None);

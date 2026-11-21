@@ -137,20 +137,13 @@ fn a_bip352_index_gives_exactly_the_full_block_result() {
 #[test]
 fn persistent_sync_over_a_tweak_index() {
     let source = LocalTweakIndex::new(TestSource::new(), IndexPolicy::Bip352);
-    let keys = fixture_gen::lab_receiver_keys();
     let scanner = scanner();
     let mut store = MemoryStore::new();
     store
-        .initialize(&new_store_meta(
-            &source,
-            &scanner,
-            &keys.wallet_id(),
-            1,
-            "test",
-        ))
+        .initialize(&new_store_meta(&source, &scanner, 1, "test"))
         .unwrap();
     let options = SyncOptions::default().with_chunk_size(3);
-    let report = sync(&source, &scanner, &keys.wallet_id(), &mut store, &options).unwrap();
+    let report = sync(&source, &scanner, &mut store, &options).unwrap();
     assert!(report.caught_up);
     let reference = scan_range(source.inner().main_chain(), &scanner, regtest(), 1, TIP).unwrap();
     assert_eq!(
@@ -159,7 +152,7 @@ fn persistent_sync_over_a_tweak_index() {
     );
 
     source.inner().on_fork.set(true);
-    let report = sync(&source, &scanner, &keys.wallet_id(), &mut store, &options).unwrap();
+    let report = sync(&source, &scanner, &mut store, &options).unwrap();
     assert_eq!(report.reorg.unwrap().fork_height, fixture_gen::FORK_HEIGHT);
     let reference = scan_range(source.inner().fork_chain(), &scanner, regtest(), 1, 9).unwrap();
     assert_eq!(
@@ -596,29 +589,16 @@ fn a_store_is_bound_to_the_index_policy() {
     let lenient = index(IndexPolicy::IgnoreSegwitVersionRule);
     assert_ne!(strict.backend_id(), lenient.backend_id());
 
-    let keys = fixture_gen::lab_receiver_keys();
     let scanner = scanner();
     let mut store = MemoryStore::new();
     store
-        .initialize(&new_store_meta(
-            &strict,
-            &scanner,
-            &keys.wallet_id(),
-            1,
-            "test",
-        ))
+        .initialize(&new_store_meta(&strict, &scanner, 1, "test"))
         .unwrap();
     let half = SyncOptions::default().with_target_height(Some(5));
-    sync(&strict, &scanner, &keys.wallet_id(), &mut store, &half).unwrap();
+    sync(&strict, &scanner, &mut store, &half).unwrap();
     let before = store.detections().unwrap();
 
-    let result = sync(
-        &lenient,
-        &scanner,
-        &keys.wallet_id(),
-        &mut store,
-        &SyncOptions::default(),
-    );
+    let result = sync(&lenient, &scanner, &mut store, &SyncOptions::default());
     assert!(
         matches!(
             result,

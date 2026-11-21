@@ -374,6 +374,7 @@ fn sync_class(e: &SyncError) -> &'static str {
         SyncError::Scan(e) => scan_class(e),
         SyncError::BindingMismatch { .. } => "sync: binding mismatch",
         SyncError::SourceBehindCheckpoint { .. } => "sync: source behind checkpoint",
+        SyncError::CompetingChainShorter { .. } => "sync: competing chain shorter than the store",
         SyncError::TargetAboveTip { .. } => "sync: target above tip",
         SyncError::ChainMovedDuringSync { .. } => "sync: chain moved during sync",
         SyncError::InvalidChunkSize => "sync: invalid chunk size",
@@ -432,7 +433,6 @@ struct Runner<'a> {
     cpu: &'a CpuClock,
     network: Network,
     scanner: &'a ReceiveScanner,
-    wallet_id: &'a str,
     from: u32,
     to: u32,
 }
@@ -452,7 +452,6 @@ impl Runner<'_> {
         store.initialize(&new_store_meta(
             source,
             self.scanner,
-            self.wallet_id,
             self.from,
             "benchmark: first height of the measured range",
         ))?;
@@ -466,7 +465,6 @@ impl Runner<'_> {
         sync(
             source.as_ref(),
             self.scanner,
-            self.wallet_id,
             &mut store,
             &self.options(target),
         )?;
@@ -522,13 +520,7 @@ impl Runner<'_> {
                     Mode::SyncCold | Mode::Restore => self.new_store(source, &store.path)?,
                     _ => SqliteStore::open(&store.path)?,
                 };
-                let report = sync(
-                    source,
-                    self.scanner,
-                    self.wallet_id,
-                    &mut db,
-                    &self.options(self.to),
-                )?;
+                let report = sync(source, self.scanner, &mut db, &self.options(self.to))?;
                 let reached = report.checkpoint.map(|c| c.height);
                 if reached != Some(self.to) {
                     return Err(RunError {
@@ -592,7 +584,6 @@ impl Runner<'_> {
 pub fn run_plan(
     plan: &BenchPlan<'_>,
     scanner: &ReceiveScanner,
-    wallet_id: &str,
     progress: &mut dyn FnMut(&BenchRecord, Option<&str>),
 ) -> Vec<BenchRecord> {
     let cpu = CpuClock::new();
@@ -600,7 +591,6 @@ pub fn run_plan(
         cpu: &cpu,
         network: plan.network,
         scanner,
-        wallet_id,
         from: plan.from,
         to: plan.to,
     };
@@ -1407,7 +1397,6 @@ mod tests {
         let runs = run_plan(
             &plan(vec![Mode::Restore], &flipping),
             &scanner,
-            &keys.wallet_id(),
             &mut |_, detail| details.push(detail.map(str::to_string)),
         );
         assert_eq!(runs.len(), 1);
@@ -1429,7 +1418,6 @@ mod tests {
         let runs = run_plan(
             &plan(vec![Mode::Scan, Mode::SyncCold], &broken),
             &scanner,
-            &keys.wallet_id(),
             &mut |_, detail| details.push(detail.map(str::to_string)),
         );
         assert_eq!(runs.len(), 2);

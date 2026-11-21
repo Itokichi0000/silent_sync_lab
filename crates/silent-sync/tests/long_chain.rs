@@ -164,17 +164,10 @@ fn a_chunk_that_does_not_link_to_the_previous_one_fails_the_scan() {
     assert!(scan_range(&spliced, &scanner(), regtest(), 1, SCAN_CHUNK_BLOCKS).is_ok());
     // The persistent sync refuses the same splice, keeping the first chunk.
     let mut store = MemoryStore::new();
-    let wallet_id = fixture_gen::lab_receiver_keys().wallet_id();
     store
-        .initialize(&new_store_meta(&spliced, &scanner(), &wallet_id, 1, "test"))
+        .initialize(&new_store_meta(&spliced, &scanner(), 1, "test"))
         .unwrap();
-    let result = sync(
-        &spliced,
-        &scanner(),
-        &wallet_id,
-        &mut store,
-        &SyncOptions::default(),
-    );
+    let result = sync(&spliced, &scanner(), &mut store, &SyncOptions::default());
     assert!(result.is_err(), "{result:?}");
     assert_eq!(
         store.checkpoint().unwrap().map(|c| c.height),
@@ -191,14 +184,12 @@ fn sync_and_tweak_index_agree_with_the_full_scan_on_a_long_chain() {
 
     for chunk in [1, 64, 100, 1_000] {
         let mut store = MemoryStore::new();
-        let wallet_id = fixture_gen::lab_receiver_keys().wallet_id();
         store
-            .initialize(&new_store_meta(&source, &scanner(), &wallet_id, 1, "test"))
+            .initialize(&new_store_meta(&source, &scanner(), 1, "test"))
             .unwrap();
         let report = sync(
             &source,
             &scanner(),
-            &wallet_id,
             &mut store,
             &SyncOptions::default().with_chunk_size(chunk),
         )
@@ -394,31 +385,17 @@ fn cross_check_applies_the_range_rules_to_both_sides() {
 /// "identical".
 #[test]
 fn an_audit_across_chunk_borders_applies_the_range_rules() {
-    let wallet_id = fixture_gen::lab_receiver_keys().wallet_id();
     let synced = |source: &FixtureSource| {
         let mut store = MemoryStore::new();
         store
-            .initialize(&new_store_meta(source, &scanner(), &wallet_id, 1, "test"))
+            .initialize(&new_store_meta(source, &scanner(), 1, "test"))
             .unwrap();
-        let report = sync(
-            source,
-            &scanner(),
-            &wallet_id,
-            &mut store,
-            &SyncOptions::default(),
-        )
-        .unwrap();
+        let report = sync(source, &scanner(), &mut store, &SyncOptions::default()).unwrap();
         assert!(report.caught_up);
         store
     };
     let audit = |reference: &dyn ScanSource, store: &MemoryStore| {
-        audit_store(
-            reference,
-            &scanner(),
-            &wallet_id,
-            store,
-            &AuditOptions::default(),
-        )
+        audit_store(reference, &scanner(), store, &AuditOptions::default())
     };
 
     let (source, expected) = long_chain(&LongChain::standard(BLOCKS));

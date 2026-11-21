@@ -44,13 +44,7 @@ fn wallet_id() -> String {
 }
 
 fn init(store: &mut dyn SyncStore, source: &dyn ScanSource, birthday: u32) {
-    let meta = new_store_meta(
-        source,
-        &scanner(),
-        &wallet_id(),
-        birthday,
-        "test: fixture start",
-    );
+    let meta = new_store_meta(source, &scanner(), birthday, "test: fixture start");
     store.initialize(&meta).expect("initialize");
 }
 
@@ -59,7 +53,7 @@ fn options(chunk_size: u32) -> SyncOptions {
 }
 
 fn run(source: &dyn ScanSource, store: &mut dyn SyncStore, opts: &SyncOptions) -> SyncReport {
-    sync(source, &scanner(), &wallet_id(), store, opts).expect("sync")
+    sync(source, &scanner(), store, opts).expect("sync")
 }
 
 /// What a stateless scan of `from..=to` on `chain` finds: the reference every
@@ -165,7 +159,6 @@ pub fn interrupted_sync_resumes_without_loss_or_duplicates(new_store: StoreFacto
     let half = sync(
         &source,
         &scanner(),
-        &wallet_id(),
         store.as_mut(),
         &SyncOptions::default()
             .with_chunk_size(4)
@@ -203,7 +196,6 @@ pub fn interrupted_sync_resumes_without_loss_or_duplicates(new_store: StoreFacto
             let report = sync(
                 &source,
                 &scanner(),
-                &wallet_id(),
                 store.as_mut(),
                 &SyncOptions::default()
                     .with_chunk_size(chunk)
@@ -235,13 +227,7 @@ pub fn source_outage_leaves_a_resumable_store(new_store: StoreFactory<'_>) {
         let mut store = new_store();
         init(store.as_mut(), &source, 1);
         source.fetches_left.set(Some(healthy_fetches));
-        let result = sync(
-            &source,
-            &scanner(),
-            &wallet_id(),
-            store.as_mut(),
-            &options(2),
-        );
+        let result = sync(&source, &scanner(), store.as_mut(), &options(2));
         let outage = |e: &SyncError| {
             matches!(
                 e,
@@ -315,13 +301,7 @@ pub fn a_failure_after_a_reorg_rollback_still_reports_the_reorg(new_store: Store
 
         source.on_fork.set(true);
         source.fetches_left.set(Some(healthy));
-        let result = sync(
-            &source,
-            &scanner(),
-            &wallet_id(),
-            store.as_mut(),
-            &options(2),
-        );
+        let result = sync(&source, &scanner(), store.as_mut(), &options(2));
         let Err(SyncError::Interrupted { cause, partial }) = result else {
             panic!("expected an interrupted sync, got {result:?}");
         };
@@ -446,7 +426,6 @@ pub fn progress_and_counters_cover_every_chunk(new_store: StoreFactory<'_>) {
         let report = sync_with_progress(
             &source,
             &scanner(),
-            &wallet_id(),
             store.as_mut(),
             &options(chunk),
             &mut |checkpoint: BlockRef| commits.push(checkpoint.height),
@@ -622,13 +601,85 @@ pub fn reorg_rolls_back_and_rescans(new_store: StoreFactory<'_>) {
     );
     assert_eq!(store.detections().expect("d").len(), 7);
 
-    // And back again: the other branch is shorter but is a different chain at
-    // its tip, so this is a reorg, not a lagging node.
+    // A competing block at the same height is a reorg like any other: a
+    // store that stopped at height 8 of the fork follows the main chain,
+    // whose tip is another block at height 8.
+    let mut level = new_store();
+    init(level.as_mut(), &source, 1);
+    run(
+        &source,
+        level.as_mut(),
+        &SyncOptions::default().with_target_height(Some(MAIN_TIP)),
+    );
     source.on_fork.set(false);
-    let back = run(&source, store.as_mut(), &SyncOptions::default());
-    assert_eq!(back.reorg.expect("reorg").fork_height, FORK_HEIGHT);
-    assert_store_matches(store.as_ref(), source.main_chain(), 1);
-    assert_eq!(store.detections().expect("d"), on_main);
+    let back = run(&source, level.as_mut(), &SyncOptions::default());
+    let reorg = back.reorg.expect("reorg");
+    assert_eq!(
+        (reorg.fork_height, reorg.blocks_rolled_back),
+        (FORK_HEIGHT, u64::from(MAIN_TIP - FORK_HEIGHT))
+    );
+    assert!(back.caught_up);
+    assert_store_matches(level.as_ref(), source.main_chain(), 1);
+    assert_eq!(level.detections().expect("d"), on_main);
+}
+
+/// A competing chain that ends below the checkpoint is not followed: doing so
+/// would discard scanned blocks without scanning as many again, and a source
+/// could shrink the store call after call. It is followed once it has
+/// reached the checkpoint's height.
+pub fn a_shorter_competing_chain_is_not_followed(new_store: StoreFactory<'_>) {
+    let source = TestSource::new();
+    let mut store = new_store();
+    init(store.as_mut(), &source, 1);
+    source.on_fork.set(true);
+    run(&source, store.as_mut(), &SyncOptions::default());
+    let before = (
+        store.checkpoint().expect("c"),
+        store.detections().expect("d"),
+        store.block_count().expect("n"),
+    );
+    assert_eq!(before.0.map(|c| c.height), Some(FORK_TIP));
+
+    // The main chain is one block shorter than the fork the store is on.
+    // Whatever the limit, it is refused, and nothing is changed.
+    source.on_fork.set(false);
+    for limit in [None, Some(0), Some(100)] {
+        assert_eq!(
+            sync(
+                &source,
+                &scanner(),
+                store.as_mut(),
+                &SyncOptions::default().with_max_reorg_depth(limit),
+            ),
+            Err(SyncError::CompetingChainShorter {
+                backend_id: "fixture".to_string(),
+                source_tip: MAIN_TIP,
+                checkpoint: FORK_TIP,
+            }),
+            "limit {limit:?}"
+        );
+    }
+    // Shorter still, but above the fork point: the same.
+    source.visible_tip.set(Some(FORK_HEIGHT + 1));
+    assert!(matches!(
+        sync(&source, &scanner(), store.as_mut(), &SyncOptions::default()),
+        Err(SyncError::CompetingChainShorter { source_tip, .. }) if source_tip == FORK_HEIGHT + 1
+    ));
+    // At or below the fork point its tip is one of our blocks: merely behind.
+    source.visible_tip.set(Some(FORK_HEIGHT));
+    assert!(matches!(
+        sync(&source, &scanner(), store.as_mut(), &SyncOptions::default()),
+        Err(SyncError::SourceBehindCheckpoint { .. })
+    ));
+    source.visible_tip.set(None);
+    assert_eq!(
+        (
+            store.checkpoint().expect("c"),
+            store.detections().expect("d"),
+            store.block_count().expect("n"),
+        ),
+        before
+    );
 }
 
 pub fn reorg_reaching_below_the_birthday_rescans_from_the_birthday(new_store: StoreFactory<'_>) {
@@ -679,7 +730,6 @@ pub fn reorgs_deeper_than_the_limit_are_refused(new_store: StoreFactory<'_>) {
         let result = sync(
             &source,
             &scanner(),
-            &wallet_id(),
             store.as_mut(),
             &with_limit(Some(limit)),
         );
@@ -730,7 +780,6 @@ pub fn reorgs_deeper_than_the_limit_are_refused(new_store: StoreFactory<'_>) {
         sync(
             &source,
             &scanner(),
-            &wallet_id(),
             store.as_mut(),
             &with_limit(Some(stored - 1))
         ),
@@ -758,13 +807,7 @@ pub fn a_source_behind_the_checkpoint_is_refused(new_store: StoreFactory<'_>) {
 
     for visible in [1, 2, 5, MAIN_TIP - 1] {
         source.visible_tip.set(Some(visible));
-        let result = sync(
-            &source,
-            &scanner(),
-            &wallet_id(),
-            store.as_mut(),
-            &SyncOptions::default(),
-        );
+        let result = sync(&source, &scanner(), store.as_mut(), &SyncOptions::default());
         assert_eq!(
             result,
             Err(SyncError::SourceBehindCheckpoint {
@@ -808,7 +851,6 @@ pub fn target_and_chunk_limits_are_respected(new_store: StoreFactory<'_>) {
         sync(
             &source,
             &scanner(),
-            &wallet_id(),
             store.as_mut(),
             &with_target(MAIN_TIP + 1)
         ),
@@ -818,13 +860,7 @@ pub fn target_and_chunk_limits_are_respected(new_store: StoreFactory<'_>) {
         })
     );
     assert_eq!(
-        sync(
-            &source,
-            &scanner(),
-            &wallet_id(),
-            store.as_mut(),
-            &options(0)
-        ),
+        sync(&source, &scanner(), store.as_mut(), &options(0)),
         Err(SyncError::InvalidChunkSize)
     );
     assert_eq!(store.checkpoint().expect("c").map(|c| c.height), Some(4));
@@ -853,13 +889,7 @@ pub fn blocks_that_do_not_extend_the_checkpoint_are_refused(new_store: StoreFact
     // tip() / block_ref() still describe the main chain, fetch_range() serves the fork.
     source.fetch_from_fork.set(Some(true));
     assert_eq!(
-        sync(
-            &source,
-            &scanner(),
-            &wallet_id(),
-            store.as_mut(),
-            &SyncOptions::default()
-        ),
+        sync(&source, &scanner(), store.as_mut(), &SyncOptions::default()),
         Err(SyncError::ChainMovedDuringSync { height: 7 })
     );
     assert_eq!(
@@ -885,13 +915,7 @@ pub fn a_store_only_syncs_what_it_is_bound_to(new_store: StoreFactory<'_>) {
     // Not initialized.
     let mut empty = new_store();
     assert_eq!(
-        sync(
-            &source,
-            &scanner(),
-            &wallet_id(),
-            empty.as_mut(),
-            &SyncOptions::default()
-        ),
+        sync(&source, &scanner(), empty.as_mut(), &SyncOptions::default()),
         Err(SyncError::Store(StoreError::NotInitialized))
     );
 
@@ -910,13 +934,13 @@ pub fn a_store_only_syncs_what_it_is_bound_to(new_store: StoreFactory<'_>) {
     )
     .expect("scanner");
     mismatch(
-        sync(&source, &more_labels, &wallet_id(), store.as_mut(), &opts),
+        sync(&source, &more_labels, store.as_mut(), &opts),
         "label set",
     );
     let fewer_labels =
         ReceiveScanner::new(&fixture_gen::lab_receiver_keys(), &[]).expect("scanner");
     mismatch(
-        sync(&source, &fewer_labels, &wallet_id(), store.as_mut(), &opts),
+        sync(&source, &fewer_labels, store.as_mut(), &opts),
         "label set",
     );
 
@@ -924,33 +948,18 @@ pub fn a_store_only_syncs_what_it_is_bound_to(new_store: StoreFactory<'_>) {
     let other_keys = fixture_gen::other_receiver_keys();
     let other = ReceiveScanner::new(&other_keys, &[LABEL_USED]).expect("scanner");
     assert_ne!(other_keys.wallet_id(), wallet_id());
-    mismatch(
-        sync(
-            &source,
-            &other,
-            &other_keys.wallet_id(),
-            store.as_mut(),
-            &opts,
-        ),
-        "wallet",
-    );
+    mismatch(sync(&source, &other, store.as_mut(), &opts), "wallet");
 
     // Another backend.
     let mut renamed = TestSource::new();
     renamed.backend_id = "something_else".to_string();
-    mismatch(
-        sync(&renamed, &scanner(), &wallet_id(), store.as_mut(), &opts),
-        "backend",
-    );
+    mismatch(sync(&renamed, &scanner(), store.as_mut(), &opts), "backend");
 
     // Another chain.
     source
         .chain_override
         .set(Some(ChainIdentity::for_network(Network::Signet)));
-    mismatch(
-        sync(&source, &scanner(), &wallet_id(), store.as_mut(), &opts),
-        "chain",
-    );
+    mismatch(sync(&source, &scanner(), store.as_mut(), &opts), "chain");
     source.chain_override.set(None);
 
     assert_eq!(
@@ -965,7 +974,7 @@ pub fn a_store_only_syncs_what_it_is_bound_to(new_store: StoreFactory<'_>) {
     old_meta.scanner_version = "sync-core/0.0.0".to_string();
     old.initialize(&old_meta).expect("initialize");
     mismatch(
-        sync(&source, &scanner(), &wallet_id(), old.as_mut(), &opts),
+        sync(&source, &scanner(), old.as_mut(), &opts),
         "scanner version",
     );
 }
@@ -983,13 +992,7 @@ pub fn short_batches_are_refused_by_sync(new_store: StoreFactory<'_>) {
     );
 
     source.drop_last_block.set(true);
-    let result = sync(
-        &source,
-        &scanner(),
-        &wallet_id(),
-        store.as_mut(),
-        &options(3),
-    );
+    let result = sync(&source, &scanner(), store.as_mut(), &options(3));
     assert!(
         matches!(
             result,
@@ -1031,7 +1034,7 @@ pub fn stores_reject_inconsistent_appends(new_store: StoreFactory<'_>) {
     assert_eq!(store.rollback_to(0).err(), Some(StoreError::NotInitialized));
     assert_eq!(store.detections().err(), Some(StoreError::NotInitialized));
     let mut zero = new_store();
-    let mut meta = new_store_meta(&source, &scanner(), &wallet_id(), 0, "x");
+    let mut meta = new_store_meta(&source, &scanner(), 0, "x");
     invariant(zero.initialize(&meta), "birthday must be at least 1");
     meta.birthday = 2;
     store.initialize(&meta).expect("initialize");
@@ -1183,7 +1186,7 @@ fn audit(
     store: &dyn SyncStore,
     options: &AuditOptions,
 ) -> Result<StoreAuditReport, AuditError> {
-    audit_store(reference, &scanner(), &wallet_id(), store, options)
+    audit_store(reference, &scanner(), store, options)
 }
 
 /// A store holding the main chain's blocks with `edit` applied to what an
@@ -1209,11 +1212,19 @@ struct Misreporting<'a> {
     inner: &'a dyn SyncStore,
     detections_claim_another_block: bool,
     missing_block: Option<u32>,
+    /// Listed in addition to what the store holds.
+    extra: Vec<DetectedOutput>,
+    /// Report a birthday of 0, which no store may have.
+    birthday_zero: bool,
 }
 
 impl SyncStore for Misreporting<'_> {
     fn meta(&self) -> Result<Option<StoreMeta>, StoreError> {
-        self.inner.meta()
+        let mut meta = self.inner.meta()?;
+        if let (true, Some(meta)) = (self.birthday_zero, &mut meta) {
+            meta.birthday = 0;
+        }
+        Ok(meta)
     }
     fn initialize(&mut self, _: &StoreMeta) -> Result<(), StoreError> {
         Err(StoreError::Backend("read-only view".to_string()))
@@ -1240,6 +1251,7 @@ impl SyncStore for Misreporting<'_> {
                 d.block.hash = d.block.prev_hash;
             }
         }
+        all.extend(self.extra.iter().cloned());
         Ok(all)
     }
     fn block_count(&self) -> Result<u64, StoreError> {
@@ -1582,13 +1594,7 @@ pub fn audit_refuses_what_it_cannot_carry_out(new_store: StoreFactory<'_>) {
     let other = fixture_gen::other_receiver_keys();
     let other_scanner = ReceiveScanner::new(&other, &[LABEL_USED]).expect("scanner");
     assert!(matches!(
-        audit_store(
-            &source,
-            &other_scanner,
-            &other.wallet_id(),
-            store.as_ref(),
-            &all
-        ),
+        audit_store(&source, &other_scanner, store.as_ref(), &all),
         Err(AuditError::BindingMismatch {
             field: "wallet",
             ..
@@ -1600,7 +1606,7 @@ pub fn audit_refuses_what_it_cannot_carry_out(new_store: StoreFactory<'_>) {
     )
     .expect("scanner");
     assert!(matches!(
-        audit_store(&source, &more_labels, &wallet_id(), store.as_ref(), &all),
+        audit_store(&source, &more_labels, store.as_ref(), &all),
         Err(AuditError::BindingMismatch {
             field: "label set",
             ..
@@ -1662,6 +1668,8 @@ pub fn audit_refuses_what_it_cannot_carry_out(new_store: StoreFactory<'_>) {
         inner: store.as_ref(),
         detections_claim_another_block: true,
         missing_block: None,
+        extra: Vec::new(),
+        birthday_zero: false,
     };
     match audit(&source, &claims_other_blocks, &all) {
         Err(AuditError::Store(StoreError::Invariant(reason))) => {
@@ -1673,6 +1681,8 @@ pub fn audit_refuses_what_it_cannot_carry_out(new_store: StoreFactory<'_>) {
         inner: store.as_ref(),
         detections_claim_another_block: false,
         missing_block: Some(5),
+        extra: Vec::new(),
+        birthday_zero: false,
     };
     match audit(&source, &lacks_a_block, &all) {
         Err(AuditError::Store(StoreError::Invariant(reason))) => {
@@ -1680,6 +1690,189 @@ pub fn audit_refuses_what_it_cannot_carry_out(new_store: StoreFactory<'_>) {
         }
         other => panic!("{other:?}"),
     }
+    // A detection outside the blocks the store holds (3..=8), or an output
+    // listed twice: the reference is never asked about it, so it must not
+    // pass as "nothing differs" — whatever part of the store is audited.
+    let held = store.detections().expect("d");
+    let outside = |block: BlockRef| {
+        let mut d = held[0].clone();
+        d.txid = Txid::from_byte_array([3; 32]);
+        d.block = block;
+        d
+    };
+    let part = AuditOptions::default()
+        .with_first_height(Some(4))
+        .with_last_height(Some(6));
+    for (extra, needle) in [
+        (
+            outside(source.main_chain().block_ref(2).expect("block")),
+            "is at height 2, outside the stored blocks 3..=8",
+        ),
+        (
+            outside(source.fork_chain().block_ref(FORK_TIP).expect("block")),
+            "is at height 9, outside the stored blocks 3..=8",
+        ),
+        (held[0].clone(), "more than once"),
+    ] {
+        let misreporting = Misreporting {
+            inner: store.as_ref(),
+            detections_claim_another_block: false,
+            missing_block: None,
+            extra: vec![extra],
+            birthday_zero: false,
+        };
+        for range in [&all, &part] {
+            match audit(&source, &misreporting, range) {
+                Err(AuditError::Store(StoreError::Invariant(reason))) => {
+                    assert!(reason.contains(needle), "{reason}")
+                }
+                other => panic!("{needle}: {other:?}"),
+            }
+        }
+    }
+    // A birthday of 0 is not something a store may report (the stores here
+    // refuse to be initialized with it): every operation refuses such a
+    // store instead of computing "the block before the birthday".
+    let mut zero = new_store();
+    let mut meta = new_store_meta(&source, &scanner(), 1, "test");
+    meta.birthday = 0;
+    assert!(matches!(
+        zero.initialize(&meta),
+        Err(StoreError::Invariant(_))
+    ));
+    let mut claims_birthday_zero = Misreporting {
+        inner: store.as_ref(),
+        detections_claim_another_block: false,
+        missing_block: None,
+        extra: Vec::new(),
+        birthday_zero: true,
+    };
+    let is_refused = |reason: &str| reason.contains("birthday is 0");
+    assert!(matches!(
+        audit(&source, &claims_birthday_zero, &all),
+        Err(AuditError::Store(StoreError::Invariant(reason))) if is_refused(&reason)
+    ));
+    let mut fresh = new_store();
+    assert!(matches!(
+        rescan_into(
+            &source,
+            &scanner(),
+            &claims_birthday_zero,
+            fresh.as_mut(),
+            &SyncOptions::default()
+        ),
+        Err(RescanError::CurrentStore(StoreError::Invariant(reason))) if is_refused(&reason)
+    ));
+    assert_eq!(fresh.meta().expect("meta"), None);
+    assert!(matches!(
+        sync(
+            &source,
+            &scanner(),
+            &mut claims_birthday_zero,
+            &SyncOptions::default()
+        ),
+        Err(SyncError::Store(StoreError::Invariant(reason))) if is_refused(&reason)
+    ));
+
+    // A reference that declares full blocks and serves an index: the report
+    // would state evidence it did not get.
+    let index = LocalTweakIndex::new(
+        FixtureSource::from_file(fixture_gen::generate()).expect("fixture"),
+        IndexPolicy::Bip352,
+    );
+    let mislabelled = Tamper::new(TestSource::new(), move |batch: &mut ScanBatch| {
+        if let (Some(first), Some(last)) = (batch.blocks.first(), batch.blocks.last()) {
+            *batch = index
+                .fetch_range(first.block.height, last.block.height)
+                .expect("index");
+        }
+    });
+    match audit(&mislabelled, store.as_ref(), &all) {
+        Err(AuditError::Scan(ScanError::InconsistentBatch { reason, .. })) => assert!(
+            reason.contains("another kind of evidence than the source declares"),
+            "{reason}"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A source that says the checkpoint is not on its chain, and then agrees
+/// with every stored block below it, has not shown an empty reorganization:
+/// it is held to its first answer.
+pub fn a_source_contradicting_itself_never_yields_an_empty_reorg(new_store: StoreFactory<'_>) {
+    /// Answers the first question about the block at `height` with another
+    /// block's hash, and every later one honestly.
+    struct Flapping {
+        inner: TestSource,
+        height: u32,
+        lied: std::cell::Cell<bool>,
+    }
+    impl ScanSource for Flapping {
+        fn backend_id(&self) -> &str {
+            self.inner.backend_id()
+        }
+        fn capabilities(&self) -> silent_sync::source::SourceCapabilities {
+            self.inner.capabilities()
+        }
+        fn chain(&self) -> ChainIdentity {
+            self.inner.chain()
+        }
+        fn tip(&self) -> Result<BlockRef, SourceError> {
+            self.inner.tip()
+        }
+        fn block_ref(&self, height: u32) -> Result<BlockRef, SourceError> {
+            let mut block = self.inner.block_ref(height)?;
+            if height == self.height && !self.lied.replace(true) {
+                block.hash = block.prev_hash;
+            }
+            Ok(block)
+        }
+        fn fetch_range(&self, from: u32, to: u32) -> Result<ScanBatch, SourceError> {
+            self.inner.fetch_range(from, to)
+        }
+    }
+    let flapping = || Flapping {
+        inner: TestSource::new(),
+        height: MAIN_TIP,
+        lied: std::cell::Cell::new(false),
+    };
+    let synced = || {
+        let honest = TestSource::new();
+        let mut store = new_store();
+        init(store.as_mut(), &honest, 1);
+        run(&honest, store.as_mut(), &SyncOptions::default());
+        store
+    };
+
+    // With no reorganization allowed, the first answer alone is refused.
+    let mut store = synced();
+    let before = snapshot(store.as_ref());
+    assert_eq!(
+        sync(
+            &flapping(),
+            &scanner(),
+            store.as_mut(),
+            &SyncOptions::default().with_max_reorg_depth(Some(0)),
+        ),
+        Err(SyncError::ReorgTooDeep {
+            backend_id: "fixture".to_string(),
+            checkpoint: MAIN_TIP,
+            at_least: 1,
+            limit: 0,
+        })
+    );
+    assert_eq!(snapshot(store.as_ref()), before);
+
+    // Allowed, it is a reorganization of one block — never of none — and the
+    // block is scanned again.
+    let report = run(&flapping(), store.as_mut(), &SyncOptions::default());
+    let reorg = report.reorg.expect("reorg");
+    assert_eq!(
+        (reorg.fork_height, reorg.blocks_rolled_back),
+        (MAIN_TIP - 1, 1)
+    );
+    assert_eq!(report.blocks_scanned, 1);
+    assert_eq!(snapshot(store.as_ref()), before);
 }
 
 // ---------------------------------------------------------------------------
@@ -1739,7 +1932,6 @@ pub fn a_rescan_with_more_labels_keeps_everything_and_adds_what_they_reveal(
     let report = rescan_into(
         &source,
         &more,
-        &wallet_id(),
         current.as_ref(),
         fresh.as_mut(),
         &options(3),
@@ -1771,6 +1963,7 @@ pub fn a_rescan_with_more_labels_keeps_everything_and_adds_what_they_reveal(
         .any(|d| d.label == Some(LABEL_NOT_BACKED_UP)));
     assert!(report.last_sync.caught_up);
     assert_eq!(report.last_sync.labels_scanned, report.labels);
+    assert_eq!(report.continued_from, None, "one call scanned everything");
 
     // The fresh store is bound like the old one, except for the labels.
     let old_meta = before.0.clone().expect("meta");
@@ -1792,34 +1985,15 @@ pub fn a_rescan_with_more_labels_keeps_everything_and_adds_what_they_reveal(
 
     // It takes over: syncing and auditing with the new label set work on it,
     // and the old label set is refused.
-    let again = sync(
-        &source,
-        &more,
-        &wallet_id(),
-        fresh.as_mut(),
-        &SyncOptions::default(),
-    )
-    .expect("sync");
+    let again = sync(&source, &more, fresh.as_mut(), &SyncOptions::default()).expect("sync");
     assert_eq!(again.blocks_scanned, 0);
     assert!(
-        audit_store(
-            &source,
-            &more,
-            &wallet_id(),
-            fresh.as_ref(),
-            &AuditOptions::default()
-        )
-        .expect("audit")
-        .identical
+        audit_store(&source, &more, fresh.as_ref(), &AuditOptions::default())
+            .expect("audit")
+            .identical
     );
     assert!(matches!(
-        sync(
-            &source,
-            &scanner(),
-            &wallet_id(),
-            fresh.as_mut(),
-            &SyncOptions::default()
-        ),
+        sync(&source, &scanner(), fresh.as_mut(), &SyncOptions::default()),
         Err(SyncError::BindingMismatch {
             field: "label set",
             ..
@@ -1831,7 +2005,6 @@ pub fn a_rescan_with_more_labels_keeps_everything_and_adds_what_they_reveal(
     let report = rescan_into(
         &source,
         &scanner(),
-        &wallet_id(),
         current.as_ref(),
         rebuilt.as_mut(),
         &SyncOptions::default(),
@@ -1841,6 +2014,51 @@ pub fn a_rescan_with_more_labels_keeps_everything_and_adds_what_they_reveal(
     assert!(report.added.is_empty());
     assert_eq!(report.reproduced, held.len() as u64);
     assert_eq!(snapshot(rebuilt.as_ref()), before);
+
+    // A store written by another scanner version: `sync` refuses it, and a
+    // rescan with the same labels rebuilds it under this version.
+    let mut outdated = new_store();
+    let old_version = "sync-core/0.0.0+older".to_string();
+    outdated
+        .initialize(&StoreMeta {
+            scanner_version: old_version.clone(),
+            ..before.0.clone().expect("meta")
+        })
+        .expect("initialize");
+    outdated
+        .append(&block_refs(2, MAIN_TIP), &held)
+        .expect("append");
+    assert!(matches!(
+        sync(
+            &source,
+            &scanner(),
+            outdated.as_mut(),
+            &SyncOptions::default()
+        ),
+        Err(SyncError::BindingMismatch {
+            field: "scanner version",
+            ..
+        })
+    ));
+    let mut current_version = new_store();
+    let report = rescan_into(
+        &source,
+        &scanner(),
+        outdated.as_ref(),
+        current_version.as_mut(),
+        &SyncOptions::default(),
+    )
+    .expect("rebuild");
+    assert_eq!(report.previous_scanner_version, old_version);
+    assert_eq!(
+        current_version
+            .meta()
+            .expect("meta")
+            .expect("initialized")
+            .scanner_version,
+        SCANNER_VERSION
+    );
+    assert_eq!(snapshot(current_version.as_ref()), before);
 
     // Blocks the source has beyond the old checkpoint are scanned as well,
     // and counted separately.
@@ -1856,7 +2074,6 @@ pub fn a_rescan_with_more_labels_keeps_everything_and_adds_what_they_reveal(
     let report = rescan_into(
         &source,
         &more,
-        &wallet_id(),
         behind.as_ref(),
         ahead.as_mut(),
         &SyncOptions::default(),
@@ -1887,7 +2104,6 @@ pub fn a_rescan_with_more_labels_keeps_everything_and_adds_what_they_reveal(
     let report = rescan_into(
         &source,
         &more,
-        &wallet_id(),
         unsynced.as_ref(),
         first.as_mut(),
         &SyncOptions::default(),
@@ -1897,6 +2113,64 @@ pub fn a_rescan_with_more_labels_keeps_everything_and_adds_what_they_reveal(
     assert!(report.added.is_empty());
     assert_eq!(report.in_new_blocks, all.len() as u64);
     assert_eq!(first.detections().expect("d"), all);
+}
+
+/// A transaction that pays two of the receiver's addresses with the same
+/// output counter is not what BIP352 prescribes, and the upstream scanner
+/// reports one output for it — which one depends on the labels it knows.
+/// Adding the label then replaces a detected output by another. The rescan
+/// does not choose between the two results: it is refused, and the store in
+/// use stays as it is. (Known limit: DECISIONS O-011, O-018.)
+pub fn a_rescan_does_not_choose_between_two_outputs_for_one_counter(new_store: StoreFactory<'_>) {
+    let (crafted, prevouts) = fixture_gen::same_counter_twice_tx();
+    let txid = crafted.compute_txid();
+    let source = Tamper::new(TestSource::new(), move |batch: &mut ScanBatch| {
+        for block in &mut batch.blocks {
+            if let (4, Evidence::FullBlock(txs)) = (block.block.height, &mut block.evidence) {
+                txs.push(silent_sync::source::TxWithPrevouts {
+                    tx: crafted.clone(),
+                    prevouts: prevouts.clone(),
+                });
+            }
+        }
+    });
+    let of_crafted = |store: &dyn SyncStore| -> Vec<(u32, u64, Option<u32>)> {
+        store
+            .detections()
+            .expect("d")
+            .iter()
+            .filter(|d| d.txid == txid)
+            .map(|d| (d.vout, d.value_sats, d.label))
+            .collect()
+    };
+
+    let mut current = new_store();
+    init(current.as_mut(), &source, 1);
+    run(&source, current.as_mut(), &SyncOptions::default());
+    assert_eq!(of_crafted(current.as_ref()), vec![(1, 22_000, None)]);
+    let before = snapshot(current.as_ref());
+
+    let more = scanner_with(&[LABEL_USED, LABEL_NOT_BACKED_UP]);
+    let mut fresh = new_store();
+    match rescan_into(
+        &source,
+        &more,
+        current.as_ref(),
+        fresh.as_mut(),
+        &SyncOptions::default(),
+    ) {
+        Err(RescanError::NotReproduced { outputs }) => {
+            assert_eq!(outputs.len(), 1);
+            assert_eq!((outputs[0].txid, outputs[0].vout), (txid, 1));
+        }
+        other => panic!("{other:?}"),
+    }
+    // With the label, the other output of the same transaction is found.
+    assert_eq!(
+        of_crafted(fresh.as_ref()),
+        vec![(0, 11_000, Some(LABEL_NOT_BACKED_UP))]
+    );
+    assert_eq!(snapshot(current.as_ref()), before);
 }
 
 /// A rescan that stops early keeps what it has, continues when called again,
@@ -1909,7 +2183,7 @@ pub fn an_unfinished_rescan_is_an_error_and_can_be_continued(new_store: StoreFac
     let before = snapshot(current.as_ref());
     let more = scanner_with(&[LABEL_USED, LABEL_NOT_BACKED_UP]);
     let rescan = |fresh: &mut dyn SyncStore, opts: &SyncOptions| {
-        rescan_into(&source, &more, &wallet_id(), current.as_ref(), fresh, opts)
+        rescan_into(&source, &more, current.as_ref(), fresh, opts)
     };
 
     // Limited by the caller.
@@ -1943,6 +2217,11 @@ pub fn an_unfinished_rescan_is_an_error_and_can_be_continued(new_store: StoreFac
     assert_eq!(report.checkpoint, before.1);
     assert_eq!(report.reproduced, before.2.len() as u64);
     assert_eq!(report.last_sync.blocks_scanned, 2, "only the last call");
+    assert_eq!(
+        report.continued_from.map(|c| c.height),
+        Some(6),
+        "blocks up to 6 were scanned by earlier calls"
+    );
     assert_eq!(
         fresh.detections().expect("d"),
         reference_with(&more, source.main_chain(), 1, MAIN_TIP)
@@ -1992,29 +2271,15 @@ pub fn a_rescan_that_could_lose_something_is_refused(new_store: StoreFactory<'_>
     let mut fresh = new_store();
     let unbound = new_store();
     assert_eq!(
-        rescan_into(
-            &source,
-            &more,
-            &wallet_id(),
-            unbound.as_ref(),
-            fresh.as_mut(),
-            &all
-        ),
-        Err(RescanError::Store(StoreError::NotInitialized))
+        rescan_into(&source, &more, unbound.as_ref(), fresh.as_mut(), &all),
+        Err(RescanError::CurrentStore(StoreError::NotInitialized))
     );
 
     // Labels can be added, not removed or exchanged.
     for labels in [&[][..], &[LABEL_NOT_BACKED_UP][..]] {
         let fewer = scanner_with(labels);
         assert_eq!(
-            rescan_into(
-                &source,
-                &fewer,
-                &wallet_id(),
-                current.as_ref(),
-                fresh.as_mut(),
-                &all
-            ),
+            rescan_into(&source, &fewer, current.as_ref(), fresh.as_mut(), &all),
             Err(RescanError::LabelsRemoved {
                 stored: vec![0, LABEL_USED],
                 given: fewer.labels().collect(),
@@ -2029,7 +2294,6 @@ pub fn a_rescan_that_could_lose_something_is_refused(new_store: StoreFactory<'_>
         rescan_into(
             &source,
             &other_scanner,
-            &other.wallet_id(),
             current.as_ref(),
             fresh.as_mut(),
             &all
@@ -2042,14 +2306,7 @@ pub fn a_rescan_that_could_lose_something_is_refused(new_store: StoreFactory<'_>
     let mut renamed = TestSource::new();
     renamed.backend_id = "another_backend".to_string();
     assert!(matches!(
-        rescan_into(
-            &renamed,
-            &more,
-            &wallet_id(),
-            current.as_ref(),
-            fresh.as_mut(),
-            &all
-        ),
+        rescan_into(&renamed, &more, current.as_ref(), fresh.as_mut(), &all),
         Err(RescanError::BindingMismatch {
             field: "backend",
             ..
@@ -2059,14 +2316,7 @@ pub fn a_rescan_that_could_lose_something_is_refused(new_store: StoreFactory<'_>
         .chain_override
         .set(Some(ChainIdentity::for_network(Network::Signet)));
     assert!(matches!(
-        rescan_into(
-            &source,
-            &more,
-            &wallet_id(),
-            current.as_ref(),
-            fresh.as_mut(),
-            &all
-        ),
+        rescan_into(&source, &more, current.as_ref(), fresh.as_mut(), &all),
         Err(RescanError::BindingMismatch { field: "chain", .. })
     ));
     source.chain_override.set(None);
@@ -2081,14 +2331,7 @@ pub fn a_rescan_that_could_lose_something_is_refused(new_store: StoreFactory<'_>
     init(used.as_mut(), &source, 1);
     let used_before = snapshot(used.as_ref());
     assert_eq!(
-        rescan_into(
-            &source,
-            &more,
-            &wallet_id(),
-            current.as_ref(),
-            used.as_mut(),
-            &all
-        ),
+        rescan_into(&source, &more, current.as_ref(), used.as_mut(), &all),
         Err(RescanError::FreshStoreInUse)
     );
     let mut other_birthday = new_store();
@@ -2097,7 +2340,6 @@ pub fn a_rescan_that_could_lose_something_is_refused(new_store: StoreFactory<'_>
         rescan_into(
             &source,
             &scanner(),
-            &wallet_id(),
             current.as_ref(),
             other_birthday.as_mut(),
             &all
@@ -2111,14 +2353,7 @@ pub fn a_rescan_that_could_lose_something_is_refused(new_store: StoreFactory<'_>
     source.on_fork.set(true);
     let mut on_fork = new_store();
     assert_eq!(
-        rescan_into(
-            &source,
-            &more,
-            &wallet_id(),
-            current.as_ref(),
-            on_fork.as_mut(),
-            &all
-        ),
+        rescan_into(&source, &more, current.as_ref(), on_fork.as_mut(), &all),
         Err(RescanError::CheckpointNotOnChain { height: MAIN_TIP })
     );
     source.on_fork.set(false);
@@ -2137,7 +2372,6 @@ pub fn a_rescan_that_could_lose_something_is_refused(new_store: StoreFactory<'_>
     match rescan_into(
         &source,
         &more,
-        &wallet_id(),
         holds_more.as_ref(),
         replacement.as_mut(),
         &all,
@@ -2179,6 +2413,8 @@ macro_rules! sync_store_suite {
             reorg_rolls_back_and_rescans,
             reorg_reaching_below_the_birthday_rescans_from_the_birthday,
             reorgs_deeper_than_the_limit_are_refused,
+            a_source_contradicting_itself_never_yields_an_empty_reorg,
+            a_shorter_competing_chain_is_not_followed,
             a_source_behind_the_checkpoint_is_refused,
             target_and_chunk_limits_are_respected,
             blocks_that_do_not_extend_the_checkpoint_are_refused,
@@ -2190,6 +2426,7 @@ macro_rules! sync_store_suite {
             audit_names_the_blocks_of_another_chain,
             audit_refuses_what_it_cannot_carry_out,
             a_rescan_with_more_labels_keeps_everything_and_adds_what_they_reveal,
+            a_rescan_does_not_choose_between_two_outputs_for_one_counter,
             an_unfinished_rescan_is_an_error_and_can_be_continued,
             a_rescan_that_could_lose_something_is_refused,
         );

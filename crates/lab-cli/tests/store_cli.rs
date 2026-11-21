@@ -351,14 +351,34 @@ fn reorg_is_reported_and_resolved() {
         "the orphaned payment is gone"
     );
 
-    // Text form says so explicitly.
-    let back = ok(&sync_args(&db, FIXTURE, &[]));
+    // The first chain again: it is a different chain, but one block shorter
+    // than what the store now holds. A shorter competing chain is not
+    // followed, and nothing is forgotten for it.
+    let before = std::fs::read(&db).unwrap();
+    let (code, stdout, stderr) = run(&sync_args(&db, FIXTURE, &[]));
+    assert_eq!(code, Some(1));
     assert!(
-        back.contains("REORG")
-            && back.contains("rolled back to height 5 (4 blocks, 2 detections removed)"),
-        "{back}"
+        stdout.is_empty()
+            && stderr.contains(
+                "shows a different chain that ends at height 8, below the stored checkpoint 9"
+            )
+            && stderr.contains("the store was not changed"),
+        "{stderr}"
     );
-    assert_eq!(received(&db), expected());
+    assert_eq!(std::fs::read(&db).unwrap(), before);
+    assert_eq!(received(&db), after);
+
+    // Text form of a reorg says so explicitly.
+    let other = Temp::new("reorg-text");
+    let db = other.db();
+    init(&db, "1");
+    ok(&sync_args(&db, FIXTURE, &[]));
+    let text = ok(&sync_args(&db, &fork, &[]));
+    assert!(
+        text.contains("REORG")
+            && text.contains("rolled back to height 5 (3 blocks, 2 detections removed)"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -834,7 +854,8 @@ fn a_label_is_added_by_scanning_again_into_a_new_file() {
     assert_eq!(code, Some(1));
     assert!(
         stdout.is_empty()
-            && stderr.contains("starting the rescan")
+            && stderr.contains("scanning the range of")
+            && !stderr.contains("unfinished rescan")
             && stderr
                 .contains("the rescan has reached height 3 but the store in use is at height 8")
             && stderr.contains("rescan not completed: the store was not changed")
@@ -852,15 +873,31 @@ fn a_label_is_added_by_scanning_again_into_a_new_file() {
     let (code, _, stderr) = add(FIXTURE, &["--label", "6"]);
     assert_eq!(code, Some(1));
     assert!(
-        stderr.contains("belongs to another rescan: delete it and run the command again"),
+        stderr.contains("belongs to another rescan; to discard")
+            && stderr.contains("run the command with --restart"),
         "{stderr}"
     );
     assert_eq!(std::fs::read(&db).unwrap(), before);
+    assert!(
+        Path::new(&rescan_file).exists(),
+        "nothing is deleted unasked"
+    );
 
     // Continued to the end: the store now holds what the label reveals.
     let (code, stdout, stderr) = add(FIXTURE, &["--label", "5", "--chunk-size", "3"]);
     assert_eq!(code, Some(0), "{stderr}");
-    assert!(stderr.contains("continuing the rescan"), "{stderr}");
+    assert!(
+        stderr.contains("found an unfinished rescan in")
+            && stderr.contains("that reaches height 3"),
+        "{stderr}"
+    );
+    // What came from the earlier run is said, not hidden.
+    assert!(
+        stdout.contains(
+            "continued from       : height 3 (scanned by an earlier run, taken as stored)"
+        ),
+        "{stdout}"
+    );
     assert!(
         stdout.contains("labels               : [0, 1] -> [0, 1, 5]")
             && stdout.contains("checkpoint           : height 8")
@@ -906,6 +943,7 @@ fn a_label_is_added_by_scanning_again_into_a_new_file() {
     assert_eq!(report["reproduced"], 8);
     assert_eq!(report["added"].as_array().unwrap().len(), 0);
     assert_eq!(report["checkpoint"]["height"], 8);
+    assert!(report["continued_from"].is_null());
     assert_eq!(received(&db), now);
     assert_ne!(std::fs::read(&db).unwrap(), before, "the binding changed");
 
@@ -918,21 +956,143 @@ fn a_label_is_added_by_scanning_again_into_a_new_file() {
         stdout.is_empty()
             && stderr.contains("is not on the chain that was rescanned")
             && stderr.contains("rescan not completed: the store was not changed")
-            && stderr.contains("run `sync`, delete"),
+            && stderr.contains("run `sync`, then this command again"),
         "{stderr}"
     );
     assert_eq!(std::fs::read(&db).unwrap(), before);
     assert_eq!(labels(&db), serde_json::json!([0, 1, 5, 9]));
 
-    // A leftover that is not a store at all.
+    // Leftovers that must not become the store. None is used, none is
+    // deleted unasked, and the store stays as it is.
+    let unusable = |what: &str, needle: &str| {
+        let (code, stdout, stderr) = add(FIXTURE, &["--label", "7"]);
+        assert_eq!(code, Some(1), "{what}: {stderr}");
+        assert!(
+            stdout.is_empty()
+                && stderr.contains(needle)
+                && stderr.contains("cannot be used for the rescan")
+                && stderr.contains("run the command with --restart")
+                && stderr.contains("The store was not changed"),
+            "{what}: {stderr}"
+        );
+        assert_eq!(std::fs::read(&db).unwrap(), before, "{what}");
+    };
+    // Not a database at all (and, on Unix, readable by others).
+    std::fs::remove_file(&rescan_file).unwrap();
     std::fs::write(&rescan_file, b"not a database").unwrap();
-    let (code, _, stderr) = add(FIXTURE, &["--label", "7"]);
-    assert_eq!(code, Some(1));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&rescan_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        unusable("garbage", "can be read or written by other users");
+        // A complete store that others could have written: a copy of the
+        // store itself, as someone sharing the directory could plant it.
+        std::fs::copy(&db, &rescan_file).unwrap();
+        std::fs::set_permissions(&rescan_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        unusable("planted store", "can be read or written by other users");
+        // Private, but not a database.
+        std::fs::write(&rescan_file, b"not a database").unwrap();
+        std::fs::set_permissions(&rescan_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        unusable("private garbage", "file is not a database");
+        // A symbolic link: the rescan must not be written where it points,
+        // and the link must not become the store.
+        std::fs::remove_file(&rescan_file).unwrap();
+        let elsewhere = format!("{db}.elsewhere");
+        std::os::unix::fs::symlink(&elsewhere, &rescan_file).unwrap();
+        unusable("dangling link", "is not a regular file");
+        assert!(!Path::new(&elsewhere).exists());
+        assert!(std::fs::symlink_metadata(&db)
+            .unwrap()
+            .file_type()
+            .is_file());
+        // A file an interrupted creation left blank is simply replaced.
+        std::fs::remove_file(&rescan_file).unwrap();
+        std::fs::write(&rescan_file, b"").unwrap();
+        std::fs::set_permissions(&rescan_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (code, stdout, stderr) = add(FIXTURE, &["--label", "7"]);
+        assert_eq!(code, Some(0), "{stderr}");
+        assert!(
+            stdout.contains("labels               : [0, 1, 5, 9] -> [0, 1, 5, 7, 9]")
+                && !stdout.contains("continued from"),
+            "{stdout}"
+        );
+        assert!(!Path::new(&rescan_file).exists());
+        std::fs::write(&rescan_file, b"not a database").unwrap();
+    }
+    #[cfg(not(unix))]
+    unusable("garbage", "file is not a database");
+    // Asked to, the command discards the leftover and starts over.
+    let (code, stdout, stderr) = add(FIXTURE, &["--label", "8", "--restart"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stderr.contains("discarded"), "{stderr}");
+    assert!(stdout.contains("-> [0, 1, 5,"), "{stdout}");
+    assert!(!Path::new(&rescan_file).exists());
+    let before = std::fs::read(&db).unwrap();
+    let stored_labels = labels(&db);
+
+    // `lab rescan`: the same labels, scanned again. Nothing is added.
+    let rescan = |extra: &[&str]| -> (Option<i32>, String, String) {
+        let mut args = vec![
+            "lab",
+            "rescan",
+            "--db",
+            &db,
+            "--backend",
+            "fixture",
+            "--fixture",
+            FIXTURE,
+        ];
+        args.extend_from_slice(extra);
+        run(&args)
+    };
+    let (code, stdout, stderr) = rescan(&[]);
+    assert_eq!(code, Some(0), "{stderr}");
     assert!(
-        stderr.contains("is left over from an earlier rescan and cannot be used"),
-        "{stderr}"
+        stdout.contains("found again          : 8 (every output the store held)")
+            && stdout.contains("added by the rescan  : 0"),
+        "{stdout}"
     );
-    assert_eq!(std::fs::read(&db).unwrap(), before);
+    assert_eq!(labels(&db), stored_labels);
+    assert_eq!(std::fs::read(&db).unwrap(), before, "the same store again");
+
+    // A store written by another version of the scanner: `sync` and `audit`
+    // refuse it and say what to do; `lab rescan` rebuilds it.
+    let current_version = "+bdk_sp@bb373e566fa2";
+    let other_version = "+bdk_sp@000000000000";
+    let mut bytes = std::fs::read(&db).unwrap();
+    let positions: Vec<usize> = bytes
+        .windows(current_version.len())
+        .enumerate()
+        .filter(|(_, w)| *w == current_version.as_bytes())
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(positions.len(), 1, "the scanner version is stored once");
+    bytes[positions[0]..positions[0] + other_version.len()]
+        .copy_from_slice(other_version.as_bytes());
+    std::fs::write(&db, &bytes).unwrap();
+    for command in ["sync", "audit"] {
+        let (code, stdout, stderr) = run(&[
+            command,
+            "--db",
+            &db,
+            "--backend",
+            "fixture",
+            "--fixture",
+            FIXTURE,
+        ]);
+        assert_eq!(code, Some(1), "{command}");
+        assert!(
+            stdout.is_empty()
+                && stderr.contains("the store is bound to a different scanner version")
+                && stderr.contains("hint: `silent-sync lab rescan`"),
+            "{command}: {stderr}"
+        );
+    }
+    let (code, _, stderr) = rescan(&["--json"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    ok(&sync_args(&db, FIXTURE, &[]));
+    assert_eq!(received(&db).len(), 8);
+    let before = std::fs::read(&db).unwrap();
 
     // Mainnet is refused here as everywhere.
     let (code, _, stderr) = run(&[
@@ -951,4 +1111,5 @@ fn a_label_is_added_by_scanning_again_into_a_new_file() {
     ]);
     assert_ne!(code, Some(0));
     assert!(stderr.contains("mainnet"), "{stderr}");
+    assert_eq!(std::fs::read(&db).unwrap(), before);
 }

@@ -9,6 +9,7 @@ impl SqliteStore
     pub fn create(path: &Path) -> Result<Self, StoreError>
     pub fn open(path: &Path) -> Result<Self, StoreError>
     pub fn in_memory() -> Result<Self, StoreError>
+pub fn open_rescan_file(current: &Path, fresh: &Path) -> Result<SqliteStore, StoreError>
 pub fn replace_store_file(current: &Path, fresh: &Path) -> Result<(), StoreError>
 impl SyncStore for SqliteStore
 

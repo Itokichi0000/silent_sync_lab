@@ -236,10 +236,9 @@ fn audit_of_stored_result(
     source: &dyn ScanSource,
     report: &silent_sync::engine::ScanReport,
 ) -> Audited {
-    let wallet_id = fixture_gen::lab_receiver_keys().wallet_id();
     let mut store = MemoryStore::new();
     let stored = store
-        .initialize(&new_store_meta(source, &scanner(), &wallet_id, 1, "test"))
+        .initialize(&new_store_meta(source, &scanner(), 1, "test"))
         .map_err(|_| "store refused the binding")
         .and_then(|()| {
             source
@@ -255,13 +254,7 @@ fn audit_of_stored_result(
         return Audited::Refused { class };
     }
     let reference = FixtureSource::from_file(fixture_gen::generate()).expect("fixture");
-    match audit_store(
-        &reference,
-        &scanner(),
-        &wallet_id,
-        &store,
-        &AuditOptions::default(),
-    ) {
+    match audit_store(&reference, &scanner(), &store, &AuditOptions::default()) {
         Err(AuditError::Scan(e)) => Audited::Refused {
             class: class_of(&e),
         },

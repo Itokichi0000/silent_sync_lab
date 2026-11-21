@@ -118,35 +118,15 @@ fn real_oracle_matches_core_except_for_the_segwit_version_rule() {
     // Persistent sync through the oracle, then new blocks the oracle has not
     // indexed yet: an error or a later success, never silently "caught up".
     let mut store = MemoryStore::new();
-    let wallet_id = keys.wallet_id();
     store
-        .initialize(&new_store_meta(
-            &via_oracle,
-            &scanner,
-            &wallet_id,
-            first,
-            "test",
-        ))
+        .initialize(&new_store_meta(&via_oracle, &scanner, first, "test"))
         .unwrap();
-    let report = sync(
-        &via_oracle,
-        &scanner,
-        &wallet_id,
-        &mut store,
-        &SyncOptions::default(),
-    )
-    .unwrap();
+    let report = sync(&via_oracle, &scanner, &mut store, &SyncOptions::default()).unwrap();
     assert!(report.caught_up);
     assert_eq!(store.detections().unwrap().len(), 8);
 
     node.generate_to(3, faucet.miner_address());
-    match sync(
-        &via_oracle,
-        &scanner,
-        &wallet_id,
-        &mut store,
-        &SyncOptions::default(),
-    ) {
+    match sync(&via_oracle, &scanner, &mut store, &SyncOptions::default()) {
         Ok(report) => assert!(report.caught_up && report.blocks_scanned == 3),
         Err(e) => {
             assert!(
@@ -159,14 +139,7 @@ fn real_oracle_matches_core_except_for_the_segwit_version_rule() {
                 "{e}"
             );
             oracle.wait_for_height(tip + 3);
-            let report = sync(
-                &via_oracle,
-                &scanner,
-                &wallet_id,
-                &mut store,
-                &SyncOptions::default(),
-            )
-            .unwrap();
+            let report = sync(&via_oracle, &scanner, &mut store, &SyncOptions::default()).unwrap();
             assert!(report.caught_up);
         }
     }

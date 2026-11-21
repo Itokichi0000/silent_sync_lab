@@ -176,18 +176,11 @@ fn a_replayed_index_entry_is_refused_by_the_store_across_chunks() {
     let scanner = ReceiveScanner::new(&keys, &[LABEL_USED]).unwrap();
     let mut store = MemoryStore::new();
     store
-        .initialize(&new_store_meta(
-            &faulty.source,
-            &scanner,
-            &keys.wallet_id(),
-            1,
-            "test",
-        ))
+        .initialize(&new_store_meta(&faulty.source, &scanner, 1, "test"))
         .unwrap();
     let result = sync(
         &faulty.source,
         &scanner,
-        &keys.wallet_id(),
         &mut store,
         &SyncOptions::default().with_chunk_size(1),
     );

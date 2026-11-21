@@ -131,7 +131,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     store.initialize(&new_store_meta(
         &source,
         &scanner,
-        &keys.wallet_id(),
         1,
         "the fixture chain starts at height 1",
     ))?;
@@ -139,7 +138,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Three blocks at a time; calling `sync` again later continues from the
     // checkpoint.
     let options = SyncOptions::default().with_chunk_size(3);
-    let report = sync(&source, &scanner, &keys.wallet_id(), &mut store, &options)?;
+    let report = sync(&source, &scanner, &mut store, &options)?;
     println!(
         "scanned {} blocks, caught up: {}",
         report.blocks_scanned, report.caught_up

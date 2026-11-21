@@ -103,7 +103,9 @@ cargo run -p lab-cli -- lab add-label --db /tmp/lab.sqlite3 --backend fixture --
 
 - `--network` は `regtest`（既定）か `signet`。`mainnet` はエラーになります。
 - `--backend` は `fixture` / `core` / `oracle-v2` / `local-index`。`core` と `oracle-v2` は、この機械で動いている自分のノード・Oracle にループバック（`http://127.0.0.1:<port>`）で接続します。
-- `scan` はステートレス（何も保存しない）、`sync` はストアに保存して再開できます。`sync --max-reorg-depth <n|none>` で、巻き戻しを許す深さ（既定 100 ブロック）を変えられます。
+- `lab add-label` と `lab rescan`（同じラベルのままスキャンし直す。別バージョンのスキャナが書いたストア用）は、途中経過をストアの隣の `<store>.rescan` に置きます。前回の残りを捨ててやり直すには `--restart` を付けます。
+- ストアは自分だけが書けるディレクトリに置いてください（上の例の `/tmp` は手元で試すためのものです）。
+- `scan` はステートレス（何も保存しない）、`sync` はストアに保存して再開できます。チェックポイントより短い競合チェーンには追随しません。`sync --max-reorg-depth <n|none>` で、巻き戻しを許す深さ（既定 100 ブロック）を変えられます。
 - 終了コード: 0 成功、1 エラー、2 引数エラー、4 `verify` / `audit` で差分あり。
 - `--json` で機械可読な出力になります。
 

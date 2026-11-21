@@ -31,16 +31,10 @@ fn failed_commit_loses_only_the_uncommitted_chunk() {
     for good_commits in 0..3u32 {
         let mut store = FailingAppends::new(MemoryStore::new());
         store
-            .initialize(&new_store_meta(
-                &source,
-                &scanner,
-                &keys.wallet_id(),
-                1,
-                "test",
-            ))
+            .initialize(&new_store_meta(&source, &scanner, 1, "test"))
             .unwrap();
         store.fail_appends_after(good_commits);
-        let result = sync(&source, &scanner, &keys.wallet_id(), &mut store, &options);
+        let result = sync(&source, &scanner, &mut store, &options);
         let injected = SyncError::Store(StoreError::Backend("injected failure".to_string()));
         match result {
             Err(e) if good_commits == 0 => assert_eq!(e, injected),
@@ -61,7 +55,7 @@ fn failed_commit_loses_only_the_uncommitted_chunk() {
             .all(|d| Some(d.block.height) <= checkpoint));
 
         store.stop_failing();
-        let report = sync(&source, &scanner, &keys.wallet_id(), &mut store, &options).unwrap();
+        let report = sync(&source, &scanner, &mut store, &options).unwrap();
         assert!(report.caught_up);
         assert_eq!(report.resumed_from.map(|c| c.height), checkpoint);
         assert_eq!(store.detections().unwrap().len(), 7);
@@ -134,22 +128,9 @@ fn what_was_changed_is_reported_without_reading_the_store_back() {
         let mut inner = MemoryStore::new();
         source.on_fork.set(false);
         inner
-            .initialize(&new_store_meta(
-                &source,
-                &scanner,
-                &keys.wallet_id(),
-                1,
-                "test",
-            ))
+            .initialize(&new_store_meta(&source, &scanner, 1, "test"))
             .unwrap();
-        sync(
-            &source,
-            &scanner,
-            &keys.wallet_id(),
-            &mut inner,
-            &SyncOptions::default(),
-        )
-        .unwrap();
+        sync(&source, &scanner, &mut inner, &SyncOptions::default()).unwrap();
         ReadsFailAfterAWrite {
             inner,
             written: false,
@@ -160,7 +141,7 @@ fn what_was_changed_is_reported_without_reading_the_store_back() {
     // Reorg, then two chunks: the whole call succeeds and reports everything.
     let mut store = synced_on_main();
     source.on_fork.set(true);
-    let report = sync(&source, &scanner, &keys.wallet_id(), &mut store, &options).unwrap();
+    let report = sync(&source, &scanner, &mut store, &options).unwrap();
     let reorg = report.reorg.expect("the rollback is reported");
     assert_eq!((reorg.fork_height, reorg.blocks_rolled_back), (5, 3));
     assert_eq!(reorg.detections_removed.len(), 2);
@@ -178,7 +159,7 @@ fn what_was_changed_is_reported_without_reading_the_store_back() {
     let mut store = synced_on_main();
     source.on_fork.set(true);
     source.fetches_left.set(Some(1));
-    let result = sync(&source, &scanner, &keys.wallet_id(), &mut store, &options);
+    let result = sync(&source, &scanner, &mut store, &options);
     source.fetches_left.set(None);
     let Err(SyncError::Interrupted { partial, .. }) = result else {
         panic!("expected an interrupted sync, got {result:?}");
@@ -192,7 +173,7 @@ fn what_was_changed_is_reported_without_reading_the_store_back() {
     let mut store = synced_on_main();
     source.on_fork.set(true);
     source.fetches_left.set(Some(0));
-    let result = sync(&source, &scanner, &keys.wallet_id(), &mut store, &options);
+    let result = sync(&source, &scanner, &mut store, &options);
     source.fetches_left.set(None);
     let Err(SyncError::Interrupted { partial, .. }) = result else {
         panic!("expected an interrupted sync, got {result:?}");

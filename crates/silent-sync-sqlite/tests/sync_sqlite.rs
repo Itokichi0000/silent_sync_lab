@@ -11,7 +11,7 @@ use silent_sync::{
     store::{StoreError, SyncStore},
     sync::{new_store_meta, sync, SyncOptions},
 };
-use silent_sync_sqlite::{replace_store_file, SqliteStore};
+use silent_sync_sqlite::{open_rescan_file, replace_store_file, SqliteStore};
 use std::path::{Path, PathBuf};
 
 fn sqlite_store() -> Box<dyn SyncStore> {
@@ -50,10 +50,6 @@ fn scanner() -> ReceiveScanner {
     .unwrap()
 }
 
-fn wallet_id() -> String {
-    fixture_gen::lab_receiver_keys().wallet_id()
-}
-
 #[test]
 fn state_survives_closing_and_reopening_the_file() {
     let db = TempDb::new("reopen");
@@ -65,15 +61,9 @@ fn state_survives_closing_and_reopening_the_file() {
     {
         let mut store = SqliteStore::create(&db.path).unwrap();
         store
-            .initialize(&new_store_meta(
-                &source,
-                &scanner(),
-                &wallet_id(),
-                1,
-                "fixture genesis",
-            ))
+            .initialize(&new_store_meta(&source, &scanner(), 1, "fixture genesis"))
             .unwrap();
-        let report = sync(&source, &scanner(), &wallet_id(), &mut store, &half).unwrap();
+        let report = sync(&source, &scanner(), &mut store, &half).unwrap();
         assert_eq!(report.checkpoint.map(|c| c.height), Some(4));
     } // connection closed here
 
@@ -86,14 +76,7 @@ fn state_survives_closing_and_reopening_the_file() {
     assert_eq!(store.checkpoint().unwrap().map(|c| c.height), Some(4));
     assert_eq!(store.detections().unwrap().len(), 3);
 
-    let report = sync(
-        &source,
-        &scanner(),
-        &wallet_id(),
-        &mut store,
-        &SyncOptions::default(),
-    )
-    .unwrap();
+    let report = sync(&source, &scanner(), &mut store, &SyncOptions::default()).unwrap();
     assert!(report.caught_up);
     assert_eq!(report.resumed_from.map(|c| c.height), Some(4));
     drop(store);
@@ -160,22 +143,9 @@ fn synced_store(db: &TempDb) -> SqliteStore {
     let source = TestSource::new();
     let mut store = SqliteStore::create(&db.path).unwrap();
     store
-        .initialize(&new_store_meta(
-            &source,
-            &scanner(),
-            &wallet_id(),
-            1,
-            "test",
-        ))
+        .initialize(&new_store_meta(&source, &scanner(), 1, "test"))
         .unwrap();
-    sync(
-        &source,
-        &scanner(),
-        &wallet_id(),
-        &mut store,
-        &SyncOptions::default(),
-    )
-    .unwrap();
+    sync(&source, &scanner(), &mut store, &SyncOptions::default()).unwrap();
     store
 }
 
@@ -200,13 +170,7 @@ fn failed_append_is_rolled_back_entirely() {
     let source = TestSource::new();
     let mut store = SqliteStore::create(&db.path).unwrap();
     store
-        .initialize(&new_store_meta(
-            &source,
-            &scanner(),
-            &wallet_id(),
-            1,
-            "test",
-        ))
+        .initialize(&new_store_meta(&source, &scanner(), 1, "test"))
         .unwrap();
     let blocks = block_refs(1, 3);
     store.append(&blocks[..1], &[]).unwrap();
@@ -493,22 +457,9 @@ fn no_key_material_is_written_to_the_database() {
     {
         let mut store = SqliteStore::create(&db.path).unwrap();
         store
-            .initialize(&new_store_meta(
-                &source,
-                &all_labels,
-                &keys.wallet_id(),
-                1,
-                "test",
-            ))
+            .initialize(&new_store_meta(&source, &all_labels, 1, "test"))
             .unwrap();
-        sync(
-            &source,
-            &all_labels,
-            &keys.wallet_id(),
-            &mut store,
-            &SyncOptions::default(),
-        )
-        .unwrap();
+        sync(&source, &all_labels, &mut store, &SyncOptions::default()).unwrap();
         assert_eq!(store.detections().unwrap().len(), 8);
     }
     let bytes = std::fs::read(&db.path).unwrap();
@@ -573,17 +524,12 @@ fn a_rescanned_file_replaces_the_one_in_use_only_if_nothing_is_lost() {
     let synced_as = |path: &Path,
                      source: &TestSource,
                      scanner: &ReceiveScanner,
-                     wallet: &str,
                      birthday: u32,
                      target: Option<u32>| {
-        let mut store = with_meta(
-            path,
-            &new_store_meta(source, scanner, wallet, birthday, "test"),
-        );
+        let mut store = with_meta(path, &new_store_meta(source, scanner, birthday, "test"));
         sync(
             source,
             scanner,
-            wallet,
             &mut store,
             &SyncOptions::default().with_target_height(target),
         )
@@ -601,27 +547,18 @@ fn a_rescanned_file_replaces_the_one_in_use_only_if_nothing_is_lost() {
     let other_keys = fixture_gen::other_receiver_keys();
     let other_scanner = ReceiveScanner::new(&other_keys, &[fixture_gen::LABEL_USED]).unwrap();
     refused(
-        &|path| {
-            synced_as(
-                path,
-                &source,
-                &other_scanner,
-                &other_keys.wallet_id(),
-                1,
-                None,
-            )
-        },
+        &|path| synced_as(path, &source, &other_scanner, 1, None),
         "bound to different chains, receivers, backends or birthdays",
     );
     refused(
-        &|path| synced_as(path, &source, &more_labels, &wallet_id(), 2, None),
+        &|path| synced_as(path, &source, &more_labels, 2, None),
         "bound to different chains, receivers, backends or birthdays",
     );
     refused(
         &|path| {
             let mut renamed = TestSource::new();
             renamed.backend_id = "another_backend".to_string();
-            synced_as(path, &renamed, &more_labels, &wallet_id(), 1, None)
+            synced_as(path, &renamed, &more_labels, 1, None)
         },
         "bound to different chains, receivers, backends or birthdays",
     );
@@ -641,27 +578,18 @@ fn a_rescanned_file_replaces_the_one_in_use_only_if_nothing_is_lost() {
     );
     let fewer_labels = ReceiveScanner::new(&fixture_gen::lab_receiver_keys(), &[]).unwrap();
     refused(
-        &|path| synced_as(path, &source, &fewer_labels, &wallet_id(), 1, None),
+        &|path| synced_as(path, &source, &fewer_labels, 1, None),
         "not scanned for every label of the old one (old [0, 1], new [0])",
     );
     refused(
-        &|path| {
-            synced_as(
-                path,
-                &source,
-                &more_labels,
-                &wallet_id(),
-                1,
-                Some(checkpoint.height - 1),
-            )
-        },
+        &|path| synced_as(path, &source, &more_labels, 1, Some(checkpoint.height - 1)),
         "does not contain the old store's checkpoint (height 8)",
     );
     refused(
         &|path| {
             let fork = TestSource::new();
             fork.on_fork.set(true);
-            synced_as(path, &fork, &more_labels, &wallet_id(), 1, None)
+            synced_as(path, &fork, &more_labels, 1, None)
         },
         "does not contain the old store's checkpoint (height 8)",
     );
@@ -708,7 +636,6 @@ fn a_rescanned_file_replaces_the_one_in_use_only_if_nothing_is_lost() {
     let report = rescan_into(
         &source,
         &more_labels,
-        &wallet_id(),
         &current,
         &mut fresh,
         &SyncOptions::default(),
@@ -739,14 +666,157 @@ fn a_rescanned_file_replaces_the_one_in_use_only_if_nothing_is_lost() {
     assert_eq!(now.len(), old_detections.len() + 1);
     assert!(old_detections.iter().all(|d| now.contains(d)));
     // It syncs on with the new label set.
-    let again = sync(
-        &source,
-        &more_labels,
-        &wallet_id(),
-        &mut store,
-        &SyncOptions::default(),
-    )
-    .unwrap();
+    let again = sync(&source, &more_labels, &mut store, &SyncOptions::default()).unwrap();
     assert!(again.caught_up);
     assert_eq!(again.blocks_scanned, 0);
+}
+
+/// Creating a store never writes through, over or next to something that is
+/// already there, and a rescan file is only continued when it is the
+/// owner's private regular file.
+#[test]
+fn files_that_are_already_there_are_never_written_through() {
+    let db = TempDb::new("existing");
+    let other = db.dir.join("elsewhere.sqlite3");
+
+    // A dangling symbolic link: creating "at" it would create the database
+    // wherever it points.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&other, &db.path).unwrap();
+        assert!(matches!(
+            SqliteStore::create(&db.path),
+            Err(StoreError::Backend(reason)) if reason.contains("already exists")
+        ));
+        assert!(!other.exists(), "nothing was created where the link points");
+        std::fs::remove_file(&db.path).unwrap();
+    }
+    // A directory, and a missing parent directory, are errors that name the path.
+    std::fs::create_dir(&db.path).unwrap();
+    assert!(matches!(
+        SqliteStore::create(&db.path),
+        Err(StoreError::Backend(reason)) if reason.contains("already exists")
+    ));
+    std::fs::remove_dir(&db.path).unwrap();
+    let nowhere = db.dir.join("missing-dir").join("store.sqlite3");
+    assert!(matches!(
+        SqliteStore::create(&nowhere),
+        Err(StoreError::Backend(reason)) if reason.contains("missing-dir")
+    ));
+
+    // The rescan file of a store.
+    let store = synced_store(&db);
+    drop(store);
+    let fresh = db.dir.join("store.sqlite3.rescan");
+    // Nothing there: created, owner-only, a complete empty store.
+    let created = open_rescan_file(&db.path, &fresh).unwrap();
+    assert_eq!(created.meta().unwrap(), None);
+    assert_eq!(created.block_count().unwrap(), 0);
+    drop(created);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&fresh), 0o600);
+        // There, and private: continued as it is.
+        let bytes = std::fs::read(&fresh).unwrap();
+        drop(open_rescan_file(&db.path, &fresh).unwrap());
+        assert_eq!(std::fs::read(&fresh).unwrap(), bytes);
+
+        let refused = |needle: &str| match open_rescan_file(&db.path, &fresh) {
+            Err(StoreError::Invariant(reason)) => {
+                assert!(
+                    reason.contains(needle),
+                    "`{reason}` should mention `{needle}`"
+                )
+            }
+            other => panic!("expected `{needle}`, got {:?}", other.map(|_| ())),
+        };
+        // Accessible to others: whoever could write it could choose what the
+        // store will hold.
+        for bits in [0o644, 0o660, 0o604, 0o602] {
+            std::fs::set_permissions(&fresh, std::fs::Permissions::from_mode(bits)).unwrap();
+            refused("can be read or written by other users");
+            assert!(matches!(
+                replace_store_file(&db.path, &fresh),
+                Err(StoreError::Invariant(reason))
+                    if reason.contains("can be read or written by other users")
+            ));
+        }
+        // A link, even to a file that would itself be acceptable.
+        std::fs::set_permissions(&fresh, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let real = db.dir.join("real.sqlite3");
+        std::fs::rename(&fresh, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &fresh).unwrap();
+        refused("is not a regular file");
+        assert!(matches!(
+            replace_store_file(&db.path, &fresh),
+            Err(StoreError::Invariant(reason)) if reason.contains("is not a regular file")
+        ));
+        std::fs::remove_file(&fresh).unwrap();
+        std::fs::create_dir(&fresh).unwrap();
+        refused("is not a regular file");
+        std::fs::remove_dir(&fresh).unwrap();
+
+        // Blank leftovers of an interrupted creation — zero bytes, or a
+        // database without tables — are replaced by a new, complete file.
+        for leftover in [&b""[..], &std::fs::read(&real).unwrap()[..0]] {
+            std::fs::write(&fresh, leftover).unwrap();
+            std::fs::set_permissions(&fresh, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let store = open_rescan_file(&db.path, &fresh).unwrap();
+            assert_eq!(store.block_count().unwrap(), 0);
+            drop(store);
+            std::fs::remove_file(&fresh).unwrap();
+        }
+        {
+            // A database file that exists but never got its tables.
+            let empty = rusqlite::Connection::open(&fresh).unwrap();
+            empty.execute_batch("PRAGMA user_version = 1;").unwrap();
+            drop(empty);
+            std::fs::set_permissions(&fresh, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(std::fs::metadata(&fresh).unwrap().len() > 0);
+            let store = open_rescan_file(&db.path, &fresh).unwrap();
+            assert_eq!(store.meta().unwrap(), None);
+            drop(store);
+            std::fs::remove_file(&fresh).unwrap();
+        }
+        // Private, with content that is not a store: an error, not replaced.
+        std::fs::write(&fresh, b"something else entirely").unwrap();
+        std::fs::set_permissions(&fresh, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(
+            open_rescan_file(&db.path, &fresh),
+            Err(StoreError::Backend(_))
+        ));
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"something else entirely");
+    }
+}
+
+/// A rescan file that belongs to someone else than the owner of the store is
+/// not used: in a shared directory anyone could have put it there.
+///
+/// Giving a file away needs privileges, so this test only does its work
+/// where it has them (it does in the project's containers, as root).
+#[cfg(unix)]
+#[test]
+fn a_rescan_file_of_another_owner_is_refused() {
+    use std::os::unix::fs::MetadataExt;
+    let db = TempDb::new("owner");
+    drop(synced_store(&db));
+    let fresh = db.dir.join("store.sqlite3.rescan");
+    drop(open_rescan_file(&db.path, &fresh).unwrap());
+    let owner = std::fs::metadata(&db.path).unwrap().uid();
+    if std::os::unix::fs::chown(&fresh, Some(owner + 1), None).is_err() {
+        eprintln!("skipped: this process may not change the owner of a file");
+        return;
+    }
+    assert!(matches!(
+        open_rescan_file(&db.path, &fresh),
+        Err(StoreError::Invariant(reason))
+            if reason.contains("does not belong to the owner of the store")
+    ));
+    assert!(matches!(
+        replace_store_file(&db.path, &fresh),
+        Err(StoreError::Invariant(reason))
+            if reason.contains("does not belong to the owner of the store")
+    ));
 }

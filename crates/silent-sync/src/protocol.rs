@@ -346,6 +346,8 @@ pub struct ReceiveScanner {
     /// Needed for the ECDH step when the tweak data comes from an index.
     scan_sk: SecretKey,
     labels: BTreeSet<u32>,
+    /// [`ReceiverKeys::wallet_id`] of the keys this scanner was built from.
+    wallet_id: String,
 }
 
 impl ReceiveScanner {
@@ -391,7 +393,16 @@ impl ReceiveScanner {
             inner: Scanner::new(keys.scan_sk, keys.spend_pk, lookup),
             scan_sk: keys.scan_sk,
             labels,
+            wallet_id: keys.wallet_id(),
         })
+    }
+
+    /// Public identifier of the receiver this scanner scans for: the
+    /// [`ReceiverKeys::wallet_id`] of the keys it was built from. Stores are
+    /// bound to it, so a store can only be synced, audited or rescanned with
+    /// a scanner for the same receiver.
+    pub fn wallet_id(&self) -> &str {
+        &self.wallet_id
     }
 
     /// Label integers this scanner checks for.

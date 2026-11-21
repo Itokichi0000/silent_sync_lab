@@ -22,7 +22,7 @@ use crate::{
     network::ChainIdentity,
     protocol::ReceiveScanner,
     source::{ScanSource, SourceError},
-    store::{StoreError, SyncStore},
+    store::{bound_meta, StoreError, SyncStore},
     sync::binding_difference,
     verify::{explain_candidate_only, Difference, Explanation, Side},
 };
@@ -70,7 +70,7 @@ pub enum AuditError {
     #[error(transparent)]
     /// The reference could not serve the range consistently.
     Scan(#[from] ScanError),
-    #[error("the store is bound to a different {field}: stored `{stored}`, given `{given}`")]
+    #[error("the store is bound to a different {field}: stored `{stored}`, given `{given}`{hint}")]
     /// The store is for another chain, receiver, label set or scanner
     /// version than the one the audit was given. (Another *backend* is fine:
     /// that is what an audit is for.)
@@ -81,6 +81,8 @@ pub enum AuditError {
         stored: String,
         /// What the call was given.
         given: String,
+        /// What to do about it.
+        hint: &'static str,
     },
     #[error("the store holds no scanned blocks: there is nothing to audit")]
     /// Nothing has been synced into the store yet.
@@ -161,16 +163,16 @@ fn key(d: &DetectedOutput) -> OutPoint {
 pub fn audit_store(
     reference: &dyn ScanSource,
     scanner: &ReceiveScanner,
-    wallet_id: &str,
     store: &dyn SyncStore,
     options: &AuditOptions,
 ) -> Result<StoreAuditReport, AuditError> {
-    let meta = store.meta()?.ok_or(StoreError::NotInitialized)?;
-    if let Some(d) = binding_difference(&meta, reference.chain(), None, Some(scanner), wallet_id) {
+    let meta = bound_meta(store)?;
+    if let Some(d) = binding_difference(&meta, reference.chain(), None, scanner, true) {
         return Err(AuditError::BindingMismatch {
             field: d.field,
             stored: d.stored,
             given: d.given,
+            hint: d.hint,
         });
     }
     let checkpoint = store.checkpoint()?.ok_or(AuditError::NothingStored)?;
@@ -186,12 +188,25 @@ pub fn audit_store(
     }
     let reference_id = reference.backend_id().to_string();
 
-    // What the store holds in the range, by height.
+    // What the store holds, by height. A detection outside the stored
+    // blocks, or an output listed twice, is a store that contradicts itself:
+    // an error whatever range is audited, never something to step over.
     let mut stored_by_height: BTreeMap<u32, Vec<DetectedOutput>> = BTreeMap::new();
+    let mut listed = BTreeSet::<OutPoint>::new();
     for d in store.detections()? {
-        if (first..=last).contains(&d.block.height) {
-            stored_by_height.entry(d.block.height).or_default().push(d);
+        if !(meta.birthday..=checkpoint.height).contains(&d.block.height) {
+            return Err(AuditError::Store(StoreError::Invariant(format!(
+                "the stored detection {}:{} is at height {}, outside the stored blocks {}..={}",
+                d.txid, d.vout, d.block.height, meta.birthday, checkpoint.height
+            ))));
         }
+        if !listed.insert(key(&d)) {
+            return Err(AuditError::Store(StoreError::Invariant(format!(
+                "the store lists the output {}:{} more than once",
+                d.txid, d.vout
+            ))));
+        }
+        stored_by_height.entry(d.block.height).or_default().push(d);
     }
 
     let mut report = StoreAuditReport {
@@ -237,6 +252,16 @@ pub fn audit_store(
 
         for r_block in &batch.blocks {
             let height = r_block.block.height;
+            // The report states which kind of evidence the reference gave;
+            // that must be what it actually served.
+            if r_block.evidence.kind() != report.reference_evidence {
+                return Err(AuditError::Scan(ScanError::InconsistentBatch {
+                    backend_id: reference_id,
+                    reason: format!(
+                        "block {height} carries another kind of evidence than the source declares"
+                    ),
+                }));
+            }
             let stored_block = store.block_at(height)?.ok_or_else(|| {
                 StoreError::Invariant(format!(
                     "no stored block at height {height} below the checkpoint"
@@ -252,7 +277,7 @@ pub fn audit_store(
                     d.txid, d.vout, d.block.hash, stored_block.hash
                 ))));
             }
-            let same_block = stored_block.hash == r_block.block.hash;
+            let same_block = stored_block == r_block.block;
             if !same_block {
                 report.block_hash_mismatches.push(height);
             }

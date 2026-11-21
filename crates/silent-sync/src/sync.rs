@@ -27,7 +27,7 @@ use crate::{
     network::ChainIdentity,
     protocol::ReceiveScanner,
     source::{ScanSource, SourceError},
-    store::{StoreError, StoreMeta, SyncStore, SCANNER_VERSION},
+    store::{bound_meta, StoreError, StoreMeta, SyncStore, SCANNER_VERSION},
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -54,10 +54,18 @@ pub struct SyncOptions {
     /// Stop after committing at least this many blocks in this call (whole
     /// chunks are always committed). The store stays resumable.
     pub max_blocks: Option<u64>,
-    /// Deepest reorganization that is followed: how many scanned blocks a
-    /// call may discard when the source's chain no longer contains the
-    /// checkpoint. A source that asks for more is refused and the store is
-    /// left as it is. `None` removes the limit.
+    /// Deepest reorganization that is followed: how many scanned blocks
+    /// **one call** may discard when the source's chain no longer contains
+    /// the checkpoint. A source that asks for more in one call is refused
+    /// and the store is left as it is. `None` removes the limit.
+    ///
+    /// This bounds a single call, not a sequence of them. A competing chain
+    /// is only followed once it reaches the checkpoint's height, so a call
+    /// that completes never leaves the store lower than it was; but a source
+    /// that makes each call fail right after its rollback can still take
+    /// the store down by up to this many blocks per call. Every rollback is
+    /// reported ([`SyncReport::reorg`], also in the partial report of
+    /// [`SyncError::Interrupted`]): watch for repeated ones.
     ///
     /// The default is [`DEFAULT_MAX_REORG_DEPTH`].
     pub max_reorg_depth: Option<u32>,
@@ -143,6 +151,24 @@ pub enum SyncError {
         /// Height of the stored checkpoint.
         checkpoint: u32,
     },
+    #[error(
+        "source `{backend_id}` shows a different chain that ends at height {source_tip}, below \
+         the stored checkpoint {checkpoint}; refusing to discard scanned blocks for a shorter \
+         chain. Sync again once the source's chain has reached height {checkpoint}"
+    )]
+    /// The source's chain ends below the stored checkpoint and its tip is not
+    /// one of the stored blocks: a competing chain, but a shorter one. It is
+    /// not followed until it reaches the checkpoint's height, so that a
+    /// source cannot shrink the store by showing ever shorter chains.
+    /// Nothing was changed.
+    CompetingChainShorter {
+        /// Backend that was asked.
+        backend_id: String,
+        /// Height of the source's tip.
+        source_tip: u32,
+        /// Height of the stored checkpoint.
+        checkpoint: u32,
+    },
     #[error("target height {target} is above the source's tip {tip}")]
     /// The requested target height is above the source's tip.
     TargetAboveTip {
@@ -178,7 +204,7 @@ pub enum SyncError {
         /// Height of the stored checkpoint.
         checkpoint: u32,
         /// Number of stored blocks found not to be on the source's chain
-        /// when the search was stopped (the fork is at least this deep).
+        /// when the search was stopped: `limit + 1` (the fork may be deeper).
         at_least: u32,
         /// The limit that was exceeded.
         limit: u32,
@@ -282,13 +308,12 @@ pub enum StopReason {
 pub fn new_store_meta(
     source: &dyn ScanSource,
     scanner: &ReceiveScanner,
-    wallet_id: &str,
     birthday: u32,
     birthday_basis: &str,
 ) -> StoreMeta {
     StoreMeta {
         chain: source.chain(),
-        wallet_id: wallet_id.to_string(),
+        wallet_id: scanner.wallet_id().to_string(),
         backend_id: source.backend_id().to_string(),
         labels: scanner.labels().collect(),
         birthday,
@@ -305,18 +330,20 @@ pub(crate) struct BindingDifference {
     pub hint: &'static str,
 }
 
-/// Compares a store's binding with what a call was given. `backend_id` is
-/// `None` when the call may legitimately use another backend than the one
-/// the store was filled from (auditing a store against a reference);
-/// `scanner` is `None` when the call may use another label set or scanner
-/// version (scanning a store's range again into a new store).
+/// Compares a store's binding with what a call was given. The receiver is
+/// always the scanner's. `backend_id` is `None` when the call may
+/// legitimately use another backend than the one the store was filled from
+/// (auditing a store against a reference); `same_scan` is `false` when the
+/// call may use another label set or scanner version (scanning a store's
+/// range again into a new store).
 pub(crate) fn binding_difference(
     meta: &StoreMeta,
     chain: ChainIdentity,
     backend_id: Option<&str>,
-    scanner: Option<&ReceiveScanner>,
-    wallet_id: &str,
+    scanner: &ReceiveScanner,
+    same_scan: bool,
 ) -> Option<BindingDifference> {
+    let wallet_id = scanner.wallet_id();
     let differs = |field, stored: String, given: String, hint| {
         Some(BindingDifference {
             field,
@@ -346,7 +373,10 @@ pub(crate) fn binding_difference(
             );
         }
     }
-    let labels: Vec<u32> = scanner?.labels().collect();
+    if !same_scan {
+        return None;
+    }
+    let labels: Vec<u32> = scanner.labels().collect();
     if meta.labels != labels {
         return differs(
             "label set",
@@ -371,14 +401,13 @@ fn check_binding(
     meta: &StoreMeta,
     source: &dyn ScanSource,
     scanner: &ReceiveScanner,
-    wallet_id: &str,
 ) -> Result<(), SyncError> {
     match binding_difference(
         meta,
         source.chain(),
         Some(source.backend_id()),
-        Some(scanner),
-        wallet_id,
+        scanner,
+        true,
     ) {
         Some(d) => Err(SyncError::BindingMismatch {
             field: d.field,
@@ -409,29 +438,47 @@ fn resolve_reorg(
         Ok(source.block_ref(height)?.hash == stored.hash)
     };
 
-    if checkpoint.height <= source_tip.height && on_chain(checkpoint.height, checkpoint)? {
+    if checkpoint.height > source_tip.height {
+        // The source's chain ends below the checkpoint. If its tip is one of
+        // our stored blocks, the source is merely behind (restarting, still
+        // syncing, ...): that is not evidence that the blocks above were
+        // reorganized away. If its tip is another block, it shows a competing
+        // chain that is shorter than what is stored: following it would
+        // discard scanned blocks without scanning as many again, so that a
+        // source could shrink the store call after call. A chain that
+        // replaces ours reaches at least as high; until it does, wait.
+        let merely_behind = store
+            .block_at(source_tip.height)?
+            .is_some_and(|b| b.hash == source_tip.hash)
+            || source_tip.height < meta.birthday;
+        let (backend_id, source_tip, checkpoint) = (
+            source.backend_id().to_string(),
+            source_tip.height,
+            checkpoint.height,
+        );
+        return Err(if merely_behind {
+            SyncError::SourceBehindCheckpoint {
+                backend_id,
+                source_tip,
+                checkpoint,
+            }
+        } else {
+            SyncError::CompetingChainShorter {
+                backend_id,
+                source_tip,
+                checkpoint,
+            }
+        });
+    }
+    if on_chain(checkpoint.height, checkpoint)? {
         return Ok(None);
     }
-    if checkpoint.height > source_tip.height {
-        // The source is shorter. If its tip is one of our stored blocks, the
-        // source is merely behind (restarting, still syncing, ...): that is
-        // not evidence that the blocks above were reorganized away.
-        let stored_at_tip = store.block_at(source_tip.height)?;
-        if stored_at_tip.is_some_and(|b| b.hash == source_tip.hash)
-            || (source_tip.height < meta.birthday)
-        {
-            return Err(SyncError::SourceBehindCheckpoint {
-                backend_id: source.backend_id().to_string(),
-                source_tip: source_tip.height,
-                checkpoint: checkpoint.height,
-            });
-        }
-    }
 
-    // Walk down to the highest height where both sides agree — but not
-    // further than the caller allows: every step down is a scanned block
-    // that would be discarded. Checked before each step, so a source cannot
-    // make this loop walk the whole store, and before anything is changed.
+    // The source has another block at the checkpoint's height. Walk down to
+    // the highest height where both sides agree — but not further than the
+    // caller allows: every step down is a scanned block that would be
+    // discarded. Checked before each step, so a source cannot make this loop
+    // walk the whole store, and before anything is changed.
     let too_deep = |fork_height: u32| {
         let depth = checkpoint.height - fork_height;
         match max_reorg_depth {
@@ -444,12 +491,13 @@ fn resolve_reorg(
             _ => Ok(()),
         }
     };
-    let mut height = checkpoint.height.min(source_tip.height);
+    let mut height = checkpoint.height;
     let fork_height = loop {
-        if height < meta.birthday {
+        if height <= meta.birthday {
             too_deep(meta.birthday - 1)?;
             break meta.birthday - 1;
         }
+        height -= 1;
         too_deep(height)?;
         let stored = store.block_at(height)?.ok_or_else(|| {
             StoreError::Invariant(format!(
@@ -459,7 +507,6 @@ fn resolve_reorg(
         if on_chain(height, stored)? {
             break height;
         }
-        height -= 1;
     };
 
     // The block the store will be at afterwards (none if nothing is shared).
@@ -488,11 +535,10 @@ fn resolve_reorg(
 pub fn sync(
     source: &dyn ScanSource,
     scanner: &ReceiveScanner,
-    wallet_id: &str,
     store: &mut dyn SyncStore,
     options: &SyncOptions,
 ) -> Result<SyncReport, SyncError> {
-    sync_with_progress(source, scanner, wallet_id, store, options, &mut |_| {})
+    sync_with_progress(source, scanner, store, options, &mut |_| {})
 }
 
 /// Like [`sync`], calling `on_commit` with the new checkpoint after every
@@ -506,7 +552,6 @@ pub fn sync(
 pub fn sync_with_progress(
     source: &dyn ScanSource,
     scanner: &ReceiveScanner,
-    wallet_id: &str,
     store: &mut dyn SyncStore,
     options: &SyncOptions,
     on_commit: &mut dyn FnMut(BlockRef),
@@ -514,8 +559,8 @@ pub fn sync_with_progress(
     if options.chunk_size == 0 {
         return Err(SyncError::InvalidChunkSize);
     }
-    let meta = store.meta()?.ok_or(StoreError::NotInitialized)?;
-    check_binding(&meta, source, scanner, wallet_id)?;
+    let meta = bound_meta(store)?;
+    check_binding(&meta, source, scanner)?;
     let backend_id = source.backend_id().to_string();
 
     let source_tip = source.tip()?;

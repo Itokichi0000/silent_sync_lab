@@ -80,7 +80,6 @@
 //!     store.initialize(&new_store_meta(
 //!         &source,
 //!         &scanner,
-//!         &keys.wallet_id(),
 //!         birthday,
 //!         "the wallet was created after this height",
 //!     ))?;
@@ -88,7 +87,6 @@
 //!     let report = silent_sync::sync(
 //!         &source,
 //!         &scanner,
-//!         &keys.wallet_id(),
 //!         &mut store,
 //!         &SyncOptions::default(),
 //!     )?;

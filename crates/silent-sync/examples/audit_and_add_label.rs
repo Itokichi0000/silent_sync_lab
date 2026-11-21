@@ -45,7 +45,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         .nth(1)
         .ok_or("usage: audit_and_add_label <fixture.json>")?;
     let keys = test_vector_keys()?;
-    let wallet_id = keys.wallet_id();
     let full_blocks = FixtureSource::from_path(Path::new(&path))?;
     let index = LocalTweakIndex::new(
         FixtureSource::from_path(Path::new(&path))?,
@@ -58,30 +57,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     store.initialize(&new_store_meta(
         &index,
         &scanner,
-        &wallet_id,
         1,
         "the fixture chain starts at height 1",
     ))?;
-    sync(
-        &index,
-        &scanner,
-        &wallet_id,
-        &mut store,
-        &SyncOptions::default(),
-    )?;
+    sync(&index, &scanner, &mut store, &SyncOptions::default())?;
     println!(
         "synced from the index: {} outputs",
         store.detections()?.len()
     );
 
     // 2. Audit what was stored against full blocks.
-    let audit = audit_store(
-        &full_blocks,
-        &scanner,
-        &wallet_id,
-        &store,
-        &AuditOptions::default(),
-    )?;
+    let audit = audit_store(&full_blocks, &scanner, &store, &AuditOptions::default())?;
     println!(
         "audit against full blocks: identical: {} ({} agreed, {} only in the store, {} only \
          in the blocks)",
@@ -94,7 +80,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let rescan = rescan_into(
         &index,
         &more_labels,
-        &wallet_id,
         &store,
         &mut fresh,
         &SyncOptions::default(),
@@ -120,13 +105,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // take its place now.
     store = fresh;
 
-    let audit = audit_store(
-        &full_blocks,
-        &more_labels,
-        &wallet_id,
-        &store,
-        &AuditOptions::default(),
-    )?;
+    let audit = audit_store(&full_blocks, &more_labels, &store, &AuditOptions::default())?;
     println!(
         "audit after the rescan: identical: {} ({} agreed)",
         audit.identical, audit.agreed

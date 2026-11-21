@@ -18,11 +18,12 @@ impl AuditOptions
     Store(#[from] StoreError),
     #[error(transparent)]
     Scan(#[from] ScanError),
-    #[error("the store is bound to a different {field}: stored `{stored}`, given `{given}`")]
+    #[error("the store is bound to a different {field}: stored `{stored}`, given `{given}`{hint}")]
     BindingMismatch {
         field: &'static str,
         stored: String,
         given: String,
+        hint: &'static str,
     },
     #[error("the store holds no scanned blocks: there is nothing to audit")]
     NothingStored,
@@ -53,7 +54,7 @@ impl From<SourceError> for AuditError
     pub block_hash_mismatches: Vec<u32>,
     pub identical: bool,
     pub unexplained: u64,
-pub fn audit_store( reference: &dyn ScanSource, scanner: &ReceiveScanner, wallet_id: &str, store: &dyn SyncStore, options: &AuditOptions, ) -> Result<StoreAuditReport, AuditError>
+pub fn audit_store( reference: &dyn ScanSource, scanner: &ReceiveScanner, store: &dyn SyncStore, options: &AuditOptions, ) -> Result<StoreAuditReport, AuditError>
 
 ## engine.rs
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] #[non_exhaustive] pub enum ScanError
@@ -262,9 +263,11 @@ pub struct ReceiveScanner
     <private field>
     <private field>
     <private field>
+    <private field>
 impl ReceiveScanner
     pub fn new(keys: &ReceiverKeys, labels: &[u32]) -> Result<Self, ProtocolError>
     #[cfg(feature = "low-level")] pub fn with_exact_labels(keys: &ReceiverKeys, labels: &[u32]) -> Result<Self, ProtocolError>
+    pub fn wallet_id(&self) -> &str
     pub fn labels(&self) -> impl Iterator<Item = u32> + '_
     low_level! fn eligibility( tx: &Transaction, prevouts: &[TxOut], ) -> Result<Result<(), SkipReason>, ProtocolError>
     low_level! fn scan_tx( &self, tx: &Transaction, prevouts: &[TxOut], ) -> Result<TxScanOutcome, ProtocolError>
@@ -275,8 +278,10 @@ impl fmt::Debug for ReceiveScanner
 
 ## rescan.rs
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] #[non_exhaustive] pub enum RescanError
-    #[error(transparent)]
-    Store(#[from] StoreError),
+    #[error("the store in use: {0}")]
+    CurrentStore(StoreError),
+    #[error("the fresh store: {0}")]
+    FreshStore(StoreError),
     #[error(transparent)]
     Sync(#[from] SyncError),
     #[error("the store is bound to a different {field}: stored `{stored}`, given `{given}`")]
@@ -309,8 +314,7 @@ impl fmt::Debug for ReceiveScanner
     },
     #[error(
         "the checkpoint of the store in use (height {height}) is not on the chain that was \
-         rescanned; sync the store in use first, then start the rescan again with an empty \
-         fresh store"
+         rescanned; sync the store in use first, then run the rescan again"
     )]
     CheckpointNotOnChain {
         height: u32,
@@ -332,8 +336,9 @@ impl fmt::Debug for ReceiveScanner
     pub reproduced: u64,
     pub added: Vec<DetectedOutput>,
     pub in_new_blocks: u64,
+    pub continued_from: Option<BlockRef>,
     pub last_sync: SyncReport,
-pub fn rescan_into( source: &dyn ScanSource, scanner: &ReceiveScanner, wallet_id: &str, current: &dyn SyncStore, fresh: &mut dyn SyncStore, options: &SyncOptions, ) -> Result<RescanReport, RescanError>
+pub fn rescan_into( source: &dyn ScanSource, scanner: &ReceiveScanner, current: &dyn SyncStore, fresh: &mut dyn SyncStore, options: &SyncOptions, ) -> Result<RescanReport, RescanError>
 
 ## source/bitcoin_core.rs
 #[derive(Debug)] pub struct CoreRestSource
@@ -549,6 +554,16 @@ impl Default for SyncOptions
         source_tip: u32,
         checkpoint: u32,
     },
+    #[error(
+        "source `{backend_id}` shows a different chain that ends at height {source_tip}, below \
+         the stored checkpoint {checkpoint}; refusing to discard scanned blocks for a shorter \
+         chain. Sync again once the source's chain has reached height {checkpoint}"
+    )]
+    CompetingChainShorter {
+        backend_id: String,
+        source_tip: u32,
+        checkpoint: u32,
+    },
     #[error("target height {target} is above the source's tip {tip}")]
     TargetAboveTip {
         target: u32,
@@ -611,9 +626,9 @@ impl From<SourceError> for SyncError
     BirthdayAboveTip,
     TipChanged,
     Error,
-pub fn new_store_meta( source: &dyn ScanSource, scanner: &ReceiveScanner, wallet_id: &str, birthday: u32, birthday_basis: &str, ) -> StoreMeta
-pub fn sync( source: &dyn ScanSource, scanner: &ReceiveScanner, wallet_id: &str, store: &mut dyn SyncStore, options: &SyncOptions, ) -> Result<SyncReport, SyncError>
-pub fn sync_with_progress( source: &dyn ScanSource, scanner: &ReceiveScanner, wallet_id: &str, store: &mut dyn SyncStore, options: &SyncOptions, on_commit: &mut dyn FnMut(BlockRef), ) -> Result<SyncReport, SyncError>
+pub fn new_store_meta( source: &dyn ScanSource, scanner: &ReceiveScanner, birthday: u32, birthday_basis: &str, ) -> StoreMeta
+pub fn sync( source: &dyn ScanSource, scanner: &ReceiveScanner, store: &mut dyn SyncStore, options: &SyncOptions, ) -> Result<SyncReport, SyncError>
+pub fn sync_with_progress( source: &dyn ScanSource, scanner: &ReceiveScanner, store: &mut dyn SyncStore, options: &SyncOptions, on_commit: &mut dyn FnMut(BlockRef), ) -> Result<SyncReport, SyncError>
 
 ## verify.rs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)] #[serde(rename_all = "snake_case")] pub enum Side

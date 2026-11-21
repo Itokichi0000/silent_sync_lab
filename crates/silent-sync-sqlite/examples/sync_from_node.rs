@@ -77,7 +77,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         store.initialize(&new_store_meta(
             &source,
             &scanner,
-            &keys.wallet_id(),
             birthday,
             "given on the command line",
         ))?;
@@ -87,7 +86,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let result = sync_with_progress(
         &source,
         &scanner,
-        &keys.wallet_id(),
         &mut store,
         &SyncOptions::default(),
         &mut |checkpoint| println!("committed up to height {}", checkpoint.height),

@@ -12,10 +12,15 @@
 //! transaction, so a process killed at any point leaves either the previous
 //! or the new state on disk.
 //!
-//! A store whose range was scanned again into a second file (to add labels,
-//! see `silent_sync::rescan`) is exchanged for it with
-//! [`replace_store_file`]: one atomic rename, after checking that the new
-//! file holds everything the old one holds.
+//! A store whose range is scanned again into a second file (to add labels,
+//! see `silent_sync::rescan`) gets that file from [`open_rescan_file`] and is
+//! exchanged for it with [`replace_store_file`]: one atomic rename, after
+//! checking that the new file holds everything the old one holds. Both only
+//! accept a regular file of the store's owner that others cannot access —
+//! never a link, never someone else's file.
+//!
+//! Files are created exclusively: nothing that already exists at a path is
+//! written to, and a symbolic link is not followed.
 //!
 //! One process per store file is the supported use. Writes take the SQLite
 //! write lock up front and wait a few seconds for it, so a second process
@@ -34,7 +39,7 @@ use silent_sync::{
     models::{BlockRef, DetectedOutput, EvidenceKind, MatchProvenance},
     store::{check_append, sort_detections, StoreError, StoreMeta, SyncStore},
 };
-use std::{path::Path, time::Duration};
+use std::{collections::HashSet, path::Path, time::Duration};
 
 /// Bumped whenever the table layout changes. Older files are refused.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -77,25 +82,40 @@ fn corrupt(what: &str) -> StoreError {
 }
 
 impl SqliteStore {
-    /// Creates a new database file. Fails if `path` already exists, so an
-    /// existing store is never silently replaced.
+    /// Creates a new database file. Fails if anything already exists at
+    /// `path` — a file, a directory, or a symbolic link, even a dangling one
+    /// — so an existing store is never replaced and the database is never
+    /// written somewhere a link points to.
     pub fn create(path: &Path) -> Result<Self, StoreError> {
-        if path.exists() {
-            return Err(StoreError::Backend(format!(
-                "{} already exists; refusing to overwrite it",
-                path.display()
-            )));
-        }
-        let conn = Connection::open(path).map_err(backend)?;
-        restrict_permissions(path)?;
+        // Exclusive creation, owner-only from the first moment: the check
+        // and the creation are one step, and a link is not followed.
+        create_private_file(path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                StoreError::Backend(format!(
+                    "{} already exists; refusing to overwrite it",
+                    path.display()
+                ))
+            } else {
+                StoreError::Backend(format!("cannot create {}: {e}", path.display()))
+            }
+        })?;
+        let mut conn = Connection::open(path).map_err(backend)?;
         Self::configure(&conn)?;
-        conn.execute_batch(SCHEMA).map_err(backend)?;
-        conn.execute(
+        Self::write_schema(&mut conn)?;
+        Ok(Self { conn })
+    }
+
+    /// Tables and schema version in one transaction: a file is either blank
+    /// or a complete, empty store, also when the process is killed here.
+    fn write_schema(conn: &mut Connection) -> Result<(), StoreError> {
+        let tx = conn.transaction().map_err(backend)?;
+        tx.execute_batch(SCHEMA).map_err(backend)?;
+        tx.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
         )
         .map_err(backend)?;
-        Ok(Self { conn })
+        tx.commit().map_err(backend)
     }
 
     /// Opens an existing database file. Fails if it does not exist or was
@@ -117,14 +137,9 @@ impl SqliteStore {
 
     /// A private in-memory database, for tests.
     pub fn in_memory() -> Result<Self, StoreError> {
-        let conn = Connection::open_in_memory().map_err(backend)?;
+        let mut conn = Connection::open_in_memory().map_err(backend)?;
         Self::configure(&conn)?;
-        conn.execute_batch(SCHEMA).map_err(backend)?;
-        conn.execute(
-            "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
-            params![SCHEMA_VERSION.to_string()],
-        )
-        .map_err(backend)?;
+        Self::write_schema(&mut conn)?;
         Ok(Self { conn })
     }
 
@@ -245,15 +260,95 @@ impl SqliteStore {
     }
 }
 
-#[cfg(unix)]
-fn restrict_permissions(path: &Path) -> Result<(), StoreError> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(backend)
+/// Creates an empty file that did not exist, readable and writable by its
+/// owner only where the platform has such permissions.
+fn create_private_file(path: &Path) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path).map(drop)
 }
 
-#[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) -> Result<(), StoreError> {
+/// What a rescan file must be before it is opened or put in the place of a
+/// store: a regular file — not a link to somewhere else — that belongs to
+/// the owner of the store and that nobody else can read or write. Without
+/// this, whoever can create a file next to the store (a shared directory)
+/// could plant one and have its contents become the store.
+fn check_private_file_of_the_store_owner(path: &Path, store: &Path) -> Result<(), StoreError> {
+    let refuse =
+        |why: &str| StoreError::Invariant(format!("refusing to use {}: it {why}", path.display()));
+    let found = std::fs::symlink_metadata(path).map_err(backend)?;
+    if !found.file_type().is_file() {
+        return Err(refuse("is not a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let owner = std::fs::metadata(store).map_err(backend)?.uid();
+        if found.uid() != owner {
+            return Err(refuse("does not belong to the owner of the store"));
+        }
+        if found.mode() & 0o077 != 0 {
+            return Err(refuse("can be read or written by other users"));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = store;
     Ok(())
+}
+
+/// Whether the file holds nothing yet: zero bytes, or a database without any
+/// table (what is left when creating a store was interrupted).
+fn is_blank_database(path: &Path) -> Result<bool, StoreError> {
+    if std::fs::metadata(path).map_err(backend)?.len() == 0 {
+        return Ok(true);
+    }
+    let Ok(conn) = Connection::open(path) else {
+        return Ok(false);
+    };
+    // Reading also rolls back a transaction a killed process left open.
+    Ok(conn
+        .query_row("SELECT COUNT(*) FROM sqlite_master", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .is_ok_and(|tables| tables == 0))
+}
+
+fn journal_of(path: &Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push("-journal");
+    name.into()
+}
+
+/// Opens the file a rescan of the store at `current` is written to: creates
+/// it at `fresh` if nothing is there, and otherwise continues with what an
+/// earlier, unfinished rescan left.
+///
+/// A file that is already there is only used if it is a regular file that
+/// belongs to the owner of the store and is not accessible to others; a
+/// symbolic link is refused. A file left blank by an interrupted creation is
+/// replaced by a new one. What a continued file holds is taken as it is —
+/// it is not scanned again — which is why it is held to the same standard as
+/// the store itself.
+pub fn open_rescan_file(current: &Path, fresh: &Path) -> Result<SqliteStore, StoreError> {
+    match std::fs::symlink_metadata(fresh) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => SqliteStore::create(fresh),
+        Err(e) => Err(backend(e)),
+        Ok(_) => {
+            check_private_file_of_the_store_owner(fresh, current)?;
+            if is_blank_database(fresh)? {
+                std::fs::remove_file(fresh).map_err(backend)?;
+                let _ = std::fs::remove_file(journal_of(fresh));
+                SqliteStore::create(fresh)
+            } else {
+                SqliteStore::open(fresh)
+            }
+        }
+    }
 }
 
 /// Puts the store file `fresh` in the place of the store file `current`,
@@ -268,8 +363,15 @@ fn restrict_permissions(_path: &Path) -> Result<(), StoreError> {
 /// and hold every detection `current` holds, exactly as it is. Anything else
 /// is refused and both files stay as they are.
 ///
+/// `fresh` must also be a regular file of the store's owner that others
+/// cannot access (see [`open_rescan_file`]): its contents become the store.
+///
 /// Both files must be closed, on the same file system, and not in use by
-/// another process.
+/// another process. Once this returns `Ok` the path `current` holds the new
+/// store; whether the rename has already reached the disk is not confirmed
+/// (the directory is synced where possible, and a failure to do so is not
+/// an error: after a crash the path holds either store, both valid, and if
+/// it is the old one the fresh file is still there).
 pub fn replace_store_file(current: &Path, fresh: &Path) -> Result<(), StoreError> {
     let refuse = |why: String| {
         StoreError::Invariant(format!(
@@ -278,6 +380,15 @@ pub fn replace_store_file(current: &Path, fresh: &Path) -> Result<(), StoreError
             fresh.display()
         ))
     };
+    for path in [current, fresh] {
+        if !path.is_file() {
+            return Err(StoreError::Backend(format!(
+                "{} does not exist",
+                path.display()
+            )));
+        }
+    }
+    check_private_file_of_the_store_owner(fresh, current)?;
     {
         let old = SqliteStore::open(current)?;
         let new = SqliteStore::open(fresh)?;
@@ -315,7 +426,7 @@ pub fn replace_store_file(current: &Path, fresh: &Path) -> Result<(), StoreError
                 )));
             }
         }
-        let held = new.detections()?;
+        let held: HashSet<DetectedOutput> = new.detections()?.into_iter().collect();
         if let Some(lost) = old.detections()?.iter().find(|d| !held.contains(d)) {
             return Err(refuse(format!(
                 "the new store does not hold the detection {}:{} of the old one",
@@ -325,12 +436,16 @@ pub fn replace_store_file(current: &Path, fresh: &Path) -> Result<(), StoreError
         // Both connections are closed here, before the file is moved.
     }
     std::fs::rename(fresh, current).map_err(backend)?;
-    // Make the rename itself durable where the platform allows it.
+    // From here on the store *is* replaced: nothing below may report failure.
+    // Syncing the directory makes the rename durable where the platform
+    // allows it; if that fails, the rename still happened.
     #[cfg(unix)]
-    if let Some(dir) = current.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::File::open(dir)
-            .and_then(|d| d.sync_all())
-            .map_err(backend)?;
+    {
+        let dir = current
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
     }
     Ok(())
 }

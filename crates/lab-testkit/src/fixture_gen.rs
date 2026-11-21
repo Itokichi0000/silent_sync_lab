@@ -742,3 +742,44 @@ pub fn generate_json() -> String {
     json.push('\n');
     json
 }
+
+/// A transaction that is **not** built as BIP352 prescribes: it pays the lab
+/// receiver twice with the same output counter `k = 0` — vout 0 to the
+/// address labelled [`LABEL_NOT_BACKED_UP`], vout 1 to the unlabelled
+/// address. A sender that derives each output on its own, instead of
+/// counting per receiver, produces this; so can anyone who knows two of the
+/// receiver's addresses. Returned with the outputs its inputs spend.
+///
+/// The upstream scanner reports one output per `k` (RESEARCH U-7, DECISIONS
+/// O-011), so which of the two is detected depends on the label set.
+pub fn same_counter_twice_tx() -> (Transaction, Vec<TxOut>) {
+    let network = Network::Regtest;
+    let receiver = lab_receiver_keys();
+    let code = |address: SilentPaymentAddress| {
+        SilentPaymentCode::new_v0(
+            address.scan_public_key(),
+            address.spend_public_key(),
+            BitcoinNetwork::Regtest,
+        )
+    };
+    let unlabelled = code(receiver.address(network));
+    let labelled = code(
+        receiver
+            .labelled_address(network, LABEL_NOT_BACKED_UP)
+            .expect("label"),
+    );
+    let inputs = [input(900, InputKind::P2wpkh)];
+    let to_labelled = silent_payment_scripts(&inputs, std::slice::from_ref(&labelled));
+    let to_unlabelled = silent_payment_scripts(&inputs, std::slice::from_ref(&unlabelled));
+    let (transaction, _) = tx(
+        &inputs,
+        vec![
+            (11_000, to_labelled[0].clone()),
+            (22_000, to_unlabelled[0].clone()),
+        ],
+    );
+    (
+        transaction,
+        inputs.iter().map(|i| i.prevout.clone()).collect(),
+    )
+}

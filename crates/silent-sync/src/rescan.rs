@@ -17,13 +17,19 @@
 //! as it was.
 //!
 //! The same function rebuilds a store written by another scanner version.
+//!
+//! A rescan that was interrupted is continued by calling the function again
+//! with the same fresh store. What that store already holds is then taken as
+//! it is — it is not scanned a second time — so a fresh store must be kept as
+//! carefully as the store in use between the calls.
+//! [`RescanReport::continued_from`] says how much came from earlier calls.
 
 use crate::{
     bitcoin::OutPoint,
     models::{BlockRef, DetectedOutput},
     protocol::ReceiveScanner,
     source::ScanSource,
-    store::{StoreError, StoreMeta, SyncStore, SCANNER_VERSION},
+    store::{bound_meta, StoreError, StoreMeta, SyncStore, SCANNER_VERSION},
     sync::{binding_difference, sync, SyncError, SyncOptions, SyncReport},
 };
 use serde::Serialize;
@@ -36,9 +42,12 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum RescanError {
-    #[error(transparent)]
-    /// One of the two stores failed or refused an operation.
-    Store(#[from] StoreError),
+    #[error("the store in use: {0}")]
+    /// The store in use failed, or is not a usable store.
+    CurrentStore(StoreError),
+    #[error("the fresh store: {0}")]
+    /// The fresh store failed or refused an operation.
+    FreshStore(StoreError),
     #[error(transparent)]
     /// Scanning into the fresh store failed or was interrupted.
     Sync(#[from] SyncError),
@@ -88,11 +97,11 @@ pub enum RescanError {
     },
     #[error(
         "the checkpoint of the store in use (height {height}) is not on the chain that was \
-         rescanned; sync the store in use first, then start the rescan again with an empty \
-         fresh store"
+         rescanned; sync the store in use first, then run the rescan again"
     )]
     /// The source's chain no longer contains the current store's checkpoint
-    /// (a reorganization the current store has not followed yet).
+    /// (a reorganization the current store has not followed yet). Once the
+    /// current store has been synced, the same fresh store can be continued.
     CheckpointNotOnChain {
         /// Height of the current store's checkpoint.
         height: u32,
@@ -103,9 +112,19 @@ pub enum RescanError {
         outputs.len()
     )]
     /// The current store holds detections the rescan did not find again, or
-    /// found with another amount, label or block. With the same source and
-    /// more labels this cannot happen: the source answers differently than
-    /// it did, or one of the stores was altered.
+    /// found with another amount, label or block. Possible causes:
+    ///
+    /// * the source answers differently than it did when the current store
+    ///   was filled, or one of the two stores was altered;
+    /// * a transaction that was not built as BIP352 prescribes: one that
+    ///   pays two of the receiver's addresses with the same output counter
+    ///   `k`. The upstream scanner reports one output per `k`, so which of
+    ///   the two is detected depends on the label set — knowing one more
+    ///   label can replace a detected output by another. Anyone who knows
+    ///   two of the receiver's addresses can make such a transaction.
+    ///
+    /// In both cases the two results disagree about what was received, and
+    /// the function does not pick one.
     NotReproduced {
         /// The detections of the current store that are not in the fresh
         /// store exactly as they are.
@@ -136,6 +155,10 @@ pub struct RescanReport {
     pub added: Vec<DetectedOutput>,
     /// Detections in blocks above the current store's checkpoint.
     pub in_new_blocks: u64,
+    /// Checkpoint the fresh store already had when this call started: blocks
+    /// up to it were scanned by earlier calls and taken as stored. `None`
+    /// when this call scanned everything itself.
+    pub continued_from: Option<BlockRef>,
     /// Report of the sync that completed the fresh store. When a rescan was
     /// continued, it covers the last call only.
     pub last_sync: SyncReport,
@@ -156,18 +179,17 @@ pub struct RescanReport {
 pub fn rescan_into(
     source: &dyn ScanSource,
     scanner: &ReceiveScanner,
-    wallet_id: &str,
     current: &dyn SyncStore,
     fresh: &mut dyn SyncStore,
     options: &SyncOptions,
 ) -> Result<RescanReport, RescanError> {
-    let meta = current.meta()?.ok_or(StoreError::NotInitialized)?;
+    let meta = bound_meta(current).map_err(RescanError::CurrentStore)?;
     if let Some(d) = binding_difference(
         &meta,
         source.chain(),
         Some(source.backend_id()),
-        None,
-        wallet_id,
+        scanner,
+        false,
     ) {
         return Err(RescanError::BindingMismatch {
             field: d.field,
@@ -187,18 +209,20 @@ pub fn rescan_into(
         scanner_version: SCANNER_VERSION.to_string(),
         ..meta.clone()
     };
-    match fresh.meta()? {
-        None => fresh.initialize(&fresh_meta)?,
+    let (of_current, of_fresh) = (RescanError::CurrentStore, RescanError::FreshStore);
+    match fresh.meta().map_err(of_fresh)? {
+        None => fresh.initialize(&fresh_meta).map_err(of_fresh)?,
         Some(existing) if existing == fresh_meta => {}
         Some(_) => return Err(RescanError::FreshStoreInUse),
     }
+    let continued_from = fresh.checkpoint().map_err(of_fresh)?;
 
-    let last_sync = sync(source, scanner, wallet_id, fresh, options)?;
+    let last_sync = sync(source, scanner, fresh, options)?;
 
     // The fresh store may replace the current one only if it reaches as far,
     // on the same chain ...
-    let previous_checkpoint = current.checkpoint()?;
-    let checkpoint = fresh.checkpoint()?;
+    let previous_checkpoint = current.checkpoint().map_err(of_current)?;
+    let checkpoint = fresh.checkpoint().map_err(of_fresh)?;
     if let Some(previous) = previous_checkpoint {
         if !checkpoint.is_some_and(|cp| cp.height >= previous.height) {
             return Err(RescanError::Incomplete {
@@ -206,7 +230,7 @@ pub fn rescan_into(
                 needed: previous.height,
             });
         }
-        if fresh.block_at(previous.height)? != Some(previous) {
+        if fresh.block_at(previous.height).map_err(of_fresh)? != Some(previous) {
             return Err(RescanError::CheckpointNotOnChain {
                 height: previous.height,
             });
@@ -214,12 +238,12 @@ pub fn rescan_into(
     }
 
     // ... and holds everything the current one holds, exactly as it is.
-    let rescanned = fresh.detections()?;
+    let rescanned = fresh.detections().map_err(of_fresh)?;
     let by_outpoint: BTreeMap<OutPoint, &DetectedOutput> = rescanned
         .iter()
         .map(|d| (OutPoint::new(d.txid, d.vout), d))
         .collect();
-    let held = current.detections()?;
+    let held = current.detections().map_err(of_current)?;
     let not_reproduced: Vec<DetectedOutput> = held
         .iter()
         .filter(|d| by_outpoint.get(&OutPoint::new(d.txid, d.vout)) != Some(d))
@@ -253,6 +277,7 @@ pub fn rescan_into(
         reproduced: held.len() as u64,
         added,
         in_new_blocks,
+        continued_from,
         last_sync,
     })
 }

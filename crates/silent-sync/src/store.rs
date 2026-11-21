@@ -43,8 +43,8 @@ pub struct StoreMeta {
     /// Label integers scanned for, ascending. Changing them requires a rescan:
     /// blocks already scanned were not checked for the new labels.
     pub labels: Vec<u32>,
-    /// First block height that is scanned. Payments confirmed below it are
-    /// never found.
+    /// First block height that is scanned, at least 1 (the genesis block
+    /// pays nobody). Payments confirmed below it are never found.
     pub birthday: u32,
     /// Why `birthday` is believed to be at or below the wallet's first
     /// payment. Recorded because a wrong birthday silently loses payments.
@@ -69,6 +69,18 @@ pub enum StoreError {
     #[error("storage backend error: {0}")]
     /// The storage layer failed (I/O, database).
     Backend(String),
+}
+
+/// The binding of an initialized store, checked for what every operation
+/// relies on: a birthday of at least 1.
+pub(crate) fn bound_meta(store: &dyn SyncStore) -> Result<StoreMeta, StoreError> {
+    let meta = store.meta()?.ok_or(StoreError::NotInitialized)?;
+    if meta.birthday == 0 {
+        return Err(StoreError::Invariant(
+            "the store's birthday is 0; the first height that can be scanned is 1".to_string(),
+        ));
+    }
+    Ok(meta)
 }
 
 /// Persistent state of one wallet on one chain through one backend.

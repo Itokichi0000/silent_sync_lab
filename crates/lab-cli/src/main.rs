@@ -10,7 +10,7 @@ mod lab_keys;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use silent_sync::{
-    audit::{audit_store, AuditOptions, StoreAuditReport},
+    audit::{audit_store, AuditError, AuditOptions, StoreAuditReport},
     engine::{scan_range, ScanReport},
     models::{DetectedOutput, EvidenceKind},
     network::{ChainIdentity, Network},
@@ -27,7 +27,7 @@ use silent_sync::{
     sync::{new_store_meta, sync_with_progress, StopReason, SyncError, SyncOptions, SyncReport},
     verify::{cross_check, VerificationReport},
 };
-use silent_sync_sqlite::{replace_store_file, SqliteStore};
+use silent_sync_sqlite::{open_rescan_file, replace_store_file, SqliteStore};
 use std::{
     fmt::Write as _,
     io::{self, Write as _},
@@ -223,16 +223,55 @@ enum LabAction {
         /// Label integer to add (repeatable).
         #[arg(long = "label", required = true)]
         labels: Vec<u32>,
-        /// Blocks fetched, scanned and committed per step.
-        #[arg(long, default_value_t = 100)]
-        chunk_size: u32,
-        /// Stop after this many blocks (whole chunks); run again to continue.
-        #[arg(long)]
-        max_blocks: Option<u64>,
-        /// Print the report as JSON on stdout.
-        #[arg(long)]
-        json: bool,
+        #[command(flatten)]
+        run: RescanRunArgs,
     },
+    /// Scan the stored range again with the labels the store already has,
+    /// into a new file that then replaces the store. Needed for a store that
+    /// was written by another version of the scanner; otherwise it finds
+    /// what the store holds.
+    Rescan {
+        #[command(flatten)]
+        db: DbArg,
+        #[command(flatten)]
+        source: SourceArgs,
+        #[command(flatten)]
+        run: RescanRunArgs,
+    },
+}
+
+#[derive(clap::Args)]
+struct RescanRunArgs {
+    /// Blocks fetched, scanned and committed per step.
+    #[arg(long, default_value_t = 100)]
+    chunk_size: u32,
+    /// Stop after this many blocks (whole chunks); run again to continue.
+    #[arg(long)]
+    max_blocks: Option<u64>,
+    /// Refuse a reorganization of the unfinished rescan that would discard
+    /// more than this many of its blocks. `none` removes the limit.
+    #[arg(long, default_value = "100", value_parser = parse_reorg_limit)]
+    max_reorg_depth: ReorgLimit,
+    /// Discard what an earlier, unfinished rescan left and start over.
+    #[arg(long)]
+    restart: bool,
+    /// Print the report as JSON on stdout.
+    #[arg(long)]
+    json: bool,
+}
+
+impl RescanRunArgs {
+    fn with<'a>(&self, source: &'a SourceArgs) -> RescanArgs<'a> {
+        RescanArgs {
+            source,
+            options: SyncOptions::default()
+                .with_chunk_size(self.chunk_size)
+                .with_max_blocks(self.max_blocks)
+                .with_max_reorg_depth(self.max_reorg_depth.0),
+            restart: self.restart,
+            json: self.json,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -494,20 +533,12 @@ fn run(cli: Cli) -> Result<(), Failure> {
                     db,
                     source,
                     labels,
-                    chunk_size,
-                    max_blocks,
-                    json,
+                    run,
                 },
-        } => lab_add_label(
-            network,
-            &db.db,
-            &source,
-            &labels,
-            SyncOptions::default()
-                .with_chunk_size(chunk_size)
-                .with_max_blocks(max_blocks),
-            json,
-        ),
+        } => lab_rescan(network, &db.db, Some(&labels), run.with(&source)),
+        Command::Lab {
+            action: LabAction::Rescan { db, source, run },
+        } => lab_rescan(network, &db.db, None, run.with(&source)),
         Command::Scan(args) => scan(network, args),
         Command::Sync(args) => sync_command(network, args),
         Command::Status { db, json } => status(network, &db.db, json),
@@ -877,14 +908,13 @@ fn audit_command(network: Network, args: AuditArgs) -> Result<(), Failure> {
     let options = AuditOptions::default()
         .with_first_height(args.from)
         .with_last_height(args.to);
-    let audit = audit_store(
-        reference.as_ref(),
-        &scanner,
-        &keys.wallet_id(),
-        &store,
-        &options,
-    )
-    .map_err(|e| Failure::error(format!("{e}\naudit aborted: no result")))?;
+    let audit = audit_store(reference.as_ref(), &scanner, &store, &options).map_err(|e| {
+        let hint = match &e {
+            AuditError::BindingMismatch { field, .. } => rescan_hint(field),
+            _ => "",
+        };
+        Failure::error(format!("{e}\naudit aborted: no result{hint}"))
+    })?;
 
     if args.json {
         emit_json(&audit)?;
@@ -1019,7 +1049,6 @@ fn bench_command(network: Network, args: BenchArgs) -> Result<(), Failure> {
     };
     let keys = lab_keys::lab_receiver_keys().map_err(Failure::error)?;
     let scanner = ReceiveScanner::new(&keys, &args.labels).map_err(fail)?;
-    let wallet_id = keys.wallet_id();
 
     let sources: Vec<(String, SourceArgs)> = args
         .backends
@@ -1085,7 +1114,7 @@ fn bench_command(network: Network, args: BenchArgs) -> Result<(), Failure> {
         plan.modes.len(),
         plan.repeat
     );
-    let runs = bench::run_plan(&plan, &scanner, &wallet_id, &mut |record, detail| {
+    let runs = bench::run_plan(&plan, &scanner, &mut |record, detail| {
         match &record.error {
             None => eprintln!(
                 "  #{:<3} {:<12} {:<11} repeat {}: {:.2} ms, {} bytes, {} detected",
@@ -1237,13 +1266,7 @@ fn lab_init(
     let source = open_source(network, source_args)?;
     let keys = lab_keys::lab_receiver_keys().map_err(Failure::error)?;
     let scanner = ReceiveScanner::new(&keys, labels).map_err(fail)?;
-    let meta = new_store_meta(
-        source.as_ref(),
-        &scanner,
-        &keys.wallet_id(),
-        birthday,
-        birthday_basis.trim(),
-    );
+    let meta = new_store_meta(source.as_ref(), &scanner, birthday, birthday_basis.trim());
     let mut store = SqliteStore::create(db).map_err(fail)?;
     if let Err(e) = store.initialize(&meta) {
         drop(store);
@@ -1272,59 +1295,80 @@ fn rescan_path(db: &Path) -> PathBuf {
     db.with_file_name(name)
 }
 
-fn lab_add_label(
+/// What `lab add-label` and `lab rescan` share besides the labels.
+struct RescanArgs<'a> {
+    source: &'a SourceArgs,
+    options: SyncOptions,
+    restart: bool,
+    json: bool,
+}
+
+/// `lab add-label` (`add` is not empty) and `lab rescan` (`add` is empty):
+/// scans the stored range again into a file next to the store and replaces
+/// the store with it once it holds everything the store held.
+fn lab_rescan(
     network: Network,
     db: &Path,
-    source_args: &SourceArgs,
-    add: &[u32],
-    options: SyncOptions,
-    json: bool,
+    add: Option<&[u32]>,
+    args: RescanArgs<'_>,
 ) -> Result<(), Failure> {
     let (store, meta) = open_store(network, db)?;
     let mut labels = meta.labels.clone();
-    labels.extend(add.iter().copied().filter(|m| !meta.labels.contains(m)));
+    labels.extend(add.unwrap_or_default());
     labels.sort_unstable();
     labels.dedup();
-    if labels == meta.labels {
+    if add.is_some() && labels == meta.labels {
         return Err(Failure::error(format!(
-            "the store already scans for the label set {:?}; nothing to add",
+            "the store already scans for the label set {:?}; nothing to add (to scan again with \
+             the same labels, use `lab rescan`)",
             meta.labels
         )));
     }
-    let source = open_source(network, source_args)?;
+    let source = open_source(network, args.source)?;
     let keys = lab_keys::lab_receiver_keys().map_err(Failure::error)?;
     let extra: Vec<u32> = labels.iter().copied().filter(|&m| m != 0).collect();
     let scanner = ReceiveScanner::new(&keys, &extra).map_err(fail)?;
 
     let fresh_path = rescan_path(db);
-    let continued = fresh_path.exists();
-    let mut fresh = if continued {
-        SqliteStore::open(&fresh_path).map_err(|e| {
-            Failure::error(format!(
-                "{e}\n{} is left over from an earlier rescan and cannot be used; delete it and \
-                 run the command again. The store was not changed",
-                fresh_path.display()
-            ))
-        })?
-    } else {
-        SqliteStore::create(&fresh_path).map_err(fail)?
-    };
+    let start_over = format!(
+        "to discard {} and start over, run the command with --restart",
+        fresh_path.display()
+    );
+    if args.restart {
+        for path in [fresh_path.clone(), journal_path(&fresh_path)] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => eprintln!("discarded {}", path.display()),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(Failure::error(format!(
+                        "cannot remove {}: {e}",
+                        path.display()
+                    )))
+                }
+            }
+        }
+    }
+    let mut fresh = open_rescan_file(db, &fresh_path).map_err(|e| {
+        Failure::error(format!(
+            "{e}\n{} cannot be used for the rescan; {start_over}. The store was not changed",
+            fresh_path.display()
+        ))
+    })?;
     eprintln!(
-        "{} the rescan of {} with labels {:?} on `{}` ({network}); the store is not changed \
-         until the rescan is complete",
-        if continued { "continuing" } else { "starting" },
+        "scanning the range of {} again with labels {:?} on `{}` ({network}); the store is not \
+         changed until the rescan is complete",
         db.display(),
         labels,
         source.backend_id()
     );
-    let result = rescan_into(
-        source.as_ref(),
-        &scanner,
-        &keys.wallet_id(),
-        &store,
-        &mut fresh,
-        &options,
-    );
+    if let Some(cp) = fresh.checkpoint().map_err(fail)? {
+        eprintln!(
+            "found an unfinished rescan in {} that reaches height {}",
+            fresh_path.display(),
+            cp.height
+        );
+    }
+    let result = rescan_into(source.as_ref(), &scanner, &store, &mut fresh, &args.options);
     let report = match result {
         Ok(report) => report,
         Err(e) => {
@@ -1336,22 +1380,21 @@ fn lab_add_label(
             );
             let advice = match &e {
                 // Nothing was written: do not leave an empty file behind.
-                _ if untouched && !continued => {
+                _ if untouched => {
                     let _ = std::fs::remove_file(&fresh_path);
                     String::new()
                 }
-                RescanError::Incomplete { .. } | RescanError::Sync(_) => {
+                RescanError::Incomplete { .. } => {
                     format!("; {kept}, run the command again to continue")
                 }
                 RescanError::FreshStoreInUse => format!(
-                    "; {} belongs to another rescan: delete it and run the command again",
+                    "; {} belongs to another rescan; {start_over}",
                     fresh_path.display()
                 ),
-                RescanError::CheckpointNotOnChain { .. } => format!(
-                    "; run `sync`, delete {} and add the label again",
-                    fresh_path.display()
-                ),
-                _ => format!("; {kept}"),
+                RescanError::CheckpointNotOnChain { .. } => {
+                    format!("; {kept}: run `sync`, then this command again")
+                }
+                _ => format!("; {kept}: run the command again to continue, or {start_over}"),
             };
             return Err(Failure::error(format!(
                 "{e}\nrescan not completed: the store was not changed{advice}"
@@ -1366,11 +1409,23 @@ fn lab_add_label(
         ))
     })?;
 
-    if json {
+    let shown = if args.json {
         emit_json(&report)
     } else {
         emit(&render_rescan_report(db, &report))
-    }
+    };
+    shown.map_err(|mut failure| {
+        failure
+            .message
+            .push_str("\nthe rescan was completed and the store was replaced");
+        failure
+    })
+}
+
+fn journal_path(db: &Path) -> PathBuf {
+    let mut name = db.as_os_str().to_os_string();
+    name.push("-journal");
+    name.into()
 }
 
 fn render_rescan_report(db: &Path, report: &RescanReport) -> String {
@@ -1384,6 +1439,12 @@ fn render_rescan_report(db: &Path, report: &RescanReport) -> String {
             "labels               : {:?} -> {:?}",
             report.previous_labels, report.labels
         ));
+        if let Some(cp) = report.continued_from {
+            line(format!(
+                "continued from       : height {} (scanned by an earlier run, taken as stored)",
+                cp.height
+            ));
+        }
         line(format!(
             "checkpoint           : {}",
             report
@@ -1437,7 +1498,6 @@ fn sync_command(network: Network, args: SyncArgs) -> Result<(), Failure> {
     // The label set is part of the store's binding, not a per-run choice.
     let extra: Vec<u32> = meta.labels.iter().copied().filter(|&m| m != 0).collect();
     let scanner = ReceiveScanner::new(&keys, &extra).map_err(fail)?;
-    let wallet_id = keys.wallet_id();
     eprintln!(
         "syncing {} on `{}` ({network}) from the stored checkpoint",
         args.db.db.display(),
@@ -1466,7 +1526,6 @@ fn sync_command(network: Network, args: SyncArgs) -> Result<(), Failure> {
     match sync_with_progress(
         source.as_ref(),
         &scanner,
-        &wallet_id,
         &mut store,
         &options,
         &mut on_commit,
@@ -1481,9 +1540,28 @@ fn sync_command(network: Network, args: SyncArgs) -> Result<(), Failure> {
                  committed; the store is consistent and can be synced again"
             )))
         }
-        Err(e) => Err(Failure::error(format!(
-            "{e}\nsync aborted: the store was not changed"
-        ))),
+        Err(e) => {
+            let hint = match &e {
+                SyncError::BindingMismatch { field, .. } => rescan_hint(field),
+                _ => "",
+            };
+            Err(Failure::error(format!(
+                "{e}\nsync aborted: the store was not changed{hint}"
+            )))
+        }
+    }
+}
+
+/// How the CLI does what the library's message calls scanning again into a
+/// new store.
+fn rescan_hint(field: &str) -> &'static str {
+    match field {
+        "scanner version" => {
+            "\nhint: `silent-sync lab rescan` scans the stored range again with this version \
+             and replaces the store when nothing is lost"
+        }
+        "label set" => "\nhint: `silent-sync lab add-label` adds labels to a store",
+        _ => "",
     }
 }
 
@@ -1734,4 +1812,33 @@ fn render_sync_report(report: &SyncReport) -> String {
         "note: detected outputs are not a balance; spent status is not tracked."
     );
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_reorg_limit, rescan_path};
+    use std::path::Path;
+
+    #[test]
+    fn the_reorg_limit_is_a_number_of_blocks_or_none() {
+        let limit = |text: &str| parse_reorg_limit(text).map(|limit| limit.0);
+        assert_eq!(limit("none"), Ok(None));
+        assert_eq!(limit("0"), Ok(Some(0)));
+        assert_eq!(limit("100"), Ok(Some(100)));
+        for text in ["", "None", "-1", "1.5", "many", "4294967296"] {
+            assert!(limit(text).is_err(), "`{text}`");
+        }
+    }
+
+    #[test]
+    fn the_rescan_file_is_next_to_the_store() {
+        assert_eq!(
+            rescan_path(Path::new("/data/lab.sqlite3")),
+            Path::new("/data/lab.sqlite3.rescan")
+        );
+        assert_eq!(
+            rescan_path(Path::new("lab.sqlite3")),
+            Path::new("lab.sqlite3.rescan")
+        );
+    }
 }
