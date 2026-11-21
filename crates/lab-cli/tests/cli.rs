@@ -1,7 +1,7 @@
 //! End-to-end tests of the `silent-sync` binary.
 #![allow(clippy::unwrap_used)] // test code: a panic is the failure report
 
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 const BIN: &str = env!("CARGO_BIN_EXE_silent-sync");
 const FIXTURE: &str = concat!(
@@ -37,7 +37,7 @@ fn run(args: &[&str]) -> (Output, String, String) {
 }
 
 fn sync_args<'a>(extra: &[&'a str]) -> Vec<&'a str> {
-    let mut args = vec!["sync", "--backend", "fixture", "--fixture", FIXTURE];
+    let mut args = vec!["scan", "--backend", "fixture", "--fixture", FIXTURE];
     args.extend_from_slice(extra);
     args
 }
@@ -93,7 +93,7 @@ fn address_show_uses_test_network_prefixes_only() {
 }
 
 #[test]
-fn sync_on_fixture_reports_the_expected_outputs_as_json() {
+fn scan_on_fixture_reports_the_expected_outputs_as_json() {
     let (output, stdout, stderr) = run(&sync_args(&["--label", "1", "--json"]));
     assert!(output.status.success(), "{stderr}");
     let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
@@ -180,7 +180,7 @@ fn sync_on_fixture_reports_the_expected_outputs_as_json() {
 }
 
 #[test]
-fn sync_text_output_does_not_claim_a_balance() {
+fn scan_text_output_does_not_claim_a_balance() {
     let (output, stdout, stderr) = run(&sync_args(&["--from", "2", "--to", "3"]));
     assert!(output.status.success(), "{stderr}");
     assert!(stdout.contains("detected_received_outputs: 3"), "{stdout}");
@@ -190,7 +190,7 @@ fn sync_text_output_does_not_claim_a_balance() {
 }
 
 #[test]
-fn sync_fails_closed() {
+fn scan_fails_closed() {
     // Range beyond the fixture: error, nothing reported.
     let (output, stdout, stderr) = run(&sync_args(&["--to", "99"]));
     assert_eq!(output.status.code(), Some(1));
@@ -201,14 +201,18 @@ fn sync_fails_closed() {
     let (output, stdout, stderr) = run(&sync_args(&["--network", "signet"]));
     assert_eq!(output.status.code(), Some(1));
     assert!(stdout.is_empty());
-    assert!(stderr.contains("chain mismatch"), "{stderr}");
+    assert!(
+        stderr.contains("chain mismatch: --network is signet but source `fixture` serves regtest")
+            && stderr.contains("nothing was scanned"),
+        "{stderr}"
+    );
 
     // Missing / unreadable fixture.
-    let (output, stdout, _) = run(&["sync", "--backend", "fixture"]);
+    let (output, stdout, _) = run(&["scan", "--backend", "fixture"]);
     assert_eq!(output.status.code(), Some(1));
     assert!(stdout.is_empty());
     let (output, stdout, _) = run(&[
-        "sync",
+        "scan",
         "--backend",
         "fixture",
         "--fixture",
@@ -219,18 +223,115 @@ fn sync_fails_closed() {
 }
 
 #[test]
-fn unimplemented_backends_say_so_instead_of_pretending() {
-    for backend in ["core", "oracle-v2"] {
-        let (output, stdout, stderr) = run(&["sync", "--backend", backend]);
-        assert_eq!(output.status.code(), Some(3), "{backend}");
-        assert!(stdout.is_empty());
-        assert!(stderr.contains("not implemented yet") && stderr.contains("Nothing was scanned"));
-    }
+fn doctor_without_urls_probes_nothing_and_says_so() {
     let (output, stdout, _) = run(&["doctor"]);
     assert!(output.status.success());
-    assert!(stdout.contains("backend core      : NOT IMPLEMENTED"));
-    assert!(stdout.contains("backend oracle-v2 : NOT IMPLEMENTED"));
-    assert!(stdout.contains("persistence       : NOT IMPLEMENTED"));
+    assert!(stdout.contains("backend core      : not probed"));
+    assert!(stdout.contains("backend oracle-v2 : not probed"));
+    assert!(stdout.contains("backend local-index: available"));
+    assert!(stdout.contains("persistence       : SQLite store"));
+}
+
+/// A loopback port nothing listens on.
+fn dead_port_url() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    url
+}
+
+/// Without a node, the Core backend must fail visibly and scan nothing.
+#[test]
+fn core_backend_without_a_node_fails_closed() {
+    let url = dead_port_url();
+    let (output, stdout, stderr) = run(&["scan", "--backend", "core", "--core-rest-url", &url]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stdout.is_empty());
+    assert!(
+        stderr.contains("source is unavailable") && stderr.contains("nothing was scanned"),
+        "{stderr}"
+    );
+
+    // `doctor` reports it and does not exit successfully.
+    let (output, stdout, _) = run(&["doctor", "--core-rest-url", &url]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stdout.contains("backend core      : UNAVAILABLE"),
+        "{stdout}"
+    );
+
+    // Remote, named or non-HTTP nodes are refused before any request, and a
+    // password in the URL is not echoed.
+    for url in [
+        "http://192.0.2.1:8332",
+        "https://127.0.0.1:18443",
+        "http://example.com:8332",
+        "http://localhost:18443",
+        "http://127.0.0.1",
+        "http://rpcuser:hunter2@127.0.0.1:18443",
+    ] {
+        let (output, stdout, stderr) = run(&["scan", "--backend", "core", "--core-rest-url", url]);
+        assert_eq!(output.status.code(), Some(1), "{url}");
+        assert!(stdout.is_empty());
+        assert!(stderr.contains("refusing REST URL"), "{url}: {stderr}");
+        assert!(!stderr.contains("hunter2"), "{stderr}");
+    }
+}
+
+/// The Core backend through the CLI, against an in-process fake node serving
+/// the fixture: same result as scanning the fixture file.
+#[test]
+fn core_backend_through_the_cli_matches_the_fixture_scan() {
+    let fixture: sync_core::source::fixture::FixtureFile =
+        serde_json::from_str(&std::fs::read_to_string(FIXTURE).unwrap()).unwrap();
+    let node = lab_testkit::fake_http::FakeCoreRest::serve(&fixture);
+    let url = node.url();
+
+    let (output, stdout, stderr) = run(&["doctor", "--core-rest-url", &url]);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stdout.contains("backend core      : reachable: regtest at height 8"),
+        "{stdout}"
+    );
+    let (output, stdout, _) = run(&["--network", "signet", "doctor", "--core-rest-url", &url]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stdout.contains("UNUSABLE: the node is on regtest, but --network is signet"),
+        "{stdout}"
+    );
+
+    let detections = |args: &[&str]| -> serde_json::Value {
+        let (output, stdout, stderr) = run(args);
+        assert!(output.status.success(), "{args:?}: {stderr}");
+        let mut report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        let mut list = report["detected_received_outputs"].take();
+        for d in list.as_array_mut().unwrap() {
+            d.as_object_mut().unwrap().remove("provenance");
+        }
+        list
+    };
+    let via_core = detections(&[
+        "scan",
+        "--backend",
+        "core",
+        "--core-rest-url",
+        &url,
+        "--label",
+        "1",
+        "--json",
+    ]);
+    let via_file = detections(&sync_args(&["--label", "1", "--json"]));
+    assert_eq!(via_core.as_array().unwrap().len(), 7);
+    assert_eq!(via_core, via_file);
+
+    // A node that says "main" is refused through the CLI as well.
+    node.set_chain_info("main", 8, node.hashes[8]);
+    let (output, stdout, stderr) = run(&["scan", "--backend", "core", "--core-rest-url", &url]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stdout.is_empty() && stderr.contains("mainnet is refused"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -239,5 +340,37 @@ fn there_is_no_send_or_balance_command() {
         let (output, _, stderr) = run(&[command]);
         assert_eq!(output.status.code(), Some(2), "{command}");
         assert!(stderr.contains("unrecognized subcommand"), "{stderr}");
+    }
+}
+
+/// When stdout cannot be written (full disk, reader gone as in
+/// `... | head -c 0`), the command must fail visibly: no panic, no success.
+/// `/dev/full` makes every write fail deterministically.
+#[cfg(target_os = "linux")]
+#[test]
+fn unwritable_stdout_is_an_error_not_a_panic() {
+    for args in [
+        sync_args(&["--label", "1", "--json"]),
+        sync_args(&[]),
+        vec!["doctor"],
+        vec!["address", "show"],
+    ] {
+        let full = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        let output = Command::new(BIN)
+            .args(&args)
+            .stdout(Stdio::from(full))
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("cannot write to stdout"),
+            "{args:?}: {stderr}"
+        );
+        assert!(!stderr.contains("panicked"), "{args:?}: {stderr}");
     }
 }

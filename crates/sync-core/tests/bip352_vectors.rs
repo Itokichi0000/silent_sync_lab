@@ -22,7 +22,10 @@ use sync_core::{
         Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
     },
     network::LabNetwork,
-    protocol::{ProtocolError, ReceiveScanner, ReceiverKeys, SkipReason, TxScanOutcome, K_MAX},
+    protocol::{
+        LabAddress, ProtocolError, ReceiveScanner, ReceiverKeys, SkipReason, TxScanOutcome, K_MAX,
+    },
+    source::{IndexedOutput, IndexedTx},
 };
 
 const VECTORS_JSON: &str =
@@ -160,8 +163,13 @@ fn receiver(given: &Given) -> (ReceiverKeys, SecretKey) {
 /// Addresses in the vectors use the mainnet prefix. `sync-core` cannot encode
 /// for mainnet, so the keys it derived are re-encoded here with upstream's
 /// encoder purely to compare strings.
-fn mainnet_string(code: &bdk_sp::encoding::SilentPaymentCode) -> String {
-    bdk_sp::encoding::SilentPaymentCode::new_v0(code.scan, code.spend, Network::Bitcoin).to_string()
+fn mainnet_string(address: &LabAddress) -> String {
+    bdk_sp::encoding::SilentPaymentCode::new_v0(
+        address.scan_public_key(),
+        address.spend_public_key(),
+        Network::Bitcoin,
+    )
+    .to_string()
 }
 
 /// Checks everything about one receiving case except the K_max special case.
@@ -205,7 +213,9 @@ fn check_receiving(comment: &str, case: &Receiving) {
         .map(|m| {
             // The vectors publish spend private keys, so the full output key
             // can be reconstructed and the reference signature reproduced.
-            let output_sk = spend_sk.add_tweak(&Scalar::from(m.tweak)).unwrap();
+            let output_sk = spend_sk
+                .add_tweak(&Scalar::from(m.sensitive_output_tweak()))
+                .unwrap();
             let (output_pk, _) = output_sk.x_only_public_key(&secp);
             assert_eq!(
                 m.script_pubkey.as_bytes()[2..],
@@ -214,13 +224,41 @@ fn check_receiving(comment: &str, case: &Receiving) {
             );
             let sig = secp.sign_schnorr_with_aux_rand(&msg, &output_sk.keypair(&secp), &aux);
             ExpectedOutput {
-                priv_key_tweak: m.tweak.display_secret().to_string(),
+                priv_key_tweak: m.sensitive_output_tweak().display_secret().to_string(),
                 pub_key: output_pk.to_string(),
                 signature: sig.to_string(),
             }
         })
         .collect();
     found.sort();
+
+    // The same transaction as a tweak index would present it — the expected
+    // public tweak data plus the taproot outputs, no inputs — must yield the
+    // same matches through `scan_indexed_tx`.
+    if let Some(tweak) = case.expected.tweak {
+        let indexed = IndexedTx {
+            txid: tx.compute_txid(),
+            tweak,
+            outputs: tx
+                .output
+                .iter()
+                .enumerate()
+                .map(|(vout, o)| IndexedOutput {
+                    vout: vout as u32,
+                    value_sats: o.value.to_sat(),
+                    output_key: o.script_pubkey.as_bytes()[2..].try_into().unwrap(),
+                })
+                .collect(),
+        };
+        let mut via_index = scanner.scan_indexed_tx(&indexed).unwrap();
+        let mut via_tx = matches.clone();
+        via_index.sort_by_key(|m| m.outpoint);
+        via_tx.sort_by_key(|m| m.outpoint);
+        assert_eq!(
+            via_index, via_tx,
+            "{comment}: index path differs from full-transaction path"
+        );
+    }
 
     let mut expected: Vec<ExpectedOutput> = case
         .expected
@@ -248,7 +286,7 @@ fn vector_file_is_the_pinned_canonical_file() {
 }
 
 #[test]
-fn all_receiving_vectors_except_k_max() {
+fn all_receiving_vectors_except_the_limit_case() {
     let all = vectors();
     let mut cases = 0;
     for case in all.iter().filter(|c| c.comment != K_MAX_VECTOR) {
@@ -324,6 +362,34 @@ fn k_max_vector() {
         ),
     };
     assert_eq!(matches.len(), expected_n);
+
+    // The tweak-index path applies the same cap.
+    let indexed = IndexedTx {
+        txid: tx.compute_txid(),
+        tweak: receiving.expected.tweak.unwrap(),
+        outputs: tx
+            .output
+            .iter()
+            .enumerate()
+            .map(|(vout, o)| IndexedOutput {
+                vout: vout as u32,
+                value_sats: o.value.to_sat(),
+                output_key: o.script_pubkey.as_bytes()[2..].try_into().unwrap(),
+            })
+            .collect(),
+    };
+    let via_index: BTreeSet<_> = scanner
+        .scan_indexed_tx(&indexed)
+        .unwrap()
+        .into_iter()
+        .map(|m| (m.outpoint, m.label))
+        .collect();
+    let via_tx: BTreeSet<_> = matches.iter().map(|m| (m.outpoint, m.label)).collect();
+    assert_eq!(via_index.len(), expected_n);
+    assert!(
+        via_index == via_tx,
+        "index path and transaction path cap differently"
+    );
 
     // The capped result must refer to the *original* transaction.
     let txid = tx.compute_txid();
@@ -401,4 +467,134 @@ fn k_max_vector() {
         .collect();
     assert_eq!(unmatched.len(), 1);
     assert!(unmatched[0].script_pubkey == script_for(K_MAX));
+}
+
+// ---------------------------------------------------------------------------
+// Beyond the vectors: the K_max correction (docs/DECISIONS.md D-005) on a
+// transaction the single official vector does not resemble.
+// ---------------------------------------------------------------------------
+
+/// Label lookup built as in upstream's `examples/send_and_scan.rs`.
+fn upstream_label_lookup(
+    scan_sk: SecretKey,
+    spend_pk: PublicKey,
+    labels: &[u32],
+) -> std::collections::BTreeMap<PublicKey, (Scalar, u32)> {
+    let secp = Secp256k1::new();
+    let code = bdk_sp::encoding::SilentPaymentCode::new_v0(
+        scan_sk.public_key(&secp),
+        spend_pk,
+        Network::Regtest,
+    );
+    labels
+        .iter()
+        .map(|&m| {
+            let label = bdk_sp::encoding::SilentPaymentCode::get_label(scan_sk, m);
+            let point = code
+                .add_label(label)
+                .unwrap()
+                .spend
+                .combine(&code.spend.negate(&secp))
+                .unwrap();
+            (point, (label, m))
+        })
+        .collect()
+}
+
+/// K_max + 3 outputs for one receiver, alternating between the unlabelled
+/// address, the change label and label 7, placed in *reverse* k order with
+/// unrelated outputs in between (including a taproot output that is not a
+/// valid key). BIP352: exactly the outputs for k = 0..K_max are found, each
+/// with its own vout, value and label; the three beyond the limit are not.
+#[test]
+fn k_max_cap_with_mixed_labels_reverse_order_and_several_outputs_beyond_the_limit() {
+    use bdk_sp::receive::scan::Scanner;
+
+    let all = vectors();
+    let case = all.iter().find(|c| c.comment == K_MAX_VECTOR).unwrap();
+    let given = &case.receiving[0].given;
+    let (keys, _) = receiver(given);
+    let secp = Secp256k1::new();
+    let scan_sk = given.key_material.scan_priv_key;
+    let spend_pk = given.key_material.spend_priv_key.public_key(&secp);
+    // Inputs (and therefore the shared secret) are the vector's; outputs are ours.
+    let (mut tx, prevouts) = build_tx(given);
+    let tweak = ReceiveScanner::public_tweak_data(&tx, &prevouts)
+        .unwrap()
+        .unwrap();
+
+    const LABEL: u32 = 7;
+    let kinds = [None, Some(0), Some(LABEL)];
+    let plain = Scanner::new(scan_sk, spend_pk, Default::default());
+    let labelled = |m: u32| {
+        Scanner::new(
+            scan_sk,
+            spend_pk,
+            upstream_label_lookup(scan_sk, spend_pk, &[m]),
+        )
+    };
+    let (change, seven) = (labelled(0), labelled(LABEL));
+    // `get_spks_from_tweak` lists the labelled scripts first, the unlabelled last.
+    let script_for = |k: u32| match kinds[k as usize % 3] {
+        None => plain.get_spks_from_tweak(&tweak, k).remove(0),
+        Some(0) => change.get_spks_from_tweak(&tweak, k).remove(0),
+        Some(_) => seven.get_spks_from_tweak(&tweak, k).remove(0),
+    };
+
+    let total = K_MAX + 3;
+    let mut output = Vec::new();
+    let mut expected = BTreeSet::new(); // (vout, value, label)
+    let mut beyond = BTreeSet::new(); // vouts for k >= K_max
+    for k in (0..total).rev() {
+        if k % 400 == 0 {
+            // Junk: P2TR whose program is not a curve point, a P2WPKH output,
+            // an empty script.
+            let mut not_a_key = vec![0x51, 0x20];
+            not_a_key.extend_from_slice(&[0xff; 32]);
+            for script in [
+                ScriptBuf::from_bytes(not_a_key),
+                ScriptBuf::from_hex("001453d9c40342ee880e766522c3e2b854d37f2b3cbf").unwrap(),
+                ScriptBuf::new(),
+            ] {
+                output.push(TxOut {
+                    value: Amount::from_sat(5),
+                    script_pubkey: script,
+                });
+            }
+        }
+        let vout = output.len() as u32;
+        let value = 1_000 + u64::from(k);
+        output.push(TxOut {
+            value: Amount::from_sat(value),
+            script_pubkey: script_for(k),
+        });
+        if k < K_MAX {
+            expected.insert((vout, value, kinds[k as usize % 3]));
+        } else {
+            beyond.insert(vout);
+        }
+    }
+    tx.output = output;
+    assert_eq!((expected.len(), beyond.len()), (K_MAX as usize, 3));
+
+    let scanner = ReceiveScanner::new(&keys, &[LABEL]).unwrap();
+    let matches = match scanner.scan_tx(&tx, &prevouts) {
+        Ok(TxScanOutcome::Scanned { matches }) => matches,
+        other => panic!(
+            "expected a capped scan, got {:?}",
+            other.map(|_| "non-scan outcome")
+        ),
+    };
+    let txid = tx.compute_txid();
+    assert!(matches.iter().all(|m| m.outpoint.txid == txid));
+    let found: BTreeSet<(u32, u64, Option<u32>)> = matches
+        .iter()
+        .map(|m| (m.outpoint.vout, m.amount.to_sat(), m.label))
+        .collect();
+    assert_eq!(matches.len(), K_MAX as usize);
+    assert!(
+        found == expected,
+        "capped result differs from the outputs for k = 0..K_max"
+    );
+    assert!(found.iter().all(|(vout, _, _)| !beyond.contains(vout)));
 }

@@ -16,11 +16,16 @@
 
 use crate::{
     bitcoin::{
+        absolute::LockTime,
+        hashes::{sha256, Hash, HashEngine},
         key::Secp256k1,
+        script::Instruction,
         secp256k1::{self, PublicKey, Scalar, SecretKey},
-        Network, ScriptBuf, Transaction, TxOut,
+        transaction::Version,
+        Amount, Network, OutPoint, Script, ScriptBuf, Transaction, TxIn, TxOut,
     },
     network::LabNetwork,
+    source::IndexedTx,
 };
 use bdk_sp::{
     encoding::SilentPaymentCode,
@@ -62,9 +67,26 @@ impl ReceiverKeys {
         self.spend_pk
     }
 
+    /// A stable public identifier for this receiver, derived from its two
+    /// public keys. It is not secret, but it is the same on every network and
+    /// in every store, so it links them; do not publish it next to a
+    /// transaction history.
+    pub fn wallet_id(&self) -> String {
+        let mut engine = sha256::Hash::engine();
+        engine.input(b"silent-sync-lab/wallet-id/v1");
+        engine.input(&self.scan_public_key().serialize());
+        engine.input(&self.spend_pk.serialize());
+        let digest = sha256::Hash::from_engine(engine);
+        digest.to_string()[..32].to_string()
+    }
+
     /// The unlabelled silent payment address for `network`.
-    pub fn address(&self, network: LabNetwork) -> SilentPaymentCode {
-        self.code(network.to_bitcoin())
+    pub fn address(&self, network: LabNetwork) -> LabAddress {
+        LabAddress {
+            network,
+            scan: self.scan_public_key(),
+            spend: self.spend_pk,
+        }
     }
 
     /// The labelled silent payment address for label integer `m`.
@@ -72,11 +94,17 @@ impl ReceiverKeys {
         &self,
         network: LabNetwork,
         m: u32,
-    ) -> Result<SilentPaymentCode, ProtocolError> {
+    ) -> Result<LabAddress, ProtocolError> {
         let label = SilentPaymentCode::get_label(self.scan_sk, m);
-        self.address(network)
+        let labelled = self
+            .code(network.to_bitcoin())
             .add_label(label)
-            .map_err(|e| ProtocolError::Label(e.to_string()))
+            .map_err(|e| ProtocolError::Label(e.to_string()))?;
+        Ok(LabAddress {
+            network,
+            scan: labelled.scan,
+            spend: labelled.spend,
+        })
     }
 
     fn code(&self, network: Network) -> SilentPaymentCode {
@@ -89,6 +117,97 @@ impl fmt::Debug for ReceiverKeys {
         f.debug_struct("ReceiverKeys")
             .field("scan_sk", &"<redacted>")
             .field("spend_pk", &self.spend_pk)
+            .finish()
+    }
+}
+
+/// A silent payment address on a lab network.
+///
+/// The upstream address type has a public, mutable `network` field, so handing
+/// it out would let a caller re-encode it for mainnet. This type keeps the
+/// network private and can only be created for a [`LabNetwork`]; its `Display`
+/// output therefore always carries a test-network prefix.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LabAddress {
+    network: LabNetwork,
+    scan: PublicKey,
+    spend: PublicKey,
+}
+
+impl LabAddress {
+    pub fn network(&self) -> LabNetwork {
+        self.network
+    }
+
+    pub fn scan_public_key(&self) -> PublicKey {
+        self.scan
+    }
+
+    /// Spend public key; for a labelled address this already includes the label.
+    pub fn spend_public_key(&self) -> PublicKey {
+        self.spend
+    }
+}
+
+impl fmt::Display for LabAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        SilentPaymentCode::new_v0(self.scan, self.spend, self.network.to_bitcoin()).fmt(f)
+    }
+}
+
+impl fmt::Debug for LabAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "LabAddress({self})")
+    }
+}
+
+/// One output that matched the receiver keys.
+///
+/// The upstream match type is serializable including the per-output tweak.
+/// This type is deliberately not `Serialize`, redacts the tweak in `Debug` and
+/// only releases it through an explicitly named method.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ScanMatch {
+    pub outpoint: OutPoint,
+    pub script_pubkey: ScriptBuf,
+    pub amount: Amount,
+    /// BIP352 label integer, `None` for the unlabelled address.
+    pub label: Option<u32>,
+    tweak: SecretKey,
+}
+
+impl ScanMatch {
+    /// The output tweak `t_k` (plus the label tweak for labelled outputs).
+    ///
+    /// **Sensitive**: together with the spend private key it yields the
+    /// output's private key, and on its own it links the output to the
+    /// receiver. Nothing in this lab stores, logs or exports it; it exists so
+    /// conformance tests can compare against the BIP352 vectors.
+    pub fn sensitive_output_tweak(&self) -> SecretKey {
+        self.tweak
+    }
+}
+
+impl From<SpOut> for ScanMatch {
+    fn from(spout: SpOut) -> Self {
+        Self {
+            outpoint: spout.outpoint,
+            script_pubkey: spout.script_pubkey,
+            amount: spout.amount,
+            label: spout.label,
+            tweak: spout.tweak,
+        }
+    }
+}
+
+impl fmt::Debug for ScanMatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScanMatch")
+            .field("outpoint", &self.outpoint)
+            .field("script_pubkey", &self.script_pubkey)
+            .field("amount", &self.amount)
+            .field("label", &self.label)
+            .field("tweak", &"<redacted>")
             .finish()
     }
 }
@@ -127,16 +246,18 @@ pub enum TxScanOutcome {
     /// BIP352 says this transaction must not be scanned.
     NotEligible(SkipReason),
     /// The transaction was scanned. `matches` may be empty.
-    ///
-    /// The upstream [`SpOut`] carries the per-output tweak; callers that do not
-    /// need it (everything in this lab) must drop it rather than store it.
-    Scanned { matches: Vec<SpOut> },
+    Scanned { matches: Vec<ScanMatch> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProtocolError {
     #[error("transaction has {inputs} inputs but {prevouts} previous outputs were supplied")]
     PrevoutCountMismatch { inputs: usize, prevouts: usize },
+    #[error(
+        "input {input} spends a SegWit output but carries no witness; the data was stripped of \
+         witnesses or is not consensus-valid, and scanning it would silently miss payments"
+    )]
+    MissingWitness { input: usize },
     #[error(
         "more than K_max={0} outputs matched even after capping the scan (docs/DECISIONS.md D-005)"
     )]
@@ -154,6 +275,8 @@ pub enum ProtocolError {
 /// Scanner for one receiver (one scan key / spend key pair plus labels).
 pub struct ReceiveScanner {
     inner: Scanner,
+    /// Needed for the ECDH step when the tweak data comes from an index.
+    scan_sk: SecretKey,
     labels: BTreeSet<u32>,
 }
 
@@ -197,6 +320,7 @@ impl ReceiveScanner {
 
         Ok(Self {
             inner: Scanner::new(keys.scan_sk, keys.spend_pk, lookup),
+            scan_sk: keys.scan_sk,
             labels,
         })
     }
@@ -220,6 +344,16 @@ impl ReceiveScanner {
                 inputs: tx.input.len(),
                 prevouts: prevouts.len(),
             });
+        }
+        // Checked for every transaction, relevant to us or not: witness-less
+        // data means the source cannot be used for BIP352 at all.
+        if let Some(input) = tx
+            .input
+            .iter()
+            .zip(prevouts)
+            .position(|(txin, prevout)| witness_is_missing(txin, &prevout.script_pubkey))
+        {
+            return Err(ProtocolError::MissingWitness { input });
         }
         if !tx.output.iter().any(|o| o.script_pubkey.is_p2tr()) {
             return Ok(Err(SkipReason::NoTaprootOutputs));
@@ -259,7 +393,9 @@ impl ReceiveScanner {
             .map_err(|_| ProtocolError::UpstreamPanic)?;
 
         match scanned {
-            Ok(matches) => Ok(TxScanOutcome::Scanned { matches }),
+            Ok(matches) => Ok(TxScanOutcome::Scanned {
+                matches: matches.into_iter().map(ScanMatch::from).collect(),
+            }),
             // `PublicKey::combine_keys` reports a sum equal to the point at
             // infinity with this exact error. The "no keys at all" case, which
             // yields the same error, was excluded by the eligibility check.
@@ -309,7 +445,9 @@ impl ReceiveScanner {
                 if matches.len() != K_MAX as usize {
                     return Err(ProtocolError::KMaxFallbackInconsistent(matches.len()));
                 }
-                Ok(TxScanOutcome::Scanned { matches })
+                Ok(TxScanOutcome::Scanned {
+                    matches: matches.into_iter().map(ScanMatch::from).collect(),
+                })
             }
             Err(SpReceiveError::ScanLimitExceeded(k_max)) => {
                 Err(ProtocolError::KMaxExceeded(k_max))
@@ -318,8 +456,122 @@ impl ReceiveScanner {
         }
     }
 
+    /// Scans a transaction as described by a tweak index: public tweak data
+    /// plus taproot outputs, no inputs.
+    ///
+    /// The matching is upstream's `scan_txouts`, run on a stand-in transaction
+    /// that holds exactly the listed outputs; the ECDH step is upstream's
+    /// `compute_shared_secret`. Nothing here re-implements BIP352, and the
+    /// K_max cap is applied the same way as for full transactions.
+    ///
+    /// What cannot be done here: BIP352's eligibility rules need the inputs,
+    /// so whether the transaction should be scanned at all — and whether the
+    /// tweak is right, or the transaction even exists — is taken on the
+    /// index's word.
+    pub fn scan_indexed_tx(&self, indexed: &IndexedTx) -> Result<Vec<ScanMatch>, ProtocolError> {
+        let mut seen = BTreeSet::new();
+        if let Some(dup) = indexed.outputs.iter().find(|o| !seen.insert(o.vout)) {
+            return Err(ProtocolError::Upstream(format!(
+                "index lists output {} of {} twice",
+                dup.vout, indexed.txid
+            )));
+        }
+        // Position `i` of the stand-in transaction is `indexed.outputs[i]`.
+        let stand_in = |blank: &[ScriptBuf]| Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: Vec::new(),
+            output: indexed
+                .outputs
+                .iter()
+                .map(|o| {
+                    let mut script = vec![0x51, 0x20];
+                    script.extend_from_slice(&o.output_key);
+                    let script_pubkey = ScriptBuf::from_bytes(script);
+                    TxOut {
+                        value: Amount::from_sat(o.value_sats),
+                        script_pubkey: if blank.contains(&script_pubkey) {
+                            ScriptBuf::new()
+                        } else {
+                            script_pubkey
+                        },
+                    }
+                })
+                .collect(),
+        };
+        let scan = |blank: &[ScriptBuf]| {
+            catch_unwind(AssertUnwindSafe(|| {
+                let shared = bdk_sp::compute_shared_secret(&self.scan_sk, &indexed.tweak);
+                self.inner.scan_txouts(&stand_in(blank), shared)
+            }))
+            .map_err(|_| ProtocolError::UpstreamPanic)
+        };
+
+        let matches = match scan(&[])? {
+            Ok(matches) => matches,
+            Err(SpReceiveError::ScanLimitExceeded(k_max)) => {
+                // Same correction as `scan_tx_capped_at_k_max` (D-005).
+                let beyond_limit = catch_unwind(AssertUnwindSafe(|| {
+                    self.inner.get_spks_from_tweak(&indexed.tweak, K_MAX)
+                }))
+                .map_err(|_| ProtocolError::UpstreamPanic)?;
+                match scan(&beyond_limit)? {
+                    Ok(matches) if matches.len() == K_MAX as usize => matches,
+                    Ok(matches) => {
+                        return Err(ProtocolError::KMaxFallbackInconsistent(matches.len()))
+                    }
+                    Err(SpReceiveError::ScanLimitExceeded(_)) => {
+                        return Err(ProtocolError::KMaxExceeded(k_max))
+                    }
+                    Err(other) => return Err(ProtocolError::Upstream(other.to_string())),
+                }
+            }
+            Err(other) => return Err(ProtocolError::Upstream(other.to_string())),
+        };
+
+        matches
+            .into_iter()
+            .map(|m| {
+                let listed = indexed
+                    .outputs
+                    .get(m.outpoint.vout as usize)
+                    .ok_or_else(|| {
+                        ProtocolError::Upstream("match outside the listed outputs".to_string())
+                    })?;
+                let mut found = ScanMatch::from(m);
+                found.outpoint = OutPoint::new(indexed.txid, listed.vout);
+                Ok(found)
+            })
+            .collect()
+    }
+
+    /// BIP352 public tweak data as an index that does **not** apply the
+    /// "spends SegWit version > 1" rule would compute it. Exists to model such
+    /// indexes (see `source::local_index`); wallets must use
+    /// [`Self::public_tweak_data`].
+    pub fn public_tweak_data_ignoring_segwit_version_rule(
+        tx: &Transaction,
+        prevouts: &[TxOut],
+    ) -> Result<Result<PublicKey, SkipReason>, ProtocolError> {
+        match Self::eligibility(tx, prevouts)? {
+            Ok(()) | Err(SkipReason::SpendsUnknownSegwitVersion) => {}
+            Err(reason) => return Ok(Err(reason)),
+        }
+        let has_eligible_input = catch_unwind(AssertUnwindSafe(|| {
+            tx.input.iter().zip(prevouts).any(|(txin, prevout)| {
+                extract_pubkey(txin.clone(), &prevout.script_pubkey).is_some()
+            })
+        }))
+        .map_err(|_| ProtocolError::UpstreamPanic)?;
+        if !has_eligible_input {
+            return Ok(Err(SkipReason::NoEligibleInputs));
+        }
+        Self::tweak_data_of_eligible(tx, prevouts)
+    }
+
     /// BIP352 public tweak data (`input_hash·A`) of an eligible transaction.
-    /// Uses no private key. Returns `None` when the transaction is not eligible.
+    /// Uses no private key. The inner `Err` carries the reason when BIP352 says
+    /// the transaction must not be scanned.
     pub fn public_tweak_data(
         tx: &Transaction,
         prevouts: &[TxOut],
@@ -327,6 +579,13 @@ impl ReceiveScanner {
         if let Err(reason) = Self::eligibility(tx, prevouts)? {
             return Ok(Err(reason));
         }
+        Self::tweak_data_of_eligible(tx, prevouts)
+    }
+
+    fn tweak_data_of_eligible(
+        tx: &Transaction,
+        prevouts: &[TxOut],
+    ) -> Result<Result<PublicKey, SkipReason>, ProtocolError> {
         let computed = catch_unwind(AssertUnwindSafe(|| {
             bdk_sp::receive::compute_tweak_data(tx, prevouts)
         }))
@@ -339,6 +598,36 @@ impl ReceiveScanner {
             Err(other) => Err(ProtocolError::Upstream(other.to_string())),
         }
     }
+}
+
+/// True when `txin` spends a SegWit output that consensus only allows to be
+/// spent with a non-empty witness, yet has none.
+///
+/// Upstream classifies such an input as "not eligible" and moves on. On real
+/// chain data that state cannot occur, so it means the witnesses were stripped
+/// (e.g. blocks fetched without witness data) — and stripped data makes every
+/// P2WPKH / P2TR payment invisible. This inspects scripts only.
+///
+/// Covered: native P2WPKH, P2WSH, P2TR, and P2SH-wrapped P2WPKH / P2WSH (a
+/// scriptSig that is exactly one push of a v0 witness program). Other witness
+/// programs, such as pay-to-anchor, may legitimately have an empty witness.
+fn witness_is_missing(txin: &TxIn, prevout_script: &Script) -> bool {
+    if !txin.witness.is_empty() {
+        return false;
+    }
+    if prevout_script.is_p2wpkh() || prevout_script.is_p2wsh() || prevout_script.is_p2tr() {
+        return true;
+    }
+    if prevout_script.is_p2sh() {
+        let mut instructions = txin.script_sig.instructions();
+        if let (Some(Ok(Instruction::PushBytes(push))), None) =
+            (instructions.next(), instructions.next())
+        {
+            let redeem = Script::from_bytes(push.as_bytes());
+            return redeem.is_p2wpkh() || redeem.is_p2wsh();
+        }
+    }
+    false
 }
 
 impl fmt::Debug for ReceiveScanner {

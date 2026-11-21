@@ -6,8 +6,9 @@
 //! * network name (mainnet refused) and genesis hash;
 //! * contiguous heights starting at 1, each block linking to its parent, the
 //!   first one to the network's genesis block;
-//! * merkle root, BIP141 witness commitment, proof of work against the
-//!   header's own `bits`, BIP34 height;
+//! * merkle root; BIP141 witness commitment (strictly: a stripped block is
+//!   rejected); proof of work against the header's own `bits`, which must be
+//!   canonical and within the network's limit; BIP34 height;
 //! * exactly one coinbase (first), unique txids, one prevout per input.
 //!
 //! It does **not** validate scripts, signatures, amounts or that prevouts
@@ -15,8 +16,9 @@
 //! nothing about a real chain.
 
 use super::{
-    coinbase_height, BlockEvidence, Evidence, ScanBatch, ScanSource, SourceCapabilities,
-    SourceError, TxWithPrevouts,
+    block_check::{check_full_block, check_prevouts_within_range, BlockExpectation},
+    BlockEvidence, Evidence, ScanBatch, ScanSource, SourceCapabilities, SourceError,
+    TxWithPrevouts,
 };
 use crate::{
     bitcoin::{
@@ -122,7 +124,7 @@ impl FixtureSource {
         }
 
         let mut blocks = Vec::with_capacity(file.blocks.len());
-        let mut parent_hash = chain.genesis_hash;
+        let mut parent_hash = chain.genesis_hash();
         let mut seen_txids = BTreeSet::<Txid>::new();
 
         for (index, fb) in file.blocks.iter().enumerate() {
@@ -135,7 +137,7 @@ impl FixtureSource {
                     fb.height
                 )));
             }
-            let (block_ref, txs) = decode_block(fb, parent_hash, &mut seen_txids)?;
+            let (block_ref, txs) = decode_block(fb, chain.network(), parent_hash, &mut seen_txids)?;
             parent_hash = block_ref.hash;
             blocks.push(BlockEvidence {
                 block: block_ref,
@@ -143,6 +145,7 @@ impl FixtureSource {
             });
         }
 
+        check_prevouts_within_range(&blocks).map_err(invalid)?;
         Ok(Self {
             chain,
             blocks,
@@ -168,102 +171,45 @@ impl FixtureSource {
 
 fn decode_block(
     fb: &FixtureBlock,
+    network: LabNetwork,
     parent_hash: BlockHash,
     seen_txids: &mut BTreeSet<Txid>,
 ) -> Result<(BlockRef, Vec<TxWithPrevouts>), SourceError> {
     let height = fb.height;
-    let block: Block = deserialize_hex(&fb.block_hex)
-        .map_err(|e| invalid(format!("block {height}: cannot decode block_hex: {e}")))?;
+    let at = |e: String| invalid(format!("block {height}: {e}"));
+    let block: Block =
+        deserialize_hex(&fb.block_hex).map_err(|e| at(format!("cannot decode block_hex: {e}")))?;
 
-    if block.header.prev_blockhash != parent_hash {
-        return Err(invalid(format!(
-            "block {height}: prev_blockhash {} does not link to parent {parent_hash}",
-            block.header.prev_blockhash
-        )));
-    }
-    if !block.check_merkle_root() {
-        return Err(invalid(format!(
-            "block {height}: transactions do not match the header merkle root"
-        )));
-    }
-    let hash = block
-        .header
-        .validate_pow(block.header.target())
-        .map_err(|e| invalid(format!("block {height}: proof of work check failed: {e}")))?;
-    if !block.check_witness_commitment() {
-        return Err(invalid(format!(
-            "block {height}: witness data does not match the coinbase witness commitment"
-        )));
-    }
-    match block.txdata.first().and_then(coinbase_height) {
-        Some(h) if h == height => {}
-        Some(h) => {
-            return Err(invalid(format!(
-                "block {height}: coinbase commits to height {h}"
-            )))
-        }
-        None => {
-            return Err(invalid(format!(
-                "block {height}: coinbase does not commit to a height"
-            )))
-        }
-    }
-    if fb.prevouts.len() != block.txdata.len() {
-        return Err(invalid(format!(
-            "block {height}: {} transactions but {} prevout lists",
-            block.txdata.len(),
-            fb.prevouts.len()
-        )));
-    }
+    let prevouts = fb
+        .prevouts
+        .iter()
+        .map(|tx_prevouts| {
+            tx_prevouts
+                .iter()
+                .map(|p| {
+                    ScriptBuf::from_hex(&p.script_pubkey_hex)
+                        .map(|script_pubkey| TxOut {
+                            value: Amount::from_sat(p.value_sats),
+                            script_pubkey,
+                        })
+                        .map_err(|e| at(format!("bad prevout script: {e}")))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
-    let mut txs = Vec::with_capacity(block.txdata.len());
-    for (t, (tx, tx_prevouts)) in block.txdata.into_iter().zip(&fb.prevouts).enumerate() {
-        let is_first = t == 0;
-        if tx.is_coinbase() != is_first {
-            return Err(invalid(format!(
-                "block {height}: transaction {t} violates \"exactly one coinbase, first\""
-            )));
-        }
-        let txid = tx.compute_txid();
-        if !seen_txids.insert(txid) {
-            return Err(invalid(format!(
-                "block {height}: duplicate transaction {txid}"
-            )));
-        }
-        let expected_prevouts = if is_first { 0 } else { tx.input.len() };
-        if tx_prevouts.len() != expected_prevouts {
-            return Err(invalid(format!(
-                "block {height}: transaction {txid} has {} inputs needing prevouts but {} were supplied",
-                expected_prevouts,
-                tx_prevouts.len()
-            )));
-        }
-        let prevouts = tx_prevouts
-            .iter()
-            .map(|p| {
-                ScriptBuf::from_hex(&p.script_pubkey_hex)
-                    .map(|script_pubkey| TxOut {
-                        value: Amount::from_sat(p.value_sats),
-                        script_pubkey,
-                    })
-                    .map_err(|e| {
-                        invalid(format!(
-                            "block {height}: transaction {txid}: bad prevout script: {e}"
-                        ))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        txs.push(TxWithPrevouts { tx, prevouts });
-    }
-
-    Ok((
-        BlockRef {
+    check_full_block(
+        block,
+        prevouts,
+        BlockExpectation {
+            network,
             height,
-            hash,
-            prev_hash: parent_hash,
+            parent: Some(parent_hash),
+            hash: None,
         },
-        txs,
-    ))
+        seen_txids,
+    )
+    .map_err(at)
 }
 
 impl ScanSource for FixtureSource {
@@ -291,6 +237,19 @@ impl ScanSource for FixtureSource {
             .last()
             .map(|b| b.block)
             .ok_or_else(|| invalid("fixture contains no blocks"))
+    }
+
+    fn block_ref(&self, height: u32) -> Result<BlockRef, SourceError> {
+        let (first, last) = (self.first_height(), self.last_height());
+        if height < first || height > last {
+            return Err(SourceError::RangeUnavailable {
+                from: height,
+                to: height,
+                available_from: first,
+                available_to: last,
+            });
+        }
+        Ok(self.blocks[(height - 1) as usize].block)
     }
 
     fn fetch_range(&self, from: u32, to: u32) -> Result<ScanBatch, SourceError> {

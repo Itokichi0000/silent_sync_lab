@@ -6,11 +6,22 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Bitcoin Core REST backend. Pulls in a small plain-HTTP client; off by default
+# so that the core stays free of network code unless a frontend asks for it.
+core-rest = ["dep:minreq"]
+# BlindBit Oracle v2 backend over its HTTP JSON interface (tweak index).
+blindbit-http = ["dep:minreq"]
+
 [dependencies]
 bdk_sp = { workspace = true }
+minreq = { version = "2.14", optional = true, default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+lab-testkit = { path = "../lab-testkit" }
 
 [lints]
 workspace = true

@@ -69,7 +69,18 @@
 | U-5 | 不正な witness で panic し得る（`control_block[1..33]` のスライス）。コンセンサス有効な tx では起きないが、未検証データでは起きる | `lib.rs` `tag_txin`。テスト `malformed_taproot_witness_is_contained_as_an_error` で再現 | `catch_unwind` でエラー化（D-008） |
 | U-6 | 同梱ベクトルが古い（28 件、v1.1.1 相当）。v1.1.2 の annex ベクトルを含まない | `tests/functional_tests/send_and_receive_test_vectors.json`（SHA-256 `f5f9ed4a…`） | 正本の 29 件で検証。annex ベクトルも通過を確認 |
 
+| U-7 | 同じ `k` に 2 つの出力がマッチし得るとき（無ラベルの `P_k` とラベル付きの `P_k + L` が同居）、**どちらを報告するかが出力の並びに依存**する。`reference.py` は tx 内で最初の出力を取る | `find_spout_for_tweak` の `swap_remove` が残り出力の順序を崩す。独立レビューで再現 | 未対応。準拠した送信者はこの形を作らないが、バックエンド間比較で差分として現れ得る（DECISIONS O-011） |
+| U-8 | P2WPKH の witness 内公開鍵と prevout の hash160 の一致を確認しない。witness が空の SegWit 入力は「適格でない入力」として無視する | `extract_pubkey` / `tag_txin`。コンセンサス有効な tx では問題にならない | 後者は D-017 でエラー化。前者は未対応（DECISIONS O-010） |
+
 U-1, U-2, U-5 は上流への報告候補（未報告。DECISIONS O-002）。
+
+### 3.5 rust-bitcoin 0.32.7 の注意点（実測）
+
+| 項目 | 挙動 | 対応 |
+|---|---|---|
+| `Block::check_witness_commitment` | **全入力の witness が空なら、coinbase に commitment があっても `true` を返す。** witness を剥がしたブロックは txid・マークルルート・ブロックハッシュ・PoW が変わらないため、これだけでは検出できない | アダプタで厳密に再計算（D-013）。スキャナ側でも witness 欠落をエラー化（D-017） |
+| `Target::from_compact` | オーバーフローする `bits`（例 `0x227fffff`）を拒否せず丸める。Bitcoin Core は拒否する | `bits` の正規性とネットワーク上限を検査（D-013） |
+| `Block::bip34_block_height` | 高さ 1〜16（`OP_1`〜`OP_16`）を読めない | 自前の `coinbase_height`（D-016） |
 
 ### 3.4 上流テスト・サンプルの再現（Gate 0）
 
@@ -96,9 +107,39 @@ U-1, U-2, U-5 は上流への報告候補（未報告。DECISIONS O-002）。
 - bdk-sp の `oracles/src/tweaks/blindbit.rs` は HTTP の `block-height`, `tweaks/{height}?dustLimit=`, `info` を使う。**これは Oracle v2 が deprecated としている経路**であり、応答形式が現行 v2 と一致するかは未確認。
 - ライセンス: MIT。
 - `UNVERIFIED`:
-  - gRPC の protobuf スキーマ（別リポジトリ `blindbit-lib` にあり、未取得）
-  - regtest での実ビルド・実起動・実応答（未実施。Phase 4 の Gate 条件）
+  - gRPC の protobuf スキーマ（別リポジトリ `blindbit-lib` にあり、未取得）。本プロジェクトは下記のとおり HTTP を使う
   - `docker-compose-example.yaml` が v2 でそのまま使えるか（v1 時代の `leveldb_data` ボリューム名が残っている）
+  - `tweaks_cut_through_with_dust_filter=1` や `tweaks_only=1` の構成での挙動（未実行）
+  - signet / 実ネットワーク上での挙動
+
+### 4.1 regtest での実動作（Phase 4 の前提確認として実施）
+
+commit `f9ab7fd` を Go 1.24.7 でビルド（`go build ./cmd/blindbit-oracle`、成功）し、標準シナリオを載せた Bitcoin Core 32.1 の regtest ノード（REST）に接続した。構成: `chain = "regtest"`, `sync_start_height = 1`, `tweaks_only = 0`, `tweaks_full_basic = 1`, 他は 0。
+
+- `blindbit-oracle sync` は高さ 108 まで完了し、`run` で HTTP（と gRPC）を待ち受けた。**regtest で実際に動く。**
+- **HTTP の JSON エンドポイントは「deprecated」だが有効**で、次の形式で応答した。
+
+| エンドポイント | 実際の応答 |
+|---|---|
+| `GET /info` | `{"network":"regtest","height":108,"tweaks_only":false,"tweaks_full_basic":true,…}` |
+| `GET /tweaks/<h>` | `{"block_identifier":{"block_hash":"…","block_height":h},"index":["02…", …]}`（33 バイト公開鍵の 16 進） |
+| `GET /utxos/<h>` | `index` に `{txid, vout, amount, pubkey}`（Taproot 出力。`pubkey` は x-only） |
+| `GET /compute-index/<h>` | `index` に `{txid, tweak, outputs:[出力鍵の先頭 8 バイト, …]}` |
+| `GET /full-block/<h>` | `index` に `{txid, tweak, inputs:[使用した Taproot outpoint], utxos:[{vout, amount, pubkey}]}`。**tweak・txid・出力（vout と金額）が 1 応答で揃う** |
+| `GET /spent-outputs/<h>` | 使用された出力鍵の先頭 8 バイトの一覧 |
+
+実測で分かった、クライアント側が知っておくべき挙動:
+
+| # | 挙動 | 影響 |
+|---|---|---|
+| B-1 | **範囲外の高さ（`/tweaks/999`、`/full-block/999`、`/tweaks/0`）に HTTP 200 で `block_hash: ""`・空の `index` を返す** | 「tweak が無いブロック」と区別できる情報は空の `block_hash` だけ。これを見ないクライアントは、未同期の範囲を「入金なし」と誤認する |
+| B-2 | **SegWit v2 の出力を使う tx にも tweak を返す**（シナリオの該当 tx。確認時の txid は `76bf5b2d…1e7e`、60,000 sat の出力。txid は実行ごとに変わる） | BIP352 は当該 tx をスキャンしないと定めている。tweak だけを受け取るクライアントは prevout を持たないので、自分ではこの規則を適用できない。Core 直接方式（本プロジェクト）とは検出結果が 1 件食い違う |
+| B-3 | ブロックの識別はハッシュと高さのみ。親ハッシュもヘッダも返さない | クライアントは別経路のヘッダなしにチェーンの連続性を確認できない |
+| B-4 | この構成では、後で使用された出力も `/utxos` に残る（使用情報は `/spent-outputs` で別途提供） | cut-through を有効にした構成では変わるはず（未検証） |
+| B-5 | `dustLimit` は `tweaks_full_basic` の構成では効かない（1 sat の出力を持つ tx の tweak も返る） | README の説明どおり（dust フィルタ用インデックスが別） |
+| B-6 | 不正な高さ（`/tweaks/abc`）は HTTP 400 と JSON エラー | — |
+
+B-1 と B-2 は上流への報告候補（未報告。DECISIONS O-002）。
 
 ## 5. Index server specification (WIP)
 
@@ -109,11 +150,29 @@ U-1, U-2, U-5 は上流への報告候補（未報告。DECISIONS O-002）。
 
 ## 6. Bitcoin Core
 
+### 6.1 バージョンと入手（Phase 2 で実施）
+
 - `https://bitcoincore.org/bin/` の一覧で確認: 最新は **32.1**。30.x は 30.2〜30.5、31.x は 31.0〜31.3 が公開されている（30.0 / 30.1 のディレクトリは存在しない）。
-- 32.1 linux x86_64 tarball の SHA-256（`SHA256SUMS` より）: `61545c17c3120fb7412f896d248b11993af04ec8817aad3649c55b2afb044963`。**署名（`SHA256SUMS.asc`）の検証は未実施**。
-- 上流 `bdk_testenv 0.11.1` が使うのは Bitcoin Core **25.0**。Oracle v2 は **30+** を要求するので、Phase 2（Core 直接）と Phase 4（Oracle）を同一ノードで比較するには 30+ が必要。
-- この実行環境には `bitcoind` が入っていない（`docker` と `go` はある）。
-- `UNVERIFIED`: Core 30+ の `rest/spenttxouts` や `getblock` verbosity 3 による prevout 取得の実挙動（Phase 2 で確認する）。
+- **32.1 を採用**（DECISIONS D-019）。linux x86_64 tarball の SHA-256: `61545c17c3120fb7412f896d248b11993af04ec8817aad3649c55b2afb044963`（`SHA256SUMS` と一致を確認）。
+- 署名: `SHA256SUMS.asc` を `bitcoin-core/guix.sigs`（commit `1326cef321a1218d49a9401364523a463908ecf0`）の `builder-keys` で検証し、**有効な署名 8 件、不正 0 件**。鍵は GitHub から TLS 経由で取得したもので、鍵自体の真正性は別経路で確認していない（trust on first use）。
+- 実行確認: `Bitcoin Core daemon version v32.1.0`。
+- 上流 `bdk_testenv 0.11.1` が使うのは Bitcoin Core **25.0**。Oracle v2 は **30+** を要求する。
+
+### 6.2 REST インタフェースの実挙動（32.1 の regtest ノードで確認）
+
+`-rest=1` で有効。RPC と同じポートで待ち受け、**認証なし・読み取り専用**。
+
+| エンドポイント | 確認した応答 |
+|---|---|
+| `GET /rest/chaininfo.json` | `{"chain":"regtest","blocks":102,"bestblockhash":"…","pruned":false,"initialblockdownload":false,…}`。mainnet は `"chain":"main"` |
+| `GET /rest/blockhashbyheight/<h>.hex` | ブロックハッシュ（16 進 + 改行）。範囲外は HTTP 404 `Block height out of range` |
+| `GET /rest/block/<hash>.bin` | コンセンサス直列化したブロック（**witness 付き**） |
+| `GET /rest/spenttxouts/<hash>.bin` | ブロック内の各 tx が使う出力。形式は `compact-size(tx 数)` に続いて tx ごとに `Vec<TxOut>`（coinbase は空）。1 入力 P2TR の例で 46 バイト = 1 + 1 + 1 + (8 + 1 + 34) |
+| `GET /rest/headers/<hash>.bin?count=1` | 80 バイトのヘッダ |
+
+- prevout は JSON（`getblock` verbosity 3 は金額が浮動小数表記）ではなく、このバイナリ形式から取る。金額を丸め誤差なく得られる。
+- `generateblock <address> ["<rawtx>", …]` は mempool のポリシーを通さずにブロックへ入れる（コンセンサス検証は行う）。SegWit v2 を使う tx や 1 sat 出力の tx を実チェーンに載せるのに使用。
+- regtest の高さ 1〜16 の coinbase は高さを `OP_1`〜`OP_16` で符号化する（DECISIONS D-016 のとおり）。
 
 ## 7. 未確認の参考資料
 

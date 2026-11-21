@@ -8,7 +8,7 @@
 | 項目 | 固定値 | 固定場所 |
 |---|---|---|
 | Rust | 1.97.0（rustfmt, clippy 込み） | `rust-toolchain.toml` |
-| MSRV（宣言） | 1.85.0（上流 `bdk_sp` と同じ。**1.85 でのビルドは未検証**） | `Cargo.toml` |
+| MSRV（宣言） | 1.85.0（上流 `bdk_sp` と同じ。`cargo +1.85.0 check --workspace --all-targets --locked` は成功。**1.85 でのテスト実行は未実施**） | `Cargo.toml` |
 
 ## 上流（BIP352 実装）
 
@@ -46,11 +46,18 @@
 | `serde_json` | 1.0.154 | MIT OR Apache-2.0 | `sync-core`, `lab-cli` |
 | `thiserror` | 2.0.21 | MIT OR Apache-2.0 | `sync-core`（エラー型） |
 | `clap` | 4.6.9 | MIT OR Apache-2.0 | `lab-cli` のみ |
+| `minreq` | 2.14.1（`default-features = false`: TLS・プロキシ・JSON なし） | ISC | `sync-core` の feature `core-rest` / `blindbit-http`（ループバックの HTTP GET のみ。DECISIONS D-020） |
+| `rusqlite` | 0.37.0（feature `bundled`: SQLite を同梱ビルド） | MIT | `lab-storage` のみ（DECISIONS D-024） |
+| `libsqlite3-sys` | 0.35.0（同梱する SQLite 本体はパブリックドメイン） | MIT | `rusqlite` 経由 |
+
+- `sync-core` は既定の feature では HTTP クライアントにもデータベースにも依存しない（`minreq` は optional、SQLite は別クレート）。
+- `lab-cli` は `build.rs` を持つ（依存なし）。ビルドに使ったコンパイラのバージョンとターゲットを、ベンチマーク結果に記録するために埋め込むだけ。
 
 ## 推移的依存（すべて）
 
 `anstream 1.0.0`, `anstyle 1.0.14`, `anstyle-parse 1.0.0`, `anstyle-query 1.1.5`, `arrayvec 0.7.8`, `cc 1.11.3`, `clap_builder 4.6.7`, `clap_derive 4.6.9`, `clap_lex 1.1.2`, `colorchoice 1.0.5`, `find-msvc-tools 0.1.15`, `heck 0.5.0`, `is_terminal_polyfill 1.70.2`, `itoa 1.0.19`, `proc-macro2 1.0.107`, `quote 1.0.47`, `serde_core 1.0.229`, `serde_derive 1.0.229`, `shlex 2.0.1`, `syn 3.0.10`, `thiserror-impl 2.0.21`, `utf8parse 0.2.2` — いずれも MIT OR Apache-2.0。
 `memchr 2.8.3`（Unlicense OR MIT）、`strsim 0.11.1`（MIT）、`zmij 1.0.23`（MIT）、`unicode-ident 1.0.27`（(MIT OR Apache-2.0) AND Unicode-3.0）。
+`rusqlite` 経由: `bitflags 2.13.2`, `fallible-iterator 0.3.0`, `fallible-streaming-iterator 0.1.9`, `hashbrown 0.15.5`, `hashlink 0.10.0`, `pkg-config 0.3.34`, `smallvec 1.16.6`, `vcpkg 0.2.15`（いずれも MIT OR Apache-2.0）、`foldhash 0.1.5`（Zlib）。
 
 コピーレフト系のライセンスは含まれない。
 
@@ -61,10 +68,20 @@
 | `fixtures/bip352/send_and_receive_test_vectors.json` | bitcoin/bips `fdcd8024595bc1e97db73883e716dbb91627c371` | BSD-2-Clause |
 | `fixtures/local/regtest_basic_v1.json` | 本リポジトリの生成器 | 本リポジトリのライセンスに従う（未定、DECISIONS O-001） |
 
-## まだ依存していないもの（今後のフェーズ）
+## リポジトリに含めない外部バイナリ（テストとベンチマーク用）
 
-| 対象 | フェーズ | 現状 |
-|---|---|---|
-| Bitcoin Core（バイナリ） | 2 | 未導入。バージョン未定（DECISIONS O-003） |
-| SQLite バインディング | 3 | 未選定 |
-| BlindBit Oracle v2 / gRPC クライアント | 4 | 未導入。前提条件が未確認（RESEARCH §4） |
+| 対象 | バージョン | 入手方法 | 検証 | ライセンス |
+|---|---|---|---|---|
+| Bitcoin Core | 32.1（DECISIONS D-019） | `scripts/fetch_bitcoind.sh`（bitcoincore.org の公式配布物） | SHA-256 を固定。`VERIFY_SIGNATURES=1` で、commit を固定した `guix.sigs` の相異なる署名者の署名も検証 | MIT |
+| BlindBit Oracle | v2 系、commit `f9ab7fd8bc35467c492324f743ba1b69049a2bb6`（RESEARCH §4） | `scripts/build_blindbit_oracle.sh`（ソースからビルド。Go が必要） | commit を固定してチェックアウト | MIT（上流リポジトリの `LICENSE` による。取得時に再確認すること） |
+
+どちらもリポジトリの外に置く。通常の `cargo test` では使わず、`--ignored` の E2E テストとベンチマークだけが使う。
+
+## 検討したが依存していないもの
+
+| 対象 | 理由 |
+|---|---|
+| gRPC クライアント（BlindBit の protobuf） | HTTP JSON で足りたため未導入。上流では HTTP が deprecated（DECISIONS O-014） |
+| Bitcoin Core の JSON-RPC クライアント | REST だけで足り、認証情報を扱わずに済むため（DECISIONS D-020）。テスト用ノードの操作は `bitcoin-cli` を子プロセスで呼ぶ |
+| 非同期ランタイム | 同期処理は逐次で、ブロッキング HTTP で足りる |
+| property-based / fuzz テストのライブラリ | 設計書 §11 で初期 MVP では任意。未導入 |

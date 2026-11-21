@@ -26,6 +26,10 @@ pub enum EvidenceKind {
     /// Full transactions plus the previous outputs of every input, so the
     /// client itself derived the BIP352 public tweak data.
     FullBlockWithPrevouts,
+    /// Per-transaction public tweak data and taproot outputs prepared by an
+    /// index. The client did **not** see the transactions' inputs: which
+    /// transactions are listed, and with which tweak, is the index's claim.
+    TweakIndex,
 }
 
 /// Where a detection came from.

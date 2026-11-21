@@ -6,19 +6,20 @@
 //! fail-closed behaviour of the adapter and the engine.
 #![allow(clippy::unwrap_used)] // test code: a panic is the failure report
 
-#[path = "support/fixture_gen.rs"]
-mod fixture_gen;
-
 use bdk_sp::receive::scan::Scanner;
-use fixture_gen::{LABEL_NOT_BACKED_UP, LABEL_USED, LAB_RECEIVER, OTHER_RECEIVER};
+use lab_testkit::fixture_gen::{
+    self, LABEL_NOT_BACKED_UP, LABEL_USED, LAB_RECEIVER, OTHER_RECEIVER,
+};
 use std::collections::BTreeMap;
 use sync_core::{
     bitcoin::{
         absolute::LockTime,
         consensus::encode::{deserialize_hex, serialize_hex},
         key::TweakedPublicKey,
+        script::Builder,
         transaction::Version,
-        Amount, Block, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
+        Amount, Block, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
+        Txid, Witness,
     },
     engine::{scan_range, ScanError, ScanReport},
     models::{BlockRef, EvidenceKind},
@@ -88,7 +89,7 @@ fn committed_fixture_is_exactly_what_the_generator_produces() {
         FIXTURE_JSON,
         fixture_gen::generate_json(),
         "fixtures/local/regtest_basic_v1.json is stale; regenerate with \
-         `cargo run -p sync-core --example gen_fixture -- fixtures/local/regtest_basic_v1.json`"
+         `cargo run -p lab-testkit --bin gen_fixture -- fixtures/local/regtest_basic_v1.json`"
     );
 }
 
@@ -427,14 +428,14 @@ fn fixture_adapter_rejects_tampered_data() {
     });
     assert!(load_err(file).contains("merkle root"));
 
-    // Header changed (invalidates the link from the next block, or PoW).
+    // Header of a middle block changed but still valid on its own: the next
+    // block no longer links to it.
     let mut file = fixture_file();
-    edit_block(&mut file, 3, |b| b.header.time += 1);
-    let msg = load_err(file);
-    assert!(
-        msg.contains("does not link") || msg.contains("proof of work"),
-        "{msg}"
-    );
+    edit_block(&mut file, 3, |b| {
+        b.header.time += 1;
+        fixture_gen::seal(b);
+    });
+    assert!(load_err(file).contains("block 5: prev_blockhash"));
 
     // Blocks swapped / missing / mis-numbered.
     let mut file = fixture_file();
@@ -684,17 +685,32 @@ fn reports_and_debug_output_contain_no_key_material() {
     for height in 1..=TIP {
         for (tx, prevouts) in fixture_txs(height) {
             if let Ok(TxScanOutcome::Scanned { matches }) = scanner.scan_tx(&tx, &prevouts) {
-                secrets.extend(matches.iter().map(|m| m.tweak.display_secret().to_string()));
+                secrets.extend(
+                    matches
+                        .iter()
+                        .map(|m| m.sensitive_output_tweak().display_secret().to_string()),
+                );
             }
         }
     }
     assert_eq!(secrets.len(), 9, "scan key + 8 output tweaks");
+
+    // `ScanMatch` carries the tweak but must not show it.
+    let (tx, prevouts) = &fixture_txs(5)[1];
+    let outcome = scanner.scan_tx(tx, prevouts).unwrap();
+    assert!(matches!(&outcome, TxScanOutcome::Scanned { matches } if matches.len() == 3));
 
     let outputs = [
         serde_json::to_string(&report).unwrap(),
         format!("{report:?}"),
         format!("{keys:?}"),
         format!("{scanner:?}"),
+        format!("{outcome:?}"),
+        format!(
+            "{} {:?}",
+            keys.address(LabNetwork::Regtest),
+            keys.address(LabNetwork::Signet)
+        ),
     ];
     for text in &outputs {
         let lower = text.to_lowercase();
@@ -703,4 +719,553 @@ fn reports_and_debug_output_contain_no_key_material() {
         }
     }
     assert!(outputs[2].contains("<redacted>") && outputs[3].contains("<redacted>"));
+    assert_eq!(outputs[4].matches("<redacted>").count(), 3);
+    // Addresses are public, and can only be rendered for a lab network.
+    assert!(outputs[5].starts_with("sprt1") && outputs[5].contains("LabAddress(tsp1"));
+}
+
+// ---------------------------------------------------------------------------
+// Witness-stripped data (review finding: must be an error, never a silent miss)
+// ---------------------------------------------------------------------------
+
+fn strip_witnesses(block: &mut Block, include_coinbase: bool) {
+    let skip = usize::from(!include_coinbase);
+    for tx in block.txdata.iter_mut().skip(skip) {
+        for txin in &mut tx.input {
+            txin.witness = Witness::new();
+        }
+    }
+}
+
+/// Stripping witnesses leaves txids, the merkle root, the block hash and the
+/// proof of work untouched. rust-bitcoin's own commitment check accepts such a
+/// block; the adapter must not, because every P2WPKH / P2TR payment in it
+/// would become invisible.
+#[test]
+fn fixture_adapter_rejects_witness_stripped_blocks() {
+    // Sanity: the stripped block really is indistinguishable by hash.
+    let original: Block = deserialize_hex(&fixture_file().blocks[1].block_hex).unwrap();
+    let mut stripped = original.clone();
+    strip_witnesses(&mut stripped, true);
+    assert_eq!(stripped.block_hash(), original.block_hash());
+    assert!(stripped.check_merkle_root());
+    assert!(
+        stripped.check_witness_commitment(),
+        "the upstream check is lenient"
+    );
+
+    // Every block fully stripped.
+    let mut file = fixture_file();
+    for index in 0..file.blocks.len() {
+        edit_block(&mut file, index, |b| strip_witnesses(b, true));
+    }
+    assert!(load_err(file).contains("block 1: witness commitment"));
+
+    // Only the block holding the first payment, fully stripped.
+    let mut file = fixture_file();
+    edit_block(&mut file, 1, |b| strip_witnesses(b, true));
+    let msg = load_err(file);
+    assert!(
+        msg.contains("block 2: witness commitment") && msg.contains("reserved value"),
+        "{msg}"
+    );
+
+    // Transactions stripped, coinbase reserved value kept.
+    let mut file = fixture_file();
+    edit_block(&mut file, 1, |b| strip_witnesses(b, false));
+    let msg = load_err(file);
+    assert!(
+        msg.contains("block 2: witness commitment") && msg.contains("does not match"),
+        "{msg}"
+    );
+
+    // Witness data present but the coinbase commits to nothing.
+    let mut file = fixture_file();
+    edit_block(&mut file, 7, |b| {
+        b.txdata[0].output.truncate(1);
+        b.header.merkle_root = b.compute_merkle_root().unwrap();
+        b.header.nonce = 0;
+        while b.header.validate_pow(b.header.target()).is_err() {
+            b.header.nonce += 1;
+        }
+    });
+    let msg = load_err(file);
+    assert!(
+        msg.contains("block 8: witness commitment") && msg.contains("no commitment"),
+        "{msg}"
+    );
+
+    // A block without any witness data and without a commitment is fine.
+    let mut file = fixture_file();
+    file.blocks.truncate(1);
+    edit_block(&mut file, 0, |b| {
+        b.txdata[0].output.truncate(1);
+        b.txdata[0].input[0].witness = Witness::new();
+        b.header.merkle_root = b.compute_merkle_root().unwrap();
+        b.header.nonce = 0;
+        while b.header.validate_pow(b.header.target()).is_err() {
+            b.header.nonce += 1;
+        }
+    });
+    assert!(FixtureSource::from_file(file).is_ok());
+}
+
+/// The same protection one layer down, for sources that do not (or cannot)
+/// check a witness commitment.
+#[test]
+fn scanner_refuses_segwit_spends_without_witness() {
+    let scanner = ReceiveScanner::new(&fixture_gen::lab_receiver_keys(), &[LABEL_USED]).unwrap();
+    let stripped = |height: u32, index: usize, inputs: &[usize]| {
+        let (mut tx, prevouts) = fixture_txs(height)[index].clone();
+        for &i in inputs {
+            tx.input[i].witness = Witness::new();
+        }
+        scanner.scan_tx(&tx, &prevouts)
+    };
+    let missing = |input| Err(ProtocolError::MissingWitness { input });
+
+    assert_eq!(stripped(2, 1, &[0]), missing(0), "P2WPKH");
+    assert_eq!(stripped(5, 1, &[0]), missing(0), "P2TR");
+    assert_eq!(stripped(3, 1, &[1]), missing(1), "second input only");
+    assert_eq!(stripped(3, 1, &[0, 1]), missing(0));
+    assert_eq!(stripped(6, 1, &[0]), missing(0), "P2WSH");
+    // Reported even when the transaction would be skipped anyway.
+    assert_eq!(stripped(6, 3, &[0]), missing(0), "no taproot output");
+    // Unmodified transactions are unaffected.
+    assert!(
+        matches!(stripped(2, 1, &[]), Ok(TxScanOutcome::Scanned { matches }) if matches.len() == 1)
+    );
+
+    // Hand-built cases around the rule's edges.
+    let p2tr_out = fixture_txs(2)[1].0.output[0].clone();
+    let spend = |prevout_script: ScriptBuf, script_sig: ScriptBuf| {
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::new(fixture_txs(2)[1].0.compute_txid(), 0),
+                script_sig,
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![p2tr_out.clone()],
+        };
+        let prevouts = [TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: prevout_script,
+        }];
+        scanner.scan_tx(&tx, &prevouts)
+    };
+    let p2sh = ScriptBuf::from_hex("a914809b71783f1b55eeadeb1678baef0c994adc425987").unwrap();
+    let not_eligible = Ok(TxScanOutcome::NotEligible(SkipReason::NoEligibleInputs));
+
+    // P2SH-P2WPKH: scriptSig is exactly one push of a v0 witness program.
+    let wrapped = ScriptBuf::from_hex("1600146a721dcca372f3c17b2c649b2ba61aa0fda98a91").unwrap();
+    assert_eq!(spend(p2sh.clone(), wrapped), missing(0));
+    // Legacy P2SH: a scriptSig with more than that single push needs no
+    // witness, wherever the program-shaped push sits.
+    let program = "1600146a721dcca372f3c17b2c649b2ba61aa0fda98a91";
+    for script_sig in [format!("0101{program}"), format!("{program}0151")] {
+        let legacy = ScriptBuf::from_hex(&script_sig).unwrap();
+        assert_eq!(spend(p2sh.clone(), legacy), not_eligible, "{script_sig}");
+    }
+    // Pay-to-anchor (v1, 2-byte program) is spent with an empty witness.
+    let anchor = ScriptBuf::from_hex("51024e73").unwrap();
+    assert_eq!(spend(anchor, ScriptBuf::new()), not_eligible);
+    // Bare / unknown scripts carry no witness either.
+    let bare = Builder::new().push_int(1).into_script();
+    assert_eq!(spend(bare, ScriptBuf::new()), not_eligible);
+}
+
+#[test]
+fn engine_fails_the_range_when_a_source_serves_stripped_transactions() {
+    let result = scan_misbehaving(|b| {
+        let Evidence::FullBlock(txs) = &mut b.blocks[1].evidence else {
+            panic!("fixture always yields full blocks");
+        };
+        txs[1].tx.input[0].witness = Witness::new();
+    });
+    match result {
+        Err(ScanError::Transaction {
+            height: 2, source, ..
+        }) => {
+            assert_eq!(source, ProtocolError::MissingWitness { input: 0 })
+        }
+        other => panic!("expected MissingWitness at height 2, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fixture adapter: each structural check has a test that fails without it
+// ---------------------------------------------------------------------------
+
+/// Index of the tip block in the fixture file; editing it breaks no later link.
+const TIP_INDEX: usize = 7;
+
+#[test]
+fn fixture_adapter_checks_proof_of_work() {
+    // Valid structure, but a nonce that does not meet the target.
+    let mut file = fixture_file();
+    edit_block(&mut file, TIP_INDEX, |b| {
+        while b.header.validate_pow(b.header.target()).is_ok() {
+            b.header.nonce += 1;
+        }
+    });
+    let msg = load_err(file);
+    assert!(msg.contains("block 8: proof of work check failed"), "{msg}");
+
+    // `bits` chosen by the file must be canonical and within the regtest limit.
+    for (bits, needle) in [
+        (0x227f_ffff_u32, "not a canonical target encoding"), // overflows 256 bits
+        (0xff7f_ffff, "not a canonical target encoding"),
+        (0x2100_8000, "easier than the regtest limit"), // 2^255
+        (0x2080_0000, "not a canonical target encoding"), // negative
+    ] {
+        let mut file = fixture_file();
+        edit_block(&mut file, TIP_INDEX, |b| {
+            b.header.bits = CompactTarget::from_consensus(bits);
+            b.header.nonce = 0;
+        });
+        let msg = load_err(file);
+        assert!(
+            msg.contains("block 8: proof of work check failed") && msg.contains(needle),
+            "{bits:#x}: {msg}"
+        );
+    }
+}
+
+#[test]
+fn fixture_adapter_checks_the_coinbase_height() {
+    let with_script_sig = |script_sig: ScriptBuf| {
+        let mut file = fixture_file();
+        edit_block(&mut file, TIP_INDEX, |b| {
+            b.txdata[0].input[0].script_sig = script_sig;
+            fixture_gen::seal(b);
+        });
+        load_err(file)
+    };
+    let wrong = Builder::new().push_int(9).push_slice(b"x").into_script();
+    assert!(with_script_sig(wrong).contains("block 8: coinbase commits to height 9"));
+    let none = Builder::new().push_slice(b"no height here").into_script();
+    assert!(with_script_sig(none).contains("block 8: coinbase does not commit to a height"));
+}
+
+#[test]
+fn fixture_adapter_checks_coinbase_position_and_duplicates() {
+    // Coinbase not first.
+    let mut file = fixture_file();
+    file.blocks[TIP_INDEX].prevouts.swap(0, 1);
+    edit_block(&mut file, TIP_INDEX, |b| {
+        b.txdata.swap(0, 1);
+        b.header.merkle_root = b.compute_merkle_root().unwrap();
+        b.header.nonce = 0;
+        while b.header.validate_pow(b.header.target()).is_err() {
+            b.header.nonce += 1;
+        }
+    });
+    let msg = load_err(file);
+    assert!(msg.contains("block 8: transaction 0 violates"), "{msg}");
+
+    // A second coinbase further down.
+    let mut file = fixture_file();
+    file.blocks[TIP_INDEX].prevouts.push(vec![]);
+    edit_block(&mut file, TIP_INDEX, |b| {
+        let mut second = b.txdata[0].clone();
+        second.input[0].sequence = Sequence::ZERO;
+        b.txdata.push(second);
+        fixture_gen::seal(b);
+    });
+    let msg = load_err(file);
+    assert!(msg.contains("block 8: transaction 2 violates"), "{msg}");
+
+    // The same transaction twice in one block.
+    let mut file = fixture_file();
+    let prevouts = file.blocks[TIP_INDEX].prevouts[1].clone();
+    file.blocks[TIP_INDEX].prevouts.push(prevouts);
+    edit_block(&mut file, TIP_INDEX, |b| {
+        let again = b.txdata[1].clone();
+        b.txdata.push(again);
+        fixture_gen::seal(b);
+    });
+    let msg = load_err(file);
+    assert!(msg.contains("block 8: duplicate transaction"), "{msg}");
+
+    // A transaction of an earlier block repeated in a later one.
+    let mut file = fixture_file();
+    let earlier: Block = deserialize_hex(&file.blocks[1].block_hex).unwrap();
+    let prevouts = file.blocks[1].prevouts[1].clone();
+    file.blocks[TIP_INDEX].prevouts.push(prevouts);
+    edit_block(&mut file, TIP_INDEX, |b| {
+        b.txdata.push(earlier.txdata[1].clone());
+        fixture_gen::seal(b);
+    });
+    let msg = load_err(file);
+    assert!(msg.contains("block 8: duplicate transaction"), "{msg}");
+}
+
+/// The `genesis_hash` field is only a claim; what binds the blocks to the
+/// claimed network is that block 1 actually builds on that genesis block.
+#[test]
+fn fixture_adapter_requires_block_one_to_build_on_the_network_genesis() {
+    let mut file = fixture_file();
+    let mut parent = LabNetwork::Signet.genesis_hash();
+    for index in 0..file.blocks.len() {
+        edit_block(&mut file, index, |b| {
+            b.header.prev_blockhash = parent;
+            fixture_gen::seal(b);
+            parent = b.block_hash();
+        });
+    }
+    // The chain is internally consistent (every block links to the previous
+    // one) but hangs off another network's genesis block.
+    let msg = load_err(file);
+    assert!(
+        msg.contains("block 1: prev_blockhash") && msg.contains("does not link"),
+        "{msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Engine: structural block checks independent of the source
+// ---------------------------------------------------------------------------
+
+fn full_block(batch: &mut ScanBatch, index: usize) -> &mut Vec<sync_core::source::TxWithPrevouts> {
+    let Evidence::FullBlock(txs) = &mut batch.blocks[index].evidence else {
+        panic!("fixture always yields full blocks");
+    };
+    txs
+}
+
+#[test]
+fn engine_rejects_structurally_impossible_blocks() {
+    // A block without any transaction (e.g. a source answering with empty lists).
+    assert_inconsistent(
+        scan_misbehaving(|b| full_block(b, 3).clear()),
+        "block 4 has no transactions",
+    );
+    assert_inconsistent(
+        scan_misbehaving(|b| {
+            for index in 0..b.blocks.len() {
+                full_block(b, index).clear();
+            }
+        }),
+        "block 1 has no transactions",
+    );
+    // Coinbase missing.
+    assert_inconsistent(
+        scan_misbehaving(|b| {
+            full_block(b, 1).remove(0);
+        }),
+        "block 2: transaction at position 0 violates",
+    );
+    // Whole transaction list duplicated: a second coinbase appears.
+    assert_inconsistent(
+        scan_misbehaving(|b| {
+            let txs = full_block(b, 2);
+            let copy = txs.clone();
+            txs.extend(copy);
+        }),
+        "block 3: transaction at position 3 violates",
+    );
+    // One transaction repeated inside a block.
+    assert_inconsistent(
+        scan_misbehaving(|b| {
+            let txs = full_block(b, 1);
+            let copy = txs[1].clone();
+            txs.push(copy);
+        }),
+        "appears more than once",
+    );
+    // A transaction repeated in a later block (would be counted twice).
+    assert_inconsistent(
+        scan_misbehaving(|b| {
+            let copy = full_block(b, 1)[1].clone();
+            full_block(b, 4).push(copy);
+        }),
+        "block 5: transaction 391d63ac72c9c60e7cb066ad829aadd8cf201e4fff3ad07589d7f705cde04b11 appears more than once",
+    );
+    // The first block of a batch has no predecessor to link to, but it can
+    // still be caught claiming to be its own parent.
+    assert_inconsistent(
+        scan_misbehaving(|b| b.blocks[0].block.prev_hash = b.blocks[0].block.hash),
+        "block 1 claims to be its own parent",
+    );
+}
+
+/// Recomputes the merkle root and regtest proof of work after editing a block
+/// by hand (unlike `fixture_gen::seal`, the witness commitment is left alone).
+fn remine(block: &mut Block) {
+    block.header.merkle_root = block.compute_merkle_root().unwrap();
+    block.header.nonce = 0;
+    while block.header.validate_pow(block.header.target()).is_err() {
+        block.header.nonce += 1;
+    }
+}
+
+/// BIP141 details of locating and checking the witness commitment.
+#[test]
+fn witness_commitment_location_rules() {
+    let is_commitment = |o: &TxOut| {
+        o.script_pubkey
+            .as_bytes()
+            .starts_with(&[0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed])
+    };
+    let bogus = || {
+        let mut script = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+        script.extend_from_slice(&[0x77; 32]);
+        TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::from_bytes(script),
+        }
+    };
+    let load = |edit: &dyn Fn(&mut Block)| {
+        let mut file = fixture_file();
+        edit_block(&mut file, TIP_INDEX, |b| {
+            edit(b);
+            remine(b);
+        });
+        FixtureSource::from_file(file)
+    };
+
+    // Sanity: the tip block has witness data and exactly one commitment.
+    let tip: Block = deserialize_hex(&fixture_file().blocks[TIP_INDEX].block_hex).unwrap();
+    assert_eq!(
+        tip.txdata[0]
+            .output
+            .iter()
+            .filter(|o| is_commitment(o))
+            .count(),
+        1
+    );
+    assert!(is_commitment(tip.txdata[0].output.last().unwrap()));
+
+    // Several commitment-shaped outputs: the *last* one counts.
+    assert!(load(&|b| {
+        let at = b.txdata[0].output.len() - 1;
+        b.txdata[0].output.insert(at, bogus());
+    })
+    .is_ok());
+    match load(&|b| b.txdata[0].output.push(bogus())) {
+        Err(SourceError::InvalidData(msg)) => assert!(
+            msg.contains("does not match the coinbase commitment"),
+            "{msg}"
+        ),
+        other => panic!("a wrong last commitment must be refused, got {other:?}"),
+    }
+
+    // A commitment script may be longer than the 38 bytes that matter.
+    assert!(load(&|b| {
+        let last = b.txdata[0].output.last_mut().unwrap();
+        let mut script = last.script_pubkey.to_bytes();
+        script.push(0x51);
+        last.script_pubkey = ScriptBuf::from_bytes(script);
+    })
+    .is_ok());
+
+    // The coinbase witness must be exactly one 32-byte item.
+    for witness in [
+        Witness::from_slice(&[[0u8; 32], [0u8; 32]]),
+        Witness::from_slice(&[vec![0u8; 31]]),
+        Witness::from_slice(&[vec![0u8; 33]]),
+    ] {
+        match load(&|b| b.txdata[0].input[0].witness = witness.clone()) {
+            Err(SourceError::InvalidData(msg)) => assert!(msg.contains("reserved value"), "{msg}"),
+            other => panic!("a malformed reserved value must be refused, got {other:?}"),
+        }
+    }
+    // A different (well-formed) reserved value no longer matches.
+    assert!(load(&|b| b.txdata[0].input[0].witness = Witness::from_slice(&[[1u8; 32]])).is_err());
+}
+
+/// The fixture adapter cross-checks prevouts of inputs that spend an output
+/// created inside the file (it cannot check any other prevout).
+#[test]
+fn fixture_adapter_cross_checks_prevouts_created_in_the_file() {
+    // Append a transaction to the tip block that spends the first payment
+    // (created at height 2), with a placeholder witness.
+    let payment = fixture_txs(2)[1].0.clone();
+    let spent = OutPoint::new(payment.compute_txid(), 0);
+    let real = payment.output[0].clone();
+    let spender = Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: spent,
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::from_slice(&[vec![0u8; 64]]),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(40_000),
+            script_pubkey: ScriptBuf::from_hex("0014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap(),
+        }],
+    };
+    let with_prevout = |value_sats: u64, script: &ScriptBuf| {
+        let mut file = fixture_file();
+        file.blocks[TIP_INDEX]
+            .prevouts
+            .push(vec![sync_core::source::fixture::FixturePrevout {
+                value_sats,
+                script_pubkey_hex: script.to_hex_string(),
+            }]);
+        edit_block(&mut file, TIP_INDEX, |b| {
+            b.txdata.push(spender.clone());
+            fixture_gen::seal(b);
+        });
+        FixtureSource::from_file(file)
+    };
+
+    assert!(with_prevout(real.value.to_sat(), &real.script_pubkey).is_ok());
+    for (value, script) in [
+        (real.value.to_sat() + 1, real.script_pubkey.clone()),
+        (real.value.to_sat(), payment.output[1].script_pubkey.clone()),
+    ] {
+        match with_prevout(value, &script) {
+            Err(SourceError::InvalidData(msg)) => {
+                assert!(
+                    msg.contains("differs from the output created in this range"),
+                    "{msg}"
+                )
+            }
+            other => panic!("a lying prevout must be refused, got {other:?}"),
+        }
+    }
+}
+
+/// `scan_range` works in chunks; the result must not depend on it.
+#[test]
+fn stateless_scan_is_chunked_and_still_all_or_nothing() {
+    use sync_core::engine::SCAN_CHUNK_BLOCKS;
+    // Count fetches through a wrapper and check linkage across chunk borders
+    // with a source that serves the fork from the second chunk on.
+    struct Counting<'a>(&'a FixtureSource, std::cell::Cell<u32>);
+    impl ScanSource for Counting<'_> {
+        fn backend_id(&self) -> &str {
+            "counting"
+        }
+        fn capabilities(&self) -> SourceCapabilities {
+            self.0.capabilities()
+        }
+        fn chain(&self) -> ChainIdentity {
+            self.0.chain()
+        }
+        fn tip(&self) -> Result<BlockRef, SourceError> {
+            self.0.tip()
+        }
+        fn fetch_range(&self, from: u32, to: u32) -> Result<ScanBatch, SourceError> {
+            self.1.set(self.1.get() + 1);
+            assert!(
+                to - from < SCAN_CHUNK_BLOCKS,
+                "a chunk larger than the limit was requested"
+            );
+            self.0.fetch_range(from, to)
+        }
+    }
+    let src = source();
+    let counting = Counting(&src, std::cell::Cell::new(0));
+    let scanner = ReceiveScanner::new(&fixture_gen::lab_receiver_keys(), &[LABEL_USED]).unwrap();
+    let report = scan_range(&counting, &scanner, regtest(), 1, TIP).unwrap();
+    assert_eq!(report.detected_received_outputs.len(), 7);
+    assert_eq!(counting.1.get(), TIP.div_ceil(SCAN_CHUNK_BLOCKS));
 }

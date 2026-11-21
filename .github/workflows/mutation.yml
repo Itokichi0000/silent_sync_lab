@@ -1,0 +1,32 @@
+name: Mutation check
+
+# Disables each validation in turn (in a scratch copy) and requires that some
+# test fails. Slow, so it runs on demand and weekly rather than on every push.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  mutation-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup show
+      - name: Run
+        run: |
+          mkdir -p "$RUNNER_TEMP/mut/repo"
+          git ls-files | tar cf - -T - | tar xf - -C "$RUNNER_TEMP/mut/repo"
+          python3 scripts/mutation_check.py "$RUNNER_TEMP/mut/repo"

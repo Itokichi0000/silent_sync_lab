@@ -1,8 +1,8 @@
 //! Range scanning.
 //!
-//! Phase 1 scope: scan one contiguous block range from one source and report
-//! what was detected. There is no persistence, resume or reorg handling yet
-//! (Phase 3); the function is therefore called `scan_range`, not `sync`.
+//! [`scan_range`] is the stateless scan: one contiguous block range from one
+//! source, nothing stored. The persistent, resumable variant is `crate::sync`
+//! and builds on the same block scanning code.
 //!
 //! The engine does not trust a source to honour its own contract: a batch that
 //! is short, out of order, duplicated or not hash-linked is an error, and any
@@ -10,8 +10,8 @@
 //! scanned unless every block of the requested range was processed.
 
 use crate::{
-    bitcoin::{OutPoint, Txid},
-    models::{BlockRef, DetectedOutput, MatchProvenance},
+    bitcoin::Txid,
+    models::{BlockRef, DetectedOutput, EvidenceKind, MatchProvenance},
     network::ChainIdentity,
     protocol::{ProtocolError, ReceiveScanner, SkipReason, TxScanOutcome},
     source::{BlockEvidence, Evidence, ScanSource, SourceError},
@@ -42,8 +42,6 @@ pub enum ScanError {
         #[source]
         source: ProtocolError,
     },
-    #[error("output {0} was detected twice in one range")]
-    DuplicateDetection(OutPoint),
 }
 
 /// Result of scanning one complete range. Contains no key material.
@@ -51,6 +49,10 @@ pub enum ScanError {
 pub struct ScanReport {
     pub chain: ChainIdentity,
     pub backend_id: String,
+    /// What kind of evidence the detections rest on. For
+    /// [`EvidenceKind::TweakIndex`], transaction ids, output positions and
+    /// amounts are the index's claims and were not checked against a block.
+    pub evidence_kind: EvidenceKind,
     pub first_block: BlockRef,
     pub last_block: BlockRef,
     /// Label integers that were scanned for (always includes the change label
@@ -88,41 +90,102 @@ pub fn scan_range(
         return Err(ScanError::InvalidRange { from, to });
     }
 
-    let batch = source.fetch_range(from, to)?;
-    check_batch(&backend_id, &batch.blocks, from, to)?;
-
-    let (Some(first), Some(last)) = (batch.blocks.first(), batch.blocks.last()) else {
-        // `check_batch` guarantees `to - from + 1 >= 1` blocks.
+    // Fetched and scanned in chunks so that memory use does not grow with the
+    // size of the range; the result is all-or-nothing regardless.
+    let mut counters = ScanCounters::default();
+    let mut detected = Vec::new();
+    let mut seen_txids = BTreeSet::new();
+    let mut first_block: Option<BlockRef> = None;
+    let mut previous: Option<BlockRef> = None;
+    let mut next = from;
+    loop {
+        let last = to.min(next.saturating_add(SCAN_CHUNK_BLOCKS - 1));
+        let batch = source.fetch_range(next, last)?;
+        check_batch(&backend_id, &batch.blocks, next, last)?;
+        if let (Some(prev), Some(first)) = (previous, batch.blocks.first()) {
+            if first.block.prev_hash != prev.hash {
+                return Err(ScanError::InconsistentBatch {
+                    backend_id,
+                    reason: format!(
+                        "block {} does not link to block {} (the chain changed during the scan?)",
+                        first.block.height, prev.height
+                    ),
+                });
+            }
+        }
+        detected.extend(scan_blocks(
+            &backend_id,
+            chain,
+            scanner,
+            &batch.blocks,
+            &mut counters,
+            &mut seen_txids,
+        )?);
+        first_block = first_block.or(batch.blocks.first().map(|b| b.block));
+        previous = batch.blocks.last().map(|b| b.block);
+        if last == to {
+            break;
+        }
+        next = last + 1;
+    }
+    let (Some(first_block), Some(last_block)) = (first_block, previous) else {
+        // `check_batch` guarantees at least one block per chunk.
         return Err(ScanError::InconsistentBatch {
             backend_id,
             reason: "empty batch".to_string(),
         });
     };
-    let (first_block, last_block) = (first.block, last.block);
 
-    let mut report = ScanReport {
+    Ok(ScanReport {
         chain,
-        backend_id: backend_id.clone(),
+        backend_id,
+        evidence_kind: source.capabilities().evidence_kind,
         first_block,
         last_block,
         labels_scanned: scanner.labels().collect(),
-        blocks_scanned: 0,
-        txs_seen: 0,
-        txs_scanned: 0,
-        txs_skipped: BTreeMap::new(),
-        detected_received_outputs: Vec::new(),
-    };
-    let mut seen_outpoints = BTreeSet::<OutPoint>::new();
+        blocks_scanned: counters.blocks,
+        txs_seen: counters.txs_seen,
+        txs_scanned: counters.txs_scanned,
+        txs_skipped: counters.txs_skipped,
+        detected_received_outputs: detected,
+    })
+}
 
-    for block in &batch.blocks {
+/// Blocks fetched per request by [`scan_range`].
+pub const SCAN_CHUNK_BLOCKS: u32 = 100;
+
+/// Counters accumulated while scanning blocks.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScanCounters {
+    pub blocks: u64,
+    pub txs_seen: u64,
+    pub txs_scanned: u64,
+    pub txs_skipped: BTreeMap<&'static str, u64>,
+}
+
+/// Scans already-fetched blocks and returns what was detected in them,
+/// ordered by (height, position in block, vout). Any error aborts the whole
+/// call: callers must not record a block as scanned unless this returned `Ok`.
+pub(crate) fn scan_blocks(
+    backend_id: &str,
+    chain: ChainIdentity,
+    scanner: &ReceiveScanner,
+    blocks: &[BlockEvidence],
+    counters: &mut ScanCounters,
+    seen_txids: &mut BTreeSet<Txid>,
+) -> Result<Vec<DetectedOutput>, ScanError> {
+    let mut detected = Vec::new();
+
+    for block in blocks {
         let provenance = MatchProvenance {
-            backend_id: backend_id.clone(),
+            backend_id: backend_id.to_string(),
             evidence_kind: block.evidence.kind(),
         };
         match &block.evidence {
             Evidence::FullBlock(txs) => {
+                check_full_block(backend_id, block.block.height, txs, seen_txids)?;
                 for entry in txs {
-                    report.txs_seen += 1;
+                    counters.txs_seen += 1;
                     let outcome =
                         scanner
                             .scan_tx(&entry.tx, &entry.prevouts)
@@ -133,22 +196,19 @@ pub fn scan_range(
                             })?;
                     match outcome {
                         TxScanOutcome::NotEligible(reason) => {
-                            *report
+                            *counters
                                 .txs_skipped
                                 .entry(SkipReason::as_str(reason))
                                 .or_default() += 1;
                         }
                         TxScanOutcome::Scanned { mut matches } => {
-                            report.txs_scanned += 1;
+                            counters.txs_scanned += 1;
                             matches.sort_by_key(|m| m.outpoint.vout);
                             for m in matches {
-                                if !seen_outpoints.insert(m.outpoint) {
-                                    return Err(ScanError::DuplicateDetection(m.outpoint));
-                                }
-                                // The upstream match also carries the output
-                                // tweak; it is dropped here on purpose.
-                                report.detected_received_outputs.push(DetectedOutput {
-                                    network: chain.network,
+                                // The match also carries the output tweak; it
+                                // is dropped here on purpose.
+                                detected.push(DetectedOutput {
+                                    network: chain.network(),
                                     block: block.block,
                                     txid: m.outpoint.txid,
                                     vout: m.outpoint.vout,
@@ -161,15 +221,133 @@ pub fn scan_range(
                     }
                 }
             }
+            Evidence::TweakIndex(indexed) => {
+                check_index_entries(backend_id, block.block.height, indexed)?;
+                for entry in indexed {
+                    if !seen_txids.insert(entry.txid) {
+                        return Err(ScanError::InconsistentBatch {
+                            backend_id: backend_id.to_string(),
+                            reason: format!(
+                                "block {}: transaction {} appears more than once in the range",
+                                block.block.height, entry.txid
+                            ),
+                        });
+                    }
+                    counters.txs_seen += 1;
+                    counters.txs_scanned += 1;
+                    let mut matches = scanner.scan_indexed_tx(entry).map_err(|source| {
+                        ScanError::Transaction {
+                            height: block.block.height,
+                            txid: entry.txid,
+                            source,
+                        }
+                    })?;
+                    matches.sort_by_key(|m| m.outpoint.vout);
+                    for m in matches {
+                        detected.push(DetectedOutput {
+                            network: chain.network(),
+                            block: block.block,
+                            txid: m.outpoint.txid,
+                            vout: m.outpoint.vout,
+                            value_sats: m.amount.to_sat(),
+                            label: m.label,
+                            provenance: provenance.clone(),
+                        });
+                    }
+                }
+            }
         }
-        report.blocks_scanned += 1;
+        counters.blocks += 1;
     }
+    Ok(detected)
+}
 
-    Ok(report)
+/// Most taproot outputs one block can hold: 4,000,000 weight units at 172
+/// per output (8 bytes value, 1 byte length, 34 bytes script), ignoring every
+/// other part of the block.
+pub const MAX_INDEXED_OUTPUTS_PER_BLOCK: usize = 4_000_000 / 172;
+
+/// Bounds on what an index may claim about one block, checked before any
+/// entry is scanned. They cannot make the claims true; they keep impossible
+/// ones out of the result and bound the work an index can cause.
+///
+/// * every listed transaction lists at least one output (an index lists a
+///   transaction *because* it has taproot outputs);
+/// * no output is worth more than all the coins that can exist;
+/// * the block does not list more outputs than a block can hold.
+fn check_index_entries(
+    backend_id: &str,
+    height: u32,
+    indexed: &[crate::source::IndexedTx],
+) -> Result<(), ScanError> {
+    let inconsistent = |reason: String| ScanError::InconsistentBatch {
+        backend_id: backend_id.to_string(),
+        reason: format!("block {height}: {reason}"),
+    };
+    let max_value = crate::bitcoin::Amount::MAX_MONEY.to_sat();
+    let mut outputs = 0usize;
+    for entry in indexed {
+        if entry.outputs.is_empty() {
+            return Err(inconsistent(format!(
+                "index entry {} lists no outputs",
+                entry.txid
+            )));
+        }
+        if let Some(output) = entry.outputs.iter().find(|o| o.value_sats > max_value) {
+            return Err(inconsistent(format!(
+                "index entry {}:{} claims {} sat, more than can exist",
+                entry.txid, output.vout, output.value_sats
+            )));
+        }
+        outputs = outputs.saturating_add(entry.outputs.len());
+    }
+    if outputs > MAX_INDEXED_OUTPUTS_PER_BLOCK {
+        return Err(inconsistent(format!(
+            "the index lists {outputs} outputs, more than a block can hold"
+        )));
+    }
+    Ok(())
+}
+
+/// Structural facts every real block satisfies, checked regardless of what the
+/// source claims to have verified: at least one transaction, exactly one
+/// coinbase and it comes first, and no transaction appears twice in the range.
+///
+/// What this cannot catch is a block from which a non-coinbase transaction was
+/// removed; only a source that verifies the merkle root can (see
+/// `SourceCapabilities::verifies_merkle_root`).
+fn check_full_block(
+    backend_id: &str,
+    height: u32,
+    txs: &[crate::source::TxWithPrevouts],
+    seen_txids: &mut BTreeSet<Txid>,
+) -> Result<(), ScanError> {
+    let inconsistent = |reason: String| ScanError::InconsistentBatch {
+        backend_id: backend_id.to_string(),
+        reason,
+    };
+    if txs.is_empty() {
+        return Err(inconsistent(format!("block {height} has no transactions")));
+    }
+    for (position, entry) in txs.iter().enumerate() {
+        if entry.tx.is_coinbase() != (position == 0) {
+            return Err(inconsistent(format!(
+                "block {height}: transaction at position {position} violates \
+                 \"exactly one coinbase, first\""
+            )));
+        }
+        let txid = entry.tx.compute_txid();
+        if !seen_txids.insert(txid) {
+            return Err(inconsistent(format!(
+                "block {height}: transaction {txid} appears more than once in the range"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Verifies that a batch is exactly `from..=to`, ascending and hash-linked.
-fn check_batch(
+pub(crate) fn check_batch(
     backend_id: &str,
     blocks: &[BlockEvidence],
     from: u32,

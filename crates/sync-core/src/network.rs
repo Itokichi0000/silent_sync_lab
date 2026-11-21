@@ -105,13 +105,51 @@ impl From<LabNetwork> for String {
 
 /// Network plus genesis hash. Two sources are only comparable when their
 /// `ChainIdentity` is equal.
+///
+/// Invariant: `genesis_hash` is the genesis block of `network`. The fields are
+/// private and deserialization goes through [`ChainIdentity::verified`], so a
+/// value that pairs a lab network name with another chain's genesis (mainnet's
+/// in particular) cannot exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "RawChainIdentity", into = "RawChainIdentity")]
 pub struct ChainIdentity {
-    pub network: LabNetwork,
-    pub genesis_hash: BlockHash,
+    network: LabNetwork,
+    genesis_hash: BlockHash,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawChainIdentity {
+    network: LabNetwork,
+    genesis_hash: BlockHash,
+}
+
+impl TryFrom<RawChainIdentity> for ChainIdentity {
+    type Error = NetworkError;
+
+    fn try_from(raw: RawChainIdentity) -> Result<Self, Self::Error> {
+        Self::verified(raw.network, raw.genesis_hash)
+    }
+}
+
+impl From<ChainIdentity> for RawChainIdentity {
+    fn from(chain: ChainIdentity) -> Self {
+        Self {
+            network: chain.network,
+            genesis_hash: chain.genesis_hash,
+        }
+    }
 }
 
 impl ChainIdentity {
+    pub fn network(&self) -> LabNetwork {
+        self.network
+    }
+
+    pub fn genesis_hash(&self) -> BlockHash {
+        self.genesis_hash
+    }
+
     /// The canonical identity of `network`.
     pub fn for_network(network: LabNetwork) -> Self {
         Self {
@@ -202,6 +240,53 @@ mod tests {
                 Some(network)
             );
         }
+    }
+
+    /// Pins the mapping to concrete chains: a mix-up such as signet -> testnet
+    /// would otherwise go unnoticed.
+    #[test]
+    fn networks_map_to_their_well_known_genesis_blocks() {
+        assert_eq!(LabNetwork::Regtest.to_bitcoin(), Network::Regtest);
+        assert_eq!(LabNetwork::Signet.to_bitcoin(), Network::Signet);
+        assert_eq!(
+            LabNetwork::Regtest.genesis_hash().to_string(),
+            "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
+        );
+        assert_eq!(
+            LabNetwork::Signet.genesis_hash().to_string(),
+            "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6"
+        );
+        let regtest = ChainIdentity::for_network(LabNetwork::Regtest);
+        assert_eq!(regtest.network(), LabNetwork::Regtest);
+        assert_eq!(regtest.genesis_hash(), LabNetwork::Regtest.genesis_hash());
+        assert_ne!(regtest, ChainIdentity::for_network(LabNetwork::Signet));
+    }
+
+    #[test]
+    fn chain_identity_cannot_be_deserialized_with_a_foreign_genesis() {
+        let mainnet = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f";
+        let signet = LabNetwork::Signet.genesis_hash();
+        for json in [
+            format!(r#"{{"network":"regtest","genesis_hash":"{mainnet}"}}"#),
+            format!(r#"{{"network":"signet","genesis_hash":"{mainnet}"}}"#),
+            format!(r#"{{"network":"regtest","genesis_hash":"{signet}"}}"#),
+            format!(r#"{{"network":"mainnet","genesis_hash":"{mainnet}"}}"#),
+        ] {
+            assert!(
+                serde_json::from_str::<ChainIdentity>(&json).is_err(),
+                "{json}"
+            );
+        }
+        let good = ChainIdentity::for_network(LabNetwork::Signet);
+        let json = serde_json::to_string(&good).expect("serialize");
+        assert_eq!(
+            json,
+            format!(r#"{{"network":"signet","genesis_hash":"{signet}"}}"#)
+        );
+        assert_eq!(
+            serde_json::from_str::<ChainIdentity>(&json).ok(),
+            Some(good)
+        );
     }
 
     #[test]
