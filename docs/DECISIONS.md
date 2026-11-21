@@ -285,6 +285,19 @@ Phase 5 のコードと文書（commit `d5c6149`）を別エージェントが�
 - 公式テストベクトル（`fixtures/bip352/`）は BIP リポジトリのもので、BSD-2-Clause のまま（`SOURCE.md`）。
 - ライセンスは無保証を定めるだけで、「未監査の実験コードで mainnet・実資金に使えない」という位置づけは変わらない。
 
+### D-039 SDK 化の第一歩: 公開 API の整理（所有者の決定）
+Phase 6 の進路として、所有者は「まず同期コアを SDK として仕上げ、その後に上流のライブラリと合わせてウォレットを作る」流れを選んだ（2026-11-21）。
+最初の作業は公開 API の整理で、案は `docs/SDK_API_PROPOSAL.md`。所有者の決定は次の 4 点（いずれも提案どおり）。
+
+| 問い | 決定 |
+|---|---|
+| 出力ごとの tweak（秘密）を SDK から渡すか | **今は渡さない。** SDK の範囲は「受信の検出」まで。ウォレット化の段階で改めて設計し、レビューを受ける |
+| 実験・診断用のデータ源（`fixture`、`local-index`） | **既定で無効**（feature で有効化。CLI は有効にする） |
+| 名前 | **変える。** クレート `sync-core` → `silent-sync`、`lab-storage` → `silent-sync-sqlite`、型 `LabNetwork` → `Network`、`LabAddress` → `SilentPaymentAddress`。crates.io への公開は別の判断（`publish = false` のまま） |
+| tx 単位の低レベル API | **feature `low-level` の下に残す**（既定で無効） |
+
+変えないもの: 検査の内容、fail-closed の挙動、エラーの分類、ストアの形式、mainnet を表現できない型、送金・署名・残高を持たないこと。
+
 ## 未決事項
 
 | ID | 事項 | 判断時期 |
