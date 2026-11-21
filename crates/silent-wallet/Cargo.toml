@@ -1,0 +1,25 @@
+[package]
+name = "silent-wallet"
+description = "EXPERIMENTAL silent payments wallet logic on top of silent-sync: unspent outputs, building and signing transactions. Regtest and signet only; no mainnet."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# `spend`: the tweak needed to spend an output, derived again from a full
+# block. `low-level`: the wallet scans the transaction it built with its own
+# scanner, to see its change before anything is sent.
+silent-sync = { path = "../silent-sync", features = ["spend", "low-level"] }
+# The upstream sender: which output keys pay a silent payment address.
+bdk_sp = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+lab-testkit = { path = "../lab-testkit" }
+
+[lints]
+workspace = true

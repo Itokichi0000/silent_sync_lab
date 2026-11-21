@@ -5,6 +5,7 @@ members = [
     "crates/silent-sync-sqlite",
     "crates/lab-cli",
     "crates/lab-testkit",
+    "crates/silent-wallet",
 ]
 # Deliberately outside: they use the libraries with the features an embedder
 # gets, which a workspace build never does (see probes/Cargo.toml).

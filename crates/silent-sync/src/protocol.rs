@@ -169,6 +169,33 @@ impl SilentPaymentAddress {
     pub fn spend_public_key(&self) -> PublicKey {
         self.spend
     }
+
+    /// Reads an address from its text form and checks that it is for
+    /// `network`.
+    ///
+    /// The prefix decides: `sprt` for regtest, `tsp` for the test networks
+    /// (signet here). A mainnet address (`sp`) is refused for every
+    /// `network`, since [`Network`] has no mainnet.
+    pub fn parse(text: &str, network: Network) -> Result<Self, ProtocolError> {
+        let code = SilentPaymentCode::try_from(text)
+            .map_err(|e| ProtocolError::Address(format!("not a silent payment address: {e}")))?;
+        if code.version() != 0 {
+            return Err(ProtocolError::Address(format!(
+                "silent payment address version {} is not supported",
+                code.version()
+            )));
+        }
+        if !code.is_valid_for_network(network.to_bitcoin()) {
+            return Err(ProtocolError::Address(format!(
+                "the address is not a {network} address"
+            )));
+        }
+        Ok(Self {
+            network,
+            scan: code.scan,
+            spend: code.spend,
+        })
+    }
 }
 
 impl fmt::Display for SilentPaymentAddress {
@@ -192,8 +219,8 @@ mod tx_level {
     ///
     /// The upstream match type is serializable including the per-output tweak.
     /// This type is deliberately not `Serialize` and, unless the
-    /// `secret-output-tweaks` feature is enabled, **does not hold the tweak at
-    /// all**: the scan result that leaves this crate says which output matched,
+    /// `secret-output-tweaks` or the `spend` feature is enabled, **does not
+    /// hold the tweak at all**: the scan result that leaves this crate says which output matched,
     /// not how to spend it (DECISIONS D-039).
     #[derive(Clone, PartialEq, Eq)]
     #[non_exhaustive]
@@ -206,8 +233,16 @@ mod tx_level {
         pub amount: Amount,
         /// BIP352 label integer, `None` for the unlabelled address.
         pub label: Option<u32>,
-        #[cfg(feature = "secret-output-tweaks")]
+        #[cfg(any(feature = "secret-output-tweaks", feature = "spend"))]
         tweak: SecretKey,
+    }
+
+    #[cfg(feature = "spend")]
+    impl ScanMatch {
+        /// The output tweak, for [`crate::spend::recover_spendable`] only.
+        pub(crate) fn tweak_for_spending(&self) -> SecretKey {
+            self.tweak
+        }
     }
 
     #[cfg(feature = "secret-output-tweaks")]
@@ -232,7 +267,7 @@ mod tx_level {
                 script_pubkey: spout.script_pubkey,
                 amount: spout.amount,
                 label: spout.label,
-                #[cfg(feature = "secret-output-tweaks")]
+                #[cfg(any(feature = "secret-output-tweaks", feature = "spend"))]
                 tweak: spout.tweak,
             }
         }
@@ -325,6 +360,9 @@ pub enum ProtocolError {
     /// More outputs matched than BIP352 allows per recipient group (the limit
     /// is given).
     KMaxExceeded(u32),
+    #[error("{0}")]
+    /// A silent payment address could not be read, or is for another network.
+    Address(String),
     #[error("K_max fallback found {0} matches instead of exactly K_max; refusing to guess")]
     /// The capped rescan did not find exactly the allowed number of matches
     /// (the number found is given).

@@ -27,6 +27,10 @@ low-level = []
 # secret) to compare it with the BIP352 vectors. Without it, scan matches do
 # not carry the tweak at all.
 secret-output-tweaks = ["low-level"]
+# For a wallet: `spend::recover_spendable` derives again, from a full block,
+# the tweak needed to spend one detected output. Nothing here signs, sends or
+# stores a tweak. See the module documentation.
+spend = []
 
 [dependencies]
 bdk_sp = { workspace = true }

@@ -112,6 +112,7 @@
 //! | `fixture` | `source::fixture`: offline fixture files, for experiments and tests |
 //! | `local-index` | `source::local_index`: a tweak index computed locally, for cross-checks |
 //! | `low-level` | per-transaction entry points of [`ReceiveScanner`] and their result types |
+//! | `spend` | `spend::recover_spendable`: derives again, from a full block, the tweak a wallet needs to spend one detected output. Nothing in this crate signs, sends or stores it |
 //! | `secret-output-tweaks` | not part of the SDK; lets conformance tests read per-output tweaks |
 //!
 //! ## Labels
@@ -144,6 +145,8 @@ pub mod network;
 pub mod protocol;
 pub mod rescan;
 pub mod source;
+#[cfg(feature = "spend")]
+pub mod spend;
 pub mod store;
 pub mod sync;
 pub mod verify;

@@ -72,6 +72,16 @@ pub fn vector_raw_keys(index: usize, receiver: usize) -> (SecretKey, PublicKey) 
     (scan, spend.public_key(&Secp256k1::new()))
 }
 
+/// Scan and spend **private** keys of the vector at `index`, receiver
+/// `receiver`: published test values, which let tests spend what the fixture
+/// pays to that receiver. Never use them for anything of value.
+pub fn vector_secret_keys(index: usize, receiver: usize) -> (SecretKey, SecretKey) {
+    let all: serde_json::Value = serde_json::from_str(VECTORS_JSON).unwrap();
+    let material = &all[index]["receiving"][receiver]["given"]["key_material"];
+    let key = |name: &str| -> SecretKey { material[name].as_str().unwrap().parse().unwrap() };
+    (key("scan_priv_key"), key("spend_priv_key"))
+}
+
 /// Receiver keys of the vector at `index`, receiver `receiver`.
 pub fn vector_receiver_keys(index: usize, receiver: usize) -> ReceiverKeys {
     let (scan, spend) = vector_raw_keys(index, receiver);
