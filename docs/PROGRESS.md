@@ -36,7 +36,7 @@
 - [ ] ベンチマーク、故障注入レポート、`export` / `bench` / `status` / `received list` / `lab init` コマンド（Phase 3〜5）
 - [ ] `docs/THREAT_MODEL.md`, `docs/BENCHMARK_PROTOCOL.md`（Phase 4〜5 の前に作成）
 - [ ] 機密情報検出の pre-commit / CI ツール（DECISIONS O-009）
-- [ ] MSRV 1.85.0 での実ビルド確認（宣言のみ）
+- [ ] MSRV 1.85.0 でのテスト実行（`cargo +1.85.0 check --workspace --all-targets --locked` の成功までは確認済み。CI には未追加）
 - [ ] property-based / fuzz テスト（設計書 §11 で初期 MVP では任意）
 - [ ] 上流への不具合報告（DECISIONS O-002）
 

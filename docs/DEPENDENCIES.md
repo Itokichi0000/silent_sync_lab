@@ -8,7 +8,7 @@
 | 項目 | 固定値 | 固定場所 |
 |---|---|---|
 | Rust | 1.97.0（rustfmt, clippy 込み） | `rust-toolchain.toml` |
-| MSRV（宣言） | 1.85.0（上流 `bdk_sp` と同じ。**1.85 でのビルドは未検証**） | `Cargo.toml` |
+| MSRV（宣言） | 1.85.0（上流 `bdk_sp` と同じ。`cargo +1.85.0 check --workspace --all-targets --locked` は成功。**1.85 でのテスト実行は未実施**） | `Cargo.toml` |
 
 ## 上流（BIP352 実装）
 
