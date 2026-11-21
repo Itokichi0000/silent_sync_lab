@@ -220,17 +220,49 @@ fn sync_fails_closed() {
 
 #[test]
 fn unimplemented_backends_say_so_instead_of_pretending() {
-    for backend in ["core", "oracle-v2"] {
-        let (output, stdout, stderr) = run(&["sync", "--backend", backend]);
-        assert_eq!(output.status.code(), Some(3), "{backend}");
-        assert!(stdout.is_empty());
-        assert!(stderr.contains("not implemented yet") && stderr.contains("Nothing was scanned"));
-    }
+    let (output, stdout, stderr) = run(&["sync", "--backend", "oracle-v2"]);
+    assert_eq!(output.status.code(), Some(3));
+    assert!(stdout.is_empty());
+    assert!(stderr.contains("not implemented yet") && stderr.contains("Nothing was scanned"));
+
     let (output, stdout, _) = run(&["doctor"]);
     assert!(output.status.success());
-    assert!(stdout.contains("backend core      : NOT IMPLEMENTED"));
+    assert!(stdout.contains("backend core      : not probed"));
     assert!(stdout.contains("backend oracle-v2 : NOT IMPLEMENTED"));
     assert!(stdout.contains("persistence       : NOT IMPLEMENTED"));
+}
+
+/// Without a node, the Core backend must fail visibly and scan nothing.
+#[test]
+fn core_backend_without_a_node_fails_closed() {
+    // Port 9 (discard) on loopback: nothing listens there.
+    let url = "http://127.0.0.1:9";
+    let (output, stdout, stderr) = run(&["sync", "--backend", "core", "--core-rest-url", url]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stdout.is_empty());
+    assert!(
+        stderr.contains("source is unavailable") && stderr.contains("nothing was scanned"),
+        "{stderr}"
+    );
+
+    let (output, stdout, _) = run(&["doctor", "--core-rest-url", url]);
+    assert!(output.status.success());
+    assert!(
+        stdout.contains("backend core      : UNAVAILABLE"),
+        "{stdout}"
+    );
+
+    // Remote or non-HTTP nodes are out of scope and refused before any request.
+    for url in [
+        "http://192.0.2.1:8332",
+        "https://127.0.0.1:18443",
+        "http://example.com",
+    ] {
+        let (output, stdout, stderr) = run(&["sync", "--backend", "core", "--core-rest-url", url]);
+        assert_eq!(output.status.code(), Some(1), "{url}");
+        assert!(stdout.is_empty());
+        assert!(stderr.contains("refusing REST URL"), "{url}: {stderr}");
+    }
 }
 
 #[test]

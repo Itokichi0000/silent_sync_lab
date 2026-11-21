@@ -32,3 +32,24 @@ jobs:
       # live in a separate job once Phase 2 exists.
       - name: Test
         run: cargo test --workspace --locked
+
+  # End-to-end tests against a real Bitcoin Core regtest node. They are
+  # `#[ignore]`d in the normal suite because they need the binary.
+  regtest-e2e:
+    name: regtest end-to-end (Bitcoin Core)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup show
+      - name: Fetch and verify Bitcoin Core
+        run: |
+          exe="$(VERIFY_SIGNATURES=1 scripts/fetch_bitcoind.sh "$RUNNER_TEMP/bitcoind")"
+          echo "BITCOIND_EXE=$exe" >> "$GITHUB_ENV"
+      - name: End-to-end tests
+        run: cargo test --workspace --locked -- --ignored

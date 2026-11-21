@@ -18,7 +18,7 @@ use sync_core::{
     engine::{scan_range, ScanReport},
     network::{ChainIdentity, LabNetwork},
     protocol::ReceiveScanner,
-    source::{fixture::FixtureSource, ScanSource},
+    source::{bitcoin_core::CoreRestSource, fixture::FixtureSource, ScanSource},
     EXPERIMENTAL_BANNER,
 };
 
@@ -45,8 +45,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Report which backends are usable in this build.
-    Doctor,
+    /// Report which backends are usable; probes Bitcoin Core when a URL is given.
+    Doctor {
+        /// REST URL of a local Bitcoin Core node to probe, e.g. http://127.0.0.1:18443.
+        #[arg(long)]
+        core_rest_url: Option<String>,
+    },
     /// Show the lab's test-only silent payment address.
     Address {
         #[command(subcommand)]
@@ -77,6 +81,11 @@ struct SyncArgs {
     /// Fixture file (required for `--backend fixture`).
     #[arg(long)]
     fixture: Option<PathBuf>,
+    /// REST URL of your own Bitcoin Core node (>= 30, started with -rest=1) for
+    /// `--backend core`. Loopback only
+    /// [default: http://127.0.0.1:18443 on regtest, http://127.0.0.1:38332 on signet].
+    #[arg(long)]
+    core_rest_url: Option<String>,
     /// First height to scan [default: 1].
     #[arg(long)]
     from: Option<u32>,
@@ -95,7 +104,7 @@ struct SyncArgs {
 enum Backend {
     /// Deterministic offline fixture file.
     Fixture,
-    /// Bitcoin Core (not implemented yet — Phase 2).
+    /// Your own Bitcoin Core node, via its REST interface.
     Core,
     /// BlindBit Oracle v2 (not implemented yet — Phase 4).
     #[value(name = "oracle-v2")]
@@ -153,7 +162,7 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), Failure> {
     match cli.command {
-        Command::Doctor => doctor(cli.network),
+        Command::Doctor { core_rest_url } => doctor(cli.network, core_rest_url.as_deref()),
         Command::Address {
             action: AddressAction::Show { label },
         } => address_show(cli.network, label),
@@ -161,13 +170,41 @@ fn run(cli: Cli) -> Result<(), Failure> {
     }
 }
 
-fn doctor(network: LabNetwork) -> Result<(), Failure> {
+fn default_core_rest_url(network: LabNetwork) -> &'static str {
+    match network {
+        LabNetwork::Regtest => "http://127.0.0.1:18443",
+        LabNetwork::Signet => "http://127.0.0.1:38332",
+    }
+}
+
+fn doctor(network: LabNetwork, core_rest_url: Option<&str>) -> Result<(), Failure> {
+    let core = match core_rest_url {
+        None => format!(
+            "not probed (needs your own Bitcoin Core >= 30 with -rest=1; pass \
+             --core-rest-url, e.g. {})",
+            default_core_rest_url(network)
+        ),
+        Some(url) => match CoreRestSource::connect(url).and_then(|s| Ok((s.chain(), s.tip()?))) {
+            Ok((chain, tip)) if chain.network() == network => {
+                format!(
+                    "reachable at {url}: {} at height {}",
+                    chain.network(),
+                    tip.height
+                )
+            }
+            Ok((chain, _)) => format!(
+                "UNUSABLE: node at {url} is on {}, but --network is {network}",
+                chain.network()
+            ),
+            Err(e) => format!("UNAVAILABLE: {e}"),
+        },
+    };
     let lines = [
         format!("silent-sync {}", env!("CARGO_PKG_VERSION")),
         format!("network           : {network} (mainnet is refused by design)"),
         format!("receiver          : {}", lab_keys::DESCRIPTION),
         "backend fixture   : available (offline, structurally validated only)".to_string(),
-        "backend core      : NOT IMPLEMENTED (Phase 2)".to_string(),
+        format!("backend core      : {core}"),
         "backend oracle-v2 : NOT IMPLEMENTED (Phase 4)".to_string(),
         "persistence       : NOT IMPLEMENTED (Phase 3) — `sync` is a stateless scan".to_string(),
     ];
@@ -202,18 +239,24 @@ fn address_show(network: LabNetwork, label: Option<u32>) -> Result<(), Failure> 
 }
 
 fn sync(network: LabNetwork, args: SyncArgs) -> Result<(), Failure> {
-    let source = match args.backend {
+    let source: Box<dyn ScanSource> = match args.backend {
         Backend::Fixture => {
             let path = args
                 .fixture
                 .as_deref()
                 .ok_or_else(|| Failure::error("`--backend fixture` requires `--fixture <file>`"))?;
-            FixtureSource::from_path(path).map_err(|e| Failure::error(e.to_string()))?
+            Box::new(FixtureSource::from_path(path).map_err(|e| Failure::error(e.to_string()))?)
         }
         Backend::Core => {
-            return Err(Failure::not_implemented(
-                "backend `core` is not implemented yet (Phase 2). Nothing was scanned.",
-            ))
+            let url = args
+                .core_rest_url
+                .as_deref()
+                .unwrap_or_else(|| default_core_rest_url(network));
+            eprintln!("connecting to Bitcoin Core REST at {url}");
+            Box::new(
+                CoreRestSource::connect(url)
+                    .map_err(|e| Failure::error(format!("{e}\nnothing was scanned")))?,
+            )
         }
         Backend::OracleV2 => {
             return Err(Failure::not_implemented(
@@ -234,7 +277,7 @@ fn sync(network: LabNetwork, args: SyncArgs) -> Result<(), Failure> {
         source.backend_id()
     );
     let report = scan_range(
-        &source,
+        source.as_ref(),
         &scanner,
         ChainIdentity::for_network(network),
         from,

@@ -9,7 +9,7 @@
 3. **秘密を出さない。** scan 秘密鍵・シード・出力ごとの tweak・RPC 認証情報を、stdout / ログ / JSON / `Debug` / panic / テスト成果物 / コミットに書かない。新しい秘密鍵をリポジトリに追加しない（テスト鍵は BIP352 公式ベクトルの公開値のみ）。
 4. **fail-closed。** 部分応答・順序違い・重複・ハッシュ不連続・ネットワーク不一致・tx 単位のエラーは、範囲全体の失敗にする。静かに「同期済み」としない。
 5. **検出は残高ではない。** 表示は `detected_received_outputs`。残高・利用可能額・支出可能性を示す語を使わない。
-6. **送金・署名機能を作らない。** 上流の送信関数は `crates/sync-core/tests/support/fixture_gen.rs`（テストデータ生成専用）でのみ使う。
+6. **送金・署名機能を作らない。** 上流の送信関数と tx の署名は、テスト専用クレート `crates/lab-testkit` でのみ使う。`sync-core` と `lab-cli` の通常の依存に `lab-testkit` を入れない（`dev-dependencies` のみ）。
 7. **嘘をつかない。** テスト未実行で「完成」と言わない。未実装は `NOT IMPLEMENTED`、未確認は `UNVERIFIED`、外部要因で進めないものは `BLOCKED` と書く。計測値を捏造しない。モックで成功を装わない。
 8. **API を記憶から推測しない。** 上流の実コードを読んで確認し、commit SHA を `docs/RESEARCH.md` に残す。
 9. **Phase Gate を飛ばさない。** UI の作り込み、Tauri、製品形態（SDK / ウォレット）の決め打ちは Phase 6 まで行わない。
@@ -26,7 +26,10 @@ crates/sync-core/   同期コア（SDK 候補）。CLI・表示・ストレー�
   src/protocol.rs     上流スキャナのラッパー（適格性、K_max 補正、panic 封じ込め）
   src/engine.rs       scan_range（ステートレス）、バッチ整合性検査
   src/source/         ScanSource トレイト、fixture アダプタ
+  src/source/block_check.rs   フルブロック共通の構造検査
+  src/source/bitcoin_core.rs  Bitcoin Core REST バックエンド（feature `core-rest`、ループバック限定）
 crates/lab-cli/     薄い CLI（バイナリ名 silent-sync）。依存方向は lab-cli → sync-core のみ
+crates/lab-testkit/ テスト専用。fixture 生成、regtest ノード操作、署名付きテスト tx、偽 REST サーバ
 fixtures/bip352/    公式ベクトル（SHA-256 固定、無改変）
 fixtures/local/     決定的 fixture（生成器と一致することをテストで検査）
 docs/               RESEARCH / DECISIONS / DEPENDENCIES / PROGRESS / logs
@@ -38,8 +41,12 @@ docs/               RESEARCH / DECISIONS / DEPENDENCIES / PROGRESS / logs
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked          # K_max の 2 テストで約 2 分かかる
-cargo run -p sync-core --example gen_fixture -- fixtures/local/regtest_basic_v1.json
+cargo run -p lab-testkit --bin gen_fixture -- fixtures/local/regtest_basic_v1.json
 cargo run -p lab-cli -- sync --backend fixture --fixture fixtures/local/regtest_basic_v1.json --label 1
+
+# 実ノードを使う E2E（通常の cargo test では ignored。BITCOIND_EXE が無いと失敗する）
+export BITCOIND_EXE="$(VERIFY_SIGNATURES=1 scripts/fetch_bitcoind.sh /path/outside/repo)"
+cargo test --workspace --locked -- --ignored
 ```
 
 - 検証コード（`fixture.rs` / `engine.rs` / `protocol.rs` / `network.rs` の検査）を足したり変えたりしたら、`scripts/mutation_check.py` の項目も更新し、スクラッチコピーに対して実行して生存 0 を確認する（使い方はスクリプト冒頭）。
@@ -54,7 +61,7 @@ cargo run -p lab-cli -- sync --backend fixture --fixture fixtures/local/regtest_
 |---|---|---|
 | 0 | 上流調査・セットアップ | 完了（Gate 0 通過） |
 | 1 | fixture による受信検出 | 完了（Gate 1 通過） |
-| 2 | Bitcoin Core / regtest 統合 | 未着手 |
+| 2 | Bitcoin Core / regtest 統合 | 完了（Gate 2 通過） |
 | 3 | 永続化・再開・復元 | 未着手 |
 | 4 | 第二バックエンド | 未着手 |
 | 5 | ベンチマーク・故障注入 | 未着手 |

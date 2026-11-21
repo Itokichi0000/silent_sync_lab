@@ -1,13 +1,12 @@
 //! Regenerates `fixtures/local/regtest_basic_v1.json`.
 //!
 //! ```sh
-//! cargo run -p sync-core --example gen_fixture -- fixtures/local/regtest_basic_v1.json
+//! cargo run -p lab-testkit --bin gen_fixture -- fixtures/local/regtest_basic_v1.json
 //! ```
 //!
-//! Test-data generation only; see `tests/support/fixture_gen.rs`.
+//! Test-data generation only; see `lab_testkit::fixture_gen`.
 
-#[path = "../tests/support/fixture_gen.rs"]
-mod fixture_gen;
+use lab_testkit::fixture_gen;
 
 use std::{env, fs, process::ExitCode};
 

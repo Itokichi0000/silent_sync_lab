@@ -6,11 +6,10 @@
 //! fail-closed behaviour of the adapter and the engine.
 #![allow(clippy::unwrap_used)] // test code: a panic is the failure report
 
-#[path = "support/fixture_gen.rs"]
-mod fixture_gen;
-
 use bdk_sp::receive::scan::Scanner;
-use fixture_gen::{LABEL_NOT_BACKED_UP, LABEL_USED, LAB_RECEIVER, OTHER_RECEIVER};
+use lab_testkit::fixture_gen::{
+    self, LABEL_NOT_BACKED_UP, LABEL_USED, LAB_RECEIVER, OTHER_RECEIVER,
+};
 use std::collections::BTreeMap;
 use sync_core::{
     bitcoin::{
@@ -90,7 +89,7 @@ fn committed_fixture_is_exactly_what_the_generator_produces() {
         FIXTURE_JSON,
         fixture_gen::generate_json(),
         "fixtures/local/regtest_basic_v1.json is stale; regenerate with \
-         `cargo run -p sync-core --example gen_fixture -- fixtures/local/regtest_basic_v1.json`"
+         `cargo run -p lab-testkit --bin gen_fixture -- fixtures/local/regtest_basic_v1.json`"
     );
 }
 

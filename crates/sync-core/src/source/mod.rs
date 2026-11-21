@@ -9,6 +9,9 @@
 //! as a *separate* `Evidence` variant together with the first oracle-style
 //! backend (Phase 4); it is intentionally not sketched here as a mock.
 
+#[cfg(feature = "core-rest")]
+pub mod bitcoin_core;
+mod block_check;
 pub mod fixture;
 
 use crate::{
@@ -17,7 +20,7 @@ use crate::{
         Transaction, TxOut,
     },
     models::{BlockRef, EvidenceKind},
-    network::ChainIdentity,
+    network::{ChainIdentity, NetworkError},
 };
 
 /// What a source can and cannot vouch for.
@@ -96,6 +99,17 @@ pub enum SourceError {
     InvalidData(String),
     #[error("source is unavailable: {0}")]
     Unavailable(String),
+    #[error(transparent)]
+    Network(#[from] NetworkError),
+}
+
+/// Transfer counters of a source, for measurements. Offline sources report zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SourceStats {
+    /// Requests sent since the source was created.
+    pub requests: u64,
+    /// Response body bytes received since the source was created.
+    pub downloaded_bytes: u64,
 }
 
 /// A backend that supplies scan data for block ranges.
@@ -111,6 +125,10 @@ pub trait ScanSource {
     fn tip(&self) -> Result<BlockRef, SourceError>;
     /// Scan data for every block in `from..=to`, ascending.
     fn fetch_range(&self, from: u32, to: u32) -> Result<ScanBatch, SourceError>;
+    /// Transfer counters; sources without I/O keep the default.
+    fn stats(&self) -> SourceStats {
+        SourceStats::default()
+    }
 }
 
 /// Block height committed to by a coinbase transaction (BIP34).

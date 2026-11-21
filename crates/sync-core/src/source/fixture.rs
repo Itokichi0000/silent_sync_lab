@@ -16,13 +16,13 @@
 //! nothing about a real chain.
 
 use super::{
-    coinbase_height, BlockEvidence, Evidence, ScanBatch, ScanSource, SourceCapabilities,
-    SourceError, TxWithPrevouts,
+    block_check::{check_full_block, BlockExpectation},
+    BlockEvidence, Evidence, ScanBatch, ScanSource, SourceCapabilities, SourceError,
+    TxWithPrevouts,
 };
 use crate::{
     bitcoin::{
-        consensus::encode::deserialize_hex, hashes::Hash, Amount, Block, BlockHash, ScriptBuf,
-        Target, TxOut, Txid,
+        consensus::encode::deserialize_hex, Amount, Block, BlockHash, ScriptBuf, TxOut, Txid,
     },
     models::{BlockRef, EvidenceKind},
     network::{ChainIdentity, LabNetwork},
@@ -168,89 +168,6 @@ impl FixtureSource {
     }
 }
 
-/// Proof of work against the header's own `bits`, after checking that `bits`
-/// is a canonical encoding and not easier than the network allows. (Without
-/// that, a file could choose an arbitrarily easy or wrapped-around target.)
-///
-/// This still says nothing about the block being part of the most-work chain.
-fn check_proof_of_work(block: &Block, network: LabNetwork) -> Result<BlockHash, String> {
-    let bits = block.header.bits;
-    let target = block.header.target();
-    if target.to_compact_lossy() != bits {
-        return Err(format!(
-            "bits {:#010x} is not a canonical target encoding",
-            bits.to_consensus()
-        ));
-    }
-    let limit = match network {
-        LabNetwork::Regtest => Target::MAX_ATTAINABLE_REGTEST,
-        LabNetwork::Signet => Target::MAX_ATTAINABLE_SIGNET,
-    };
-    if target > limit {
-        return Err(format!(
-            "bits {:#010x} is easier than the {network} limit",
-            bits.to_consensus()
-        ));
-    }
-    block.header.validate_pow(target).map_err(|e| e.to_string())
-}
-
-/// BIP141 witness commitment, checked strictly.
-///
-/// `bitcoin::Block::check_witness_commitment` reports success for a block
-/// whose inputs carry no witness at all, even when its coinbase commits to
-/// witness data. Such a block is a *stripped* block: txids, merkle root and
-/// proof of work are unchanged, but the data BIP352 needs is gone. Here a
-/// commitment that is present must verify, and witness data without a
-/// commitment is rejected.
-fn check_witness_commitment(block: &Block) -> Result<(), String> {
-    const MAGIC: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
-    let coinbase = block.txdata.first().ok_or("block has no transactions")?;
-    // BIP141: the commitment is the last matching output.
-    let committed = coinbase
-        .output
-        .iter()
-        .rev()
-        .map(|o| o.script_pubkey.as_bytes())
-        .find(|script| script.len() >= 38 && script[..6] == MAGIC)
-        .map(|script| &script[6..38]);
-
-    let Some(committed) = committed else {
-        let has_witness = block
-            .txdata
-            .iter()
-            .skip(1)
-            .any(|tx| tx.input.iter().any(|i| !i.witness.is_empty()));
-        return if has_witness {
-            Err("transactions carry witness data but the coinbase has no commitment".to_string())
-        } else {
-            Ok(())
-        };
-    };
-
-    let reserved = match coinbase.input.first().map(|i| i.witness.to_vec()) {
-        Some(items) if items.len() == 1 && items[0].len() == 32 => items[0].clone(),
-        _ => {
-            return Err(
-                "coinbase commits to witness data but lacks the 32-byte reserved value \
-                 (block stripped of witnesses?)"
-                    .to_string(),
-            )
-        }
-    };
-    let root = block
-        .witness_root()
-        .ok_or("cannot compute the witness root")?;
-    let expected = Block::compute_witness_commitment(&root, &reserved);
-    if expected.as_byte_array() != committed {
-        return Err(
-            "witness data does not match the coinbase commitment (modified or stripped witnesses)"
-                .to_string(),
-        );
-    }
-    Ok(())
-}
-
 fn decode_block(
     fb: &FixtureBlock,
     network: LabNetwork,
@@ -258,98 +175,40 @@ fn decode_block(
     seen_txids: &mut BTreeSet<Txid>,
 ) -> Result<(BlockRef, Vec<TxWithPrevouts>), SourceError> {
     let height = fb.height;
-    let block: Block = deserialize_hex(&fb.block_hex)
-        .map_err(|e| invalid(format!("block {height}: cannot decode block_hex: {e}")))?;
+    let at = |e: String| invalid(format!("block {height}: {e}"));
+    let block: Block =
+        deserialize_hex(&fb.block_hex).map_err(|e| at(format!("cannot decode block_hex: {e}")))?;
 
-    if block.header.prev_blockhash != parent_hash {
-        return Err(invalid(format!(
-            "block {height}: prev_blockhash {} does not link to parent {parent_hash}",
-            block.header.prev_blockhash
-        )));
-    }
-    if !block.check_merkle_root() {
-        return Err(invalid(format!(
-            "block {height}: transactions do not match the header merkle root"
-        )));
-    }
-    let hash = check_proof_of_work(&block, network)
-        .map_err(|e| invalid(format!("block {height}: proof of work check failed: {e}")))?;
-    if !block.txdata.first().is_some_and(|tx| tx.is_coinbase()) {
-        return Err(invalid(format!(
-            "block {height}: transaction 0 violates \"exactly one coinbase, first\""
-        )));
-    }
-    check_witness_commitment(&block)
-        .map_err(|e| invalid(format!("block {height}: witness commitment: {e}")))?;
-    match block.txdata.first().and_then(coinbase_height) {
-        Some(h) if h == height => {}
-        Some(h) => {
-            return Err(invalid(format!(
-                "block {height}: coinbase commits to height {h}"
-            )))
-        }
-        None => {
-            return Err(invalid(format!(
-                "block {height}: coinbase does not commit to a height"
-            )))
-        }
-    }
-    if fb.prevouts.len() != block.txdata.len() {
-        return Err(invalid(format!(
-            "block {height}: {} transactions but {} prevout lists",
-            block.txdata.len(),
-            fb.prevouts.len()
-        )));
-    }
+    let prevouts = fb
+        .prevouts
+        .iter()
+        .map(|tx_prevouts| {
+            tx_prevouts
+                .iter()
+                .map(|p| {
+                    ScriptBuf::from_hex(&p.script_pubkey_hex)
+                        .map(|script_pubkey| TxOut {
+                            value: Amount::from_sat(p.value_sats),
+                            script_pubkey,
+                        })
+                        .map_err(|e| at(format!("bad prevout script: {e}")))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
-    let mut txs = Vec::with_capacity(block.txdata.len());
-    for (t, (tx, tx_prevouts)) in block.txdata.into_iter().zip(&fb.prevouts).enumerate() {
-        let is_first = t == 0;
-        if tx.is_coinbase() != is_first {
-            return Err(invalid(format!(
-                "block {height}: transaction {t} violates \"exactly one coinbase, first\""
-            )));
-        }
-        let txid = tx.compute_txid();
-        if !seen_txids.insert(txid) {
-            return Err(invalid(format!(
-                "block {height}: duplicate transaction {txid}"
-            )));
-        }
-        let expected_prevouts = if is_first { 0 } else { tx.input.len() };
-        if tx_prevouts.len() != expected_prevouts {
-            return Err(invalid(format!(
-                "block {height}: transaction {txid} has {} inputs needing prevouts but {} were supplied",
-                expected_prevouts,
-                tx_prevouts.len()
-            )));
-        }
-        let prevouts = tx_prevouts
-            .iter()
-            .map(|p| {
-                ScriptBuf::from_hex(&p.script_pubkey_hex)
-                    .map(|script_pubkey| TxOut {
-                        value: Amount::from_sat(p.value_sats),
-                        script_pubkey,
-                    })
-                    .map_err(|e| {
-                        invalid(format!(
-                            "block {height}: transaction {txid}: bad prevout script: {e}"
-                        ))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        txs.push(TxWithPrevouts { tx, prevouts });
-    }
-
-    Ok((
-        BlockRef {
+    check_full_block(
+        block,
+        prevouts,
+        BlockExpectation {
+            network,
             height,
-            hash,
-            prev_hash: parent_hash,
+            parent: Some(parent_hash),
+            hash: None,
         },
-        txs,
-    ))
+        seen_txids,
+    )
+    .map_err(at)
 }
 
 impl ScanSource for FixtureSource {

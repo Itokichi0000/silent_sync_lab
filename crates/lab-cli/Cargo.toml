@@ -11,9 +11,12 @@ name = "silent-sync"
 path = "src/main.rs"
 
 [dependencies]
-sync-core = { path = "../sync-core" }
+sync-core = { path = "../sync-core", features = ["core-rest"] }
 clap = { version = "4.5", features = ["derive"] }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+lab-testkit = { path = "../lab-testkit" }
 
 [lints]
 workspace = true

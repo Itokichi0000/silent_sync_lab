@@ -6,7 +6,7 @@
 |---|---|---|
 | 0 | 上流調査・セットアップ | **完了**（Gate 0 通過） |
 | 1 | 暗号処理を作らない受信検出（fixture） | **完了**（Gate 1 通過） |
-| 2 | Bitcoin Core / regtest 統合 | 未着手 |
+| 2 | Bitcoin Core / regtest 統合 | **完了**（Gate 2 通過） |
 | 3 | 永続化・再開・復元 | 未着手 |
 | 4 | 第二バックエンド | 未着手 |
 | 5 | ベンチマーク・故障注入 | 未着手 |
@@ -31,7 +31,6 @@
 
 ## Not done（このフェーズの対象外、または未実施）
 
-- [ ] Bitcoin Core 連携、regtest での送信 → 採掘 → 検出（Phase 2）
 - [ ] SQLite 永続化、チェックポイント、中断再開、reorg（Phase 3）
 - [ ] tweak 方式の `Evidence`、Oracle アダプタ、`Verifier::cross_check`（Phase 4）
 - [ ] ベンチマーク、故障注入レポート、`export` / `bench` / `status` / `received list` / `lab init` コマンド（Phase 3〜5）
@@ -162,7 +161,60 @@ Phase 2 以降の前提として未解決のもの:
 4. **witness を剥がしたブロックは、ブロックハッシュ・マークルルート・PoW では見分けられない。** `rust-bitcoin` の commitment 検査もそれを通す。Phase 2 で Bitcoin Core からブロックを取るときも、witness 付きで取得できていることを確認する必要がある。
 5. 「検査がある」ことと「検査が効いていることをテストが保証する」ことは別だった。最初の実装では 9 つの検査が、外してもテストが通る状態だった。
 
-## 次に取り組む最小タスク（Phase 2 の入口）
+## Phase 2 Result
+
+- **実装したファイル**:
+  - `crates/sync-core/src/source/bitcoin_core.rs`（REST バックエンド、feature `core-rest`）, `source/block_check.rs`（フルブロック共通検査。fixture アダプタから切り出し）, `source/mod.rs`（`SourceStats`, `SourceError::Network`）
+  - `crates/lab-testkit/`（新規・テスト専用）: `fixture_gen.rs`（移動）, `regtest_node.rs`, `regtest_wallet.rs`, `fake_core_rest.rs`, `bin/gen_fixture.rs`
+  - `crates/sync-core/tests/{regtest_e2e.rs,core_rest_fake.rs}`, `crates/lab-cli/tests/regtest_cli.rs`
+  - `crates/lab-cli/src/main.rs`（`sync --backend core --core-rest-url`, `doctor --core-rest-url`）
+  - `scripts/{fetch_bitcoind.sh,regtest_node.sh}`, `scripts/mutation_check.py`（41 項目に拡張）, `.github/workflows/ci.yml`（`regtest-e2e` ジョブ）
+- **実行したコマンド**:
+  - `VERIFY_SIGNATURES=1 scripts/fetch_bitcoind.sh <dir>`（SHA-256 一致、署名 8 件有効）
+  - `scripts/regtest_node.sh start|status|stop`（手動確認）
+  - `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets --locked -- -D warnings` / `cargo test --workspace --locked`
+  - `BITCOIND_EXE=<Bitcoin Core 32.1> cargo test --workspace --locked -- --ignored`
+  - `python3 scripts/mutation_check.py <スクラッチコピー>`
+- **テスト結果**: **成功**
+  | 対象 | 件数 |
+  |---|---|
+  | 通常テスト（bitcoind 不要） | 61 passed（うち Core アダプタ単体 3、偽 REST サーバ経由 6、CLI 10） |
+  | 実ノード E2E（Bitcoin Core 32.1 regtest） | 5 passed（`sync-core` 3、`lab-cli` 2） |
+  | 検査の無効化チェック | 41 件すべて検出（生存 0） |
+  - fmt: 差分なし。clippy: 警告なし。
+- **出力証拠**: `docs/logs/phase2_cargo_fmt.log`, `phase2_cargo_clippy.log`, `phase2_cargo_test.log`, `phase2_regtest_e2e.log`, `phase2_mutation_check.log`
+- **調べた上流資料・commit SHA**: Bitcoin Core 32.1 の REST 実挙動（RESEARCH §6.2）、`bitcoin-core/guix.sigs` `1326cef`（署名鍵）。
+- **安全性で気をつけたこと**:
+  - Core アダプタは REST のみを使い、RPC の認証情報を一切扱わない。URL はループバックの `http://` に限定し、それ以外はリクエストを送る前に拒否する。
+  - mainnet を名乗るノード、genesis が一致しないノードを拒否。ネットワークに接続しない mainnet パラメータのノードを使った E2E で確認。
+  - witness なしで返されたブロックを Core 経路でも拒否する（偽 REST サーバのテストで確認）。
+  - 送信・署名のコードはテスト専用クレートに隔離。CLI に送金機能は無い。
+  - bitcoind はハッシュと署名を検証して取得し、リポジトリには含めない。テスト用ノードは 127.0.0.1 のみにバインドし、P2P を開かず、一時ディレクトリを使い捨てる。
+- **未完成 / ブロッカー**: なし。signet の実ノードでは未検証（regtest のみ。O-005）。
+
+### Gate 2 判定: 通過
+
+| 条件 | 根拠 |
+|---|---|
+| regtest で「送信 → 採掘 → 受信検出」を再現できる | `regtest_send_mine_detect`。実際に署名した tx を 1 件は mempool 経由でブロードキャスト、残りは `generateblock` で採掘し、REST バックエンドでスキャン |
+| 期待 txid と vout を断言する自動テストがある | 同テストで 7 件の (高さ, txid, vout, 金額, ラベル) を送信側の知識と照合。CLI 経由でも同じ照合（`sync_against_a_regtest_node_reports_the_expected_outputs`） |
+| 同じ tx を二重登録しない | エンジンが範囲内の txid 重複を拒否（Phase 1 のレビュー対応）。永続化層での重複拒否は Phase 3 |
+
+### 設計書のテストケースとの対応（Phase 2 時点の追加）
+
+| ID | 状態 | 備考 |
+|---|---|---|
+| T02〜T05 | **済（実ノード）** | fixture と同じ状況を regtest 上の有効な tx で再現 |
+| T12 ノード停止 | **済** | `stopped_node_is_an_error_not_a_completed_scan`。停止後のスキャン・tip 取得・接続はすべてエラー |
+| T11 の一部 | **済** | 偽 REST サーバで不正応答（別ブロック、余剰バイト、prevout 不足、高さ索引の食い違い）を拒否 |
+
+### Phase 2 で分かったこと
+
+1. fixture アダプタと Core アダプタは、同じチェーンに対して**同一の検出結果・同一のバッチ**を返す（`honest_node_gives_the_same_result_as_the_fixture_adapter`）。設計書 §1.4-3 の「同じ検出結果」の最初の実証。
+2. `/rest/spenttxouts` のおかげで、prevout をノードから追加の往復なしに正確な金額で取れる。1 ブロックあたり 3 リクエスト（ハッシュ、ブロック、使用済み出力）。
+3. Bitcoin Core 30 未満ではこの経路は使えない（`spenttxouts` が無い）。
+
+## 次に取り組む最小タスク（Phase 1 完了時点の記録）
 
 1. Bitcoin Core のバージョンと入手方法を決める（DECISIONS O-003。人間の判断が必要）。
 2. regtest ノードを localhost バインドで起動 / 停止するスクリプト。認証は cookie、`.gitignore` 済み。

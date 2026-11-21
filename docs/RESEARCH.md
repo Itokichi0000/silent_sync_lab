@@ -120,11 +120,29 @@ U-1, U-2, U-5 は上流への報告候補（未報告。DECISIONS O-002）。
 
 ## 6. Bitcoin Core
 
+### 6.1 バージョンと入手（Phase 2 で実施）
+
 - `https://bitcoincore.org/bin/` の一覧で確認: 最新は **32.1**。30.x は 30.2〜30.5、31.x は 31.0〜31.3 が公開されている（30.0 / 30.1 のディレクトリは存在しない）。
-- 32.1 linux x86_64 tarball の SHA-256（`SHA256SUMS` より）: `61545c17c3120fb7412f896d248b11993af04ec8817aad3649c55b2afb044963`。**署名（`SHA256SUMS.asc`）の検証は未実施**。
-- 上流 `bdk_testenv 0.11.1` が使うのは Bitcoin Core **25.0**。Oracle v2 は **30+** を要求するので、Phase 2（Core 直接）と Phase 4（Oracle）を同一ノードで比較するには 30+ が必要。
-- この実行環境には `bitcoind` が入っていない（`docker` と `go` はある）。
-- `UNVERIFIED`: Core 30+ の `rest/spenttxouts` や `getblock` verbosity 3 による prevout 取得の実挙動（Phase 2 で確認する）。
+- **32.1 を採用**（DECISIONS D-019）。linux x86_64 tarball の SHA-256: `61545c17c3120fb7412f896d248b11993af04ec8817aad3649c55b2afb044963`（`SHA256SUMS` と一致を確認）。
+- 署名: `SHA256SUMS.asc` を `bitcoin-core/guix.sigs`（commit `1326cef321a1218d49a9401364523a463908ecf0`）の `builder-keys` で検証し、**有効な署名 8 件、不正 0 件**。鍵は GitHub から TLS 経由で取得したもので、鍵自体の真正性は別経路で確認していない（trust on first use）。
+- 実行確認: `Bitcoin Core daemon version v32.1.0`。
+- 上流 `bdk_testenv 0.11.1` が使うのは Bitcoin Core **25.0**。Oracle v2 は **30+** を要求する。
+
+### 6.2 REST インタフェースの実挙動（32.1 の regtest ノードで確認）
+
+`-rest=1` で有効。RPC と同じポートで待ち受け、**認証なし・読み取り専用**。
+
+| エンドポイント | 確認した応答 |
+|---|---|
+| `GET /rest/chaininfo.json` | `{"chain":"regtest","blocks":102,"bestblockhash":"…","pruned":false,"initialblockdownload":false,…}`。mainnet は `"chain":"main"` |
+| `GET /rest/blockhashbyheight/<h>.hex` | ブロックハッシュ（16 進 + 改行）。範囲外は HTTP 404 `Block height out of range` |
+| `GET /rest/block/<hash>.bin` | コンセンサス直列化したブロック（**witness 付き**） |
+| `GET /rest/spenttxouts/<hash>.bin` | ブロック内の各 tx が使う出力。形式は `compact-size(tx 数)` に続いて tx ごとに `Vec<TxOut>`（coinbase は空）。1 入力 P2TR の例で 46 バイト = 1 + 1 + 1 + (8 + 1 + 34) |
+| `GET /rest/headers/<hash>.bin?count=1` | 80 バイトのヘッダ |
+
+- prevout は JSON（`getblock` verbosity 3 は金額が浮動小数表記）ではなく、このバイナリ形式から取る。金額を丸め誤差なく得られる。
+- `generateblock <address> ["<rawtx>", …]` は mempool のポリシーを通さずにブロックへ入れる（コンセンサス検証は行う）。SegWit v2 を使う tx や 1 sat 出力の tx を実チェーンに載せるのに使用。
+- regtest の高さ 1〜16 の coinbase は高さを `OP_1`〜`OP_16` で符号化する（DECISIONS D-016 のとおり）。
 
 ## 7. 未確認の参考資料
 

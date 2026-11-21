@@ -1,8 +1,8 @@
 //! Deterministic generator for `fixtures/local/regtest_basic_v1.json`.
 //!
 //! TEST-DATA GENERATION ONLY. This is the one place in the repository that
-//! uses upstream's *sending* functions; it is compiled into tests and one
-//! example, never into `sync-core` or the CLI.
+//! uses upstream's *sending* functions; it lives in the test-only crate
+//! `lab-testkit`, never in `sync-core` or the CLI.
 //!
 //! Key material:
 //! * receiver keys are the public BIP352 test-vector keys, read from the
@@ -14,7 +14,6 @@
 //! consensus-valid. Blocks have valid regtest proof of work, merkle roots and
 //! witness commitments so that the fixture adapter's structural checks are
 //! exercised for real.
-#![allow(clippy::unwrap_used, clippy::expect_used, dead_code)]
 
 use bdk_sp::{
     encoding::SilentPaymentCode,
@@ -45,7 +44,7 @@ use sync_core::{
 };
 
 pub const VECTORS_JSON: &str =
-    include_str!("../../../../fixtures/bip352/send_and_receive_test_vectors.json");
+    include_str!("../../../fixtures/bip352/send_and_receive_test_vectors.json");
 
 /// Label integers the lab receiver hands out in this fixture.
 pub const LABEL_USED: u32 = 1;
@@ -526,7 +525,7 @@ pub fn generate() -> FixtureFile {
                       Receiver = BIP352 test vector #0 keys. Transactions carry placeholder \
                       signatures and are NOT consensus-valid. `expected_detections` is \
                       sender-side knowledge of outputs created for the receiver. Regenerate \
-                      with `cargo run -p sync-core --example gen_fixture`."
+                      with `cargo run -p lab-testkit --bin gen_fixture`."
             .to_string(),
         network,
         genesis_hash: network.genesis_hash(),

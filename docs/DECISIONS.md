@@ -92,14 +92,41 @@ Phase 1 の実装後、文脈を共有しない別エージェントに敵対的
 - 再発防止として `scripts/mutation_check.py` を追加。検証コードの各検査を 1 つずつ無効化し、いずれかのテストが落ちることを確認する（現在 27 件、生存 0。`docs/logs/phase1_mutation_check.log`）。
 - 検査を追加・変更したら、このスクリプトの項目も同時に更新する。
 
+### D-019 Bitcoin Core は 32.1 を使う
+所有者の回答が無かったため、「Oracle v2 と同一ノードで比較できること（30 以上）」と「現行の最新安定版」を満たす 32.1 を選んだ。`scripts/fetch_bitcoind.sh` がバージョンと SHA-256 を固定し、`VERIFY_SIGNATURES=1` で `SHA256SUMS` の署名も検証する（既定の必要数 3、実測 8 件有効）。バイナリはリポジトリに含めない。
+- 見直し: 別バージョンで検証したい場合はスクリプトの `VERSION` / `TARBALL_SHA256` を更新し、E2E を再実行する。
+
+### D-020 Core バックエンドは REST のみを使い、認証情報を扱わない
+`sync-core` の `CoreRestSource` は `-rest=1` の REST（`chaininfo` / `blockhashbyheight` / `block` / `spenttxouts` / `headers`）だけを読む。
+- 理由: (1) RPC cookie やパスワードをアダプタが一切持たない（設計書 §5.7, §5.8）。(2) ブロックも prevout もバイナリで取れ、金額の浮動小数表記を避けられる。(3) BlindBit Oracle v2 と同じ取得経路なので、Phase 4 の比較条件を揃えやすい。
+- 代償: REST は認証なしなので、同じホストの他プロセスも読める。対象は公開チェーンデータのみ。Bitcoin Core 30 以上が必要（`spenttxouts`）。
+- **ループバック限定**: URL は `http://` かつ `127.0.0.1` / `::1` / `localhost` のみ。それ以外はリクエストを 1 つも送らずに拒否する。リモートノードは範囲外。
+- **mainnet 拒否**: `chaininfo` の `chain` が `main` なら専用エラー。さらに高さ 0 のハッシュをネットワークの genesis と照合する（「regtest」と名乗る別チェーンを拒否）。`tip()` のたびにチェーン名を再確認する。
+- ノードが検証済みのデータでも、アダプタは再検査する: 要求したハッシュとの一致、マークルルート、witness commitment（厳密）、PoW、BIP34 高さ、取得範囲内の連結、prevout の件数、余剰バイト。witness なしで返されたブロックはここで落ちる。
+- scan 鍵はリクエストに含まれない。送るのは高さとブロックハッシュだけ。
+- `core-rest` は cargo feature（既定で無効）。有効にすると HTTP クライアント `minreq`（TLS・プロキシ機能なし）が入る。
+
+### D-021 テスト専用クレート `lab-testkit`
+fixture 生成器、regtest ノードの起動 / 停止、テスト用 tx の署名と SP 出力の導出、偽 REST サーバをここに集めた。**上流の送信関数と署名処理を使うのはこのクレートだけ**で、`sync-core` と `lab-cli` の通常の依存には入らない（両者の `dev-dependencies` のみ）。
+- 以前は `#[path]` で各テストに取り込んでいたが、Phase 2 以降は複数クレートのテストから使うため独立させた。
+- ワークスペースの `unwrap_used` 拒否はこのクレートには適用しない（テスト補助は失敗時に panic するのが正しい）。
+
+### D-022 実ノードを使う E2E は `#[ignore]` とし、専用 CI ジョブで実行する
+`BITCOIND_EXE` が必要なテスト（`regtest_e2e.rs`, `regtest_cli.rs`）は通常の `cargo test` では `ignored` と表示される。`-- --ignored` で実行し、`BITCOIND_EXE` が無ければ**失敗する**（黙って通過しない）。CI では `regtest-e2e` ジョブがバイナリを取得・検証して実行する（設計書 §11）。
+- E2E の tx は実際に署名し、1 件は mempool 経由でブロードキャスト、残りは `generateblock` でブロックに入れる（SegWit v2 を使う tx など、ポリシー上リレーされないものを載せるため。コンセンサス検証は通っている）。
+- mainnet 拒否の E2E は、**ネットワークに一切接続しない** mainnet パラメータのノード（`-connect=0 -dnsseed=0 -listen=0`、genesis のみ）で行う。
+
+### D-023 偽 REST サーバで「嘘をつくノード」を通常テストに含める
+`lab-testkit::fake_core_rest` が fixture チェーンを Bitcoin Core の REST と同じ形で配信する。応答を差し替えられるので、bitcoind なしで Core アダプタの拒否動作（witness を剥がしたブロック、別のブロック、余剰バイト、prevout の不足、mainnet を名乗るノードなど）を検査できる。fixture アダプタと Core アダプタが同じチェーンで**同一の結果**になることもここで確認している。
+
 ## 未決事項
 
 | ID | 事項 | 判断時期 |
 |---|---|---|
 | O-001 | **このリポジトリのライセンス**。現状 `LICENSE` ファイルも `Cargo.toml` の `license` も置いていない。依存はいずれも MIT / Apache-2.0 / CC0 / BSD 系で、MIT でも Apache-2.0 でも支障はない | 所有者の判断待ち |
 | O-002 | 上流 bdk-sp への報告（RESEARCH U-1 K_max、U-2 SegWit v>1、U-5 panic）。issue / PR を出すかどうか | 所有者の判断待ち。未報告 |
-| O-003 | Phase 2 で使う Bitcoin Core のバージョン（Oracle v2 と同一ノードで比べるなら 30+）と、その入手方法・署名検証 | Phase 2 開始時 |
-| O-004 | prevout の取得方法（`getblock` verbosity 3 / REST `spenttxouts` / undo データ）と、その検証可能性 | Phase 2 |
+| O-003 | ~~Bitcoin Core のバージョンと入手方法~~ → **解決**（D-019。所有者が別バージョンを望む場合は差し替え可能） | — |
+| O-004 | ~~prevout の取得方法~~ → **解決**（D-020。REST `spenttxouts`。ノード自身がコンセンサス検証したデータで、アダプタは件数と形式のみ検査） | — |
 | O-005 | signet 対応の範囲。HRP は `tsp`。カスタム signet の扱い（D-009 の限界） | Phase 2 以降 |
 | O-006 | ラベルの発行・バックアップの扱い。fixture で「未知ラベルが同一 tx の後続出力を隠す」ことを確認済み。復元 UX にどう出すか | Phase 3 |
 | O-007 | D-004 のバージョン固定をいつまで続けるか（`bitcoin 0.32.10` への引き上げ等） | Phase 2 でブロックをデコードする前 |

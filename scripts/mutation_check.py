@@ -32,38 +32,58 @@ env = dict(
     CARGO_TARGET_DIR=os.path.join(os.path.dirname(root), "mut-target"),
     RUST_BACKTRACE="0",
 )
-F = "crates/sync-core/src/source/fixture.rs"
+B = "crates/sync-core/src/source/block_check.rs"
+C = "crates/sync-core/src/source/bitcoin_core.rs"
 E = "crates/sync-core/src/engine.rs"
 P = "crates/sync-core/src/protocol.rs"
 N = "crates/sync-core/src/network.rs"
 muts = [
- ("pow check removed", F, "    block.header.validate_pow(target).map_err(|e| e.to_string())", "    Ok(block.block_hash())"),
- ("pow: canonical bits check removed", F, "if target.to_compact_lossy() != bits {", "if false {"),
- ("pow: network limit check removed", F, "if target > limit {", "if false {"),
- ("bip34 mismatch accepted", F, "Some(h) if h == height => {}", "Some(_) => {}\n        #[allow(unreachable_patterns)]\n        Some(h) if h == height => {}"),
- ("bip34 missing accepted", F, 'None => {\n            return Err(invalid(format!(\n                "block {height}: coinbase does not commit to a height"\n            )))\n        }', "None => {}"),
- ("fixture coinbase-first (early) removed", F, "if !block.txdata.first().is_some_and(|tx| tx.is_coinbase()) {", "if false {"),
- ("fixture coinbase position (loop) removed", F, "if tx.is_coinbase() != is_first {", "if false {"),
- ("fixture duplicate txid removed", F, "if !seen_txids.insert(txid) {", "if !seen_txids.insert(txid) && false {"),
- ("fixture genesis link removed", F, "if block.header.prev_blockhash != parent_hash {", "if block.header.prev_blockhash != parent_hash && height != 1 {"),
- ("witness commitment: mismatch accepted", F, "if expected.as_byte_array() != committed {", "if false {"),
- ("witness commitment: reserved value not required", F, "Some(items) if items.len() == 1 && items[0].len() == 32 => items[0].clone(),", "Some(items) if items.len() == 1 && items[0].len() == 32 => items[0].clone(),\n        Some(items) if items.is_empty() => return Ok(()),"),
- ("witness without commitment accepted", F, "return if has_witness {", "return if has_witness && false {"),
- ("merkle root check removed", F, "if !block.check_merkle_root() {", "if false {"),
- ("missing-witness check removed", P, ".position(|(txin, prevout)| witness_is_missing(txin, &prevout.script_pubkey))", ".position(|(txin, prevout)| false && witness_is_missing(txin, &prevout.script_pubkey))"),
- ("missing-witness: p2sh-wrapped dropped", P, "return redeem.is_p2wpkh() || redeem.is_p2wsh();", "return false;"),
- ("missing-witness: any p2sh flagged", P, "if let (Some(Ok(Instruction::PushBytes(push))), None) =\n            (instructions.next(), instructions.next())", "if let (Some(Ok(Instruction::PushBytes(push))), _) =\n            (instructions.next(), instructions.next())"),
- ("segwit>1 rule removed", P, "if spends_unknown_segwit {", "if false && spends_unknown_segwit {"),
- ("prevout count check removed", P, "if prevouts.len() != tx.input.len() {", "if false {"),
- ("engine: empty block accepted", E, "if txs.is_empty() {", "if false {"),
- ("engine: coinbase position unchecked", E, "if entry.tx.is_coinbase() != (position == 0) {", "if false {"),
- ("engine: duplicate txid unchecked", E, "if !seen_txids.insert(txid) {", "if !seen_txids.insert(txid) && false {"),
- ("engine: self-parent unchecked", E, "if block.hash == block.prev_hash {", "if false {"),
- ("engine: hash link unchecked", E, "if block.prev_hash != prev.hash {", "if false {"),
- ("engine: chain mismatch unchecked", E, "if chain != expected_chain {", "if false {"),
- ("signet mapped to testnet", N, "LabNetwork::Signet => Network::Signet,", "LabNetwork::Signet => Network::Testnet,"),
- ("chain identity deserialize unverified", N, "Self::verified(raw.network, raw.genesis_hash)", "Ok(Self { network: raw.network, genesis_hash: raw.genesis_hash })"),
- ("mainnet name accepted as regtest", N, '"regtest" => Ok(LabNetwork::Regtest),', '"regtest" | "mainnet" => Ok(LabNetwork::Regtest),'),
+    # --- block structure checks shared by the fixture and Core backends ---
+    ("pow check removed", B, "    block.header.validate_pow(target).map_err(|e| e.to_string())", "    Ok(block.block_hash())"),
+    ("pow: canonical bits check removed", B, "if target.to_compact_lossy() != bits {", "if false {"),
+    ("pow: network limit check removed", B, "if target > limit {", "if false {"),
+    ("bip34 mismatch accepted", B, "Some(h) if h == height => {}", "Some(_) => {}\n        #[allow(unreachable_patterns)]\n        Some(h) if h == height => {}"),
+    ("bip34 missing accepted", B, 'None => return Err("coinbase does not commit to a height".to_string()),', "None => {}"),
+    ("coinbase-first (early) removed", B, "if !block.txdata.first().is_some_and(|tx| tx.is_coinbase()) {", "if false {"),
+    ("coinbase position (loop) removed", B, "if tx.is_coinbase() != is_first {", "if false {"),
+    ("duplicate txid in block removed", B, "if !seen_txids.insert(txid) {", "if !seen_txids.insert(txid) && false {"),
+    ("link of block 1 to genesis removed", B, "if block.header.prev_blockhash != parent {", "if block.header.prev_blockhash != parent && height != 1 {"),
+    ("parent link removed", B, "if block.header.prev_blockhash != parent {", "if false {"),
+    ("requested-hash check removed", B, "if hash != expected {", "if false {"),
+    ("witness commitment: mismatch accepted", B, "if expected.as_byte_array() != committed {", "if false {"),
+    ("witness commitment: reserved value not required", B, "Some(items) if items.len() == 1 && items[0].len() == 32 => items[0].clone(),", "Some(items) if items.len() == 1 && items[0].len() == 32 => items[0].clone(),\n        Some(items) if items.is_empty() => return Ok(()),"),
+    ("witness without commitment accepted", B, "return if has_witness {", "return if has_witness && false {"),
+    ("merkle root check removed", B, "if !block.check_merkle_root() {", "if false {"),
+    ("prevout list count unchecked", B, "if prevouts.len() != block.txdata.len() {", "if false {"),
+    ("prevout count per tx unchecked", B, "if tx_prevouts.len() != expected_prevouts {", "if false {"),
+    # --- Bitcoin Core REST backend ---
+    ("core: mainnet chain name accepted", C, '"main" => Err(NetworkError::MainnetRefused.into()),', '"main" => Ok(LabNetwork::Regtest),'),
+    ("core: genesis hash not verified", C, "source.chain = ChainIdentity::verified(network, genesis)?;", "source.chain = ChainIdentity::for_network(network);\n        let _ = genesis;"),
+    ("core: non-loopback host accepted", C, "if !is_loopback {", "if false {"),
+    ("core: trailing bytes after block accepted", C, "if !cursor.is_empty() {\n                return Err(at(", "if false {\n                return Err(at("),
+    ("core: trailing bytes after spent outputs accepted", C, "if !cursor.is_empty() {\n        return Err(format!(", "if false {\n        return Err(format!("),
+    ("core: range beyond tip not refused", C, "if from < 1 || to > tip {", "if false {"),
+    ("core: chain switch at tip() unnoticed", C, "if network_from_core_chain(&info.chain)? != self.chain.network() {", "if false {"),
+    ("core: tip header not checked", C, "if !cursor.is_empty() || header.block_hash() != hash {", "if false {"),
+    ("core: blocks not linked within a fetch", C, "                    parent,\n", "                    parent: None,\n"),
+    ("core: block not checked against requested hash", C, "hash: Some(hash),", "hash: None,"),
+    # --- scanner wrapper ---
+    ("missing-witness check removed", P, ".position(|(txin, prevout)| witness_is_missing(txin, &prevout.script_pubkey))", ".position(|(txin, prevout)| false && witness_is_missing(txin, &prevout.script_pubkey))"),
+    ("missing-witness: p2sh-wrapped dropped", P, "return redeem.is_p2wpkh() || redeem.is_p2wsh();", "return false;"),
+    ("missing-witness: any p2sh flagged", P, "if let (Some(Ok(Instruction::PushBytes(push))), None) =\n            (instructions.next(), instructions.next())", "if let (Some(Ok(Instruction::PushBytes(push))), _) =\n            (instructions.next(), instructions.next())"),
+    ("segwit>1 rule removed", P, "if spends_unknown_segwit {", "if false && spends_unknown_segwit {"),
+    ("prevout count check removed", P, "if prevouts.len() != tx.input.len() {", "if false {"),
+    # --- engine ---
+    ("engine: empty block accepted", E, "if txs.is_empty() {", "if false {"),
+    ("engine: coinbase position unchecked", E, "if entry.tx.is_coinbase() != (position == 0) {", "if false {"),
+    ("engine: duplicate txid unchecked", E, "if !seen_txids.insert(txid) {", "if !seen_txids.insert(txid) && false {"),
+    ("engine: self-parent unchecked", E, "if block.hash == block.prev_hash {", "if false {"),
+    ("engine: hash link unchecked", E, "if block.prev_hash != prev.hash {", "if false {"),
+    ("engine: chain mismatch unchecked", E, "if chain != expected_chain {", "if false {"),
+    # --- network identity ---
+    ("signet mapped to testnet", N, "LabNetwork::Signet => Network::Signet,", "LabNetwork::Signet => Network::Testnet,"),
+    ("chain identity deserialize unverified", N, "Self::verified(raw.network, raw.genesis_hash)", "Ok(Self { network: raw.network, genesis_hash: raw.genesis_hash })"),
+    ("mainnet name accepted as regtest", N, '"regtest" => Ok(LabNetwork::Regtest),', '"regtest" | "mainnet" => Ok(LabNetwork::Regtest),'),
 ]
 survived = []
 for name, path, old, new in muts:

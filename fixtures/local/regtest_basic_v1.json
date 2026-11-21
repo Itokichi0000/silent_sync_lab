@@ -1,6 +1,6 @@
 {
   "format": "silent-sync-lab/fixture-chain/v1",
-  "description": "Deterministic regtest-shaped chain for Silent Sync Lab Phase 1. Receiver = BIP352 test vector #0 keys. Transactions carry placeholder signatures and are NOT consensus-valid. `expected_detections` is sender-side knowledge of outputs created for the receiver. Regenerate with `cargo run -p sync-core --example gen_fixture`.",
+  "description": "Deterministic regtest-shaped chain for Silent Sync Lab Phase 1. Receiver = BIP352 test vector #0 keys. Transactions carry placeholder signatures and are NOT consensus-valid. `expected_detections` is sender-side knowledge of outputs created for the receiver. Regenerate with `cargo run -p lab-testkit --bin gen_fixture`.",
   "network": "regtest",
   "genesis_hash": "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206",
   "blocks": [
