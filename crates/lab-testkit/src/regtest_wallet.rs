@@ -315,6 +315,9 @@ pub struct Scenario {
     /// Txid of the transaction that spends a SegWit v2 output and carries an
     /// output a non-compliant receiver would attribute to the lab receiver.
     pub segwit_v2_txid: sync_core::bitcoin::Txid,
+    /// The change-label-only payment (second-to-last block) and the 1 sat
+    /// payment (last block), kept so reorg tests can confirm them again.
+    pub last_two_payments: [Transaction; 2],
 }
 
 fn change_script(i: u32) -> ScriptBuf {
@@ -481,6 +484,7 @@ pub fn standard_scenario(faucet: &mut Faucet<'_>) -> Scenario {
         &tx,
         &[(1, 0, Some(0), "change label (m = 0) alone")],
     );
+    let change_only = tx;
 
     // Block 6: 1 sat.
     let ins = &coins[10..11];
@@ -494,6 +498,7 @@ pub fn standard_scenario(faucet: &mut Faucet<'_>) -> Scenario {
         tip_height: height,
         expected,
         segwit_v2_txid: tx_v2.compute_txid(),
+        last_two_payments: [change_only, tx],
     }
 }
 

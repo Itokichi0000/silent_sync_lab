@@ -37,6 +37,10 @@ C = "crates/sync-core/src/source/bitcoin_core.rs"
 E = "crates/sync-core/src/engine.rs"
 P = "crates/sync-core/src/protocol.rs"
 N = "crates/sync-core/src/network.rs"
+S = "crates/sync-core/src/sync.rs"
+T = "crates/sync-core/src/store.rs"
+Q = "crates/lab-storage/src/lib.rs"
+M = "crates/lab-cli/src/main.rs"
 muts = [
     # --- block structure checks shared by the fixture and Core backends ---
     ("pow check removed", B, "    block.header.validate_pow(target).map_err(|e| e.to_string())", "    Ok(block.block_hash())"),
@@ -84,6 +88,36 @@ muts = [
     ("signet mapped to testnet", N, "LabNetwork::Signet => Network::Signet,", "LabNetwork::Signet => Network::Testnet,"),
     ("chain identity deserialize unverified", N, "Self::verified(raw.network, raw.genesis_hash)", "Ok(Self { network: raw.network, genesis_hash: raw.genesis_hash })"),
     ("mainnet name accepted as regtest", N, '"regtest" => Ok(LabNetwork::Regtest),', '"regtest" | "mainnet" => Ok(LabNetwork::Regtest),'),
+    # --- persistent sync ---
+    ("sync: zero chunk size accepted", S, "if options.chunk_size == 0 {", "if false {"),
+    ("sync: binding chain unchecked", S, "if meta.chain != source.chain() {", "if false {"),
+    ("sync: binding wallet unchecked", S, "if meta.wallet_id != wallet_id {", "if false {"),
+    ("sync: binding backend unchecked", S, "if meta.backend_id != source.backend_id() {", "if false {"),
+    ("sync: binding labels unchecked", S, "if meta.labels != labels {", "if false {"),
+    ("sync: binding scanner version unchecked", S, "if meta.scanner_version != SCANNER_VERSION {", "if false {"),
+    ("sync: reorg never detected", S, "if checkpoint.height <= source_tip.height && on_chain(checkpoint.height, checkpoint)? {", "if true {"),
+    ("sync: lagging source treated as reorg", S, "if stored_at_tip.is_some_and(|b| b.hash == source_tip.hash)\n            || (source_tip.height < meta.birthday)", "if false"),
+    ("sync: source below birthday treated as reorg", S, "|| (source_tip.height < meta.birthday)", "|| false"),
+    ("sync: target above tip accepted", S, "Some(target) if target > source_tip.height => {", "Some(target) if false && target > source_tip.height => {"),
+    ("sync: chunk not linked to checkpoint", S, "if first.block.prev_hash != cp.hash {", "if false {"),
+    ("sync: batch not re-checked", S, "check_batch(&backend_id, &batch.blocks, next, last)?;", "let _ = check_batch;"),
+    # --- store invariants ---
+    ("store: append need not extend checkpoint", T, "if u64::from(first.height) != u64::from(cp.height) + 1 || first.prev_hash != cp.hash {", "if false {"),
+    ("store: first block need not be birthday", T, "if first.height != meta.birthday {", "if false {"),
+    ("store: blocks in a call need not link", T, "if u64::from(b.height) != u64::from(a.height) + 1 || b.prev_hash != a.hash {", "if false {"),
+    ("store: detection network unchecked", T, "if d.network != meta.chain.network() {", "if false {"),
+    ("store: detection block membership unchecked", T, "if !blocks.contains(&d.block) {", "if false {"),
+    ("store: duplicate outputs accepted", T, "if !seen.insert(outpoint) || already_stored(outpoint) {", "if (!seen.insert(outpoint) || already_stored(outpoint)) && false {"),
+    ("store: empty append accepted", T, '.ok_or_else(|| invariant("append of zero blocks".to_string()))?;', '.copied().unwrap_or(BlockRef { height: meta.birthday, hash: meta.chain.genesis_hash(), prev_hash: meta.chain.genesis_hash() });\n    if blocks.is_empty() { return Ok(()); }'),
+    # --- SQLite store ---
+    ("sqlite: existing file overwritten", Q, "if path.exists() {", "if false {"),
+    ("sqlite: schema version unchecked", Q, "Some(v) if v == SCHEMA_VERSION.to_string() => Ok(()),", "_ if true => Ok(()),"),
+    ("sqlite: double initialize accepted", Q, "if read_meta(&tx)?.is_some() {", "if false {"),
+    ("sqlite: zero birthday accepted", Q, "if meta.birthday == 0 {", "if false {"),
+    ("sqlite: file permissions not restricted", Q, "std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(backend)", "let _ = (path, std::fs::Permissions::from_mode(0o600));\n    Ok(())"),
+    # --- CLI ---
+    ("cli: store network unchecked", M, "if meta.chain.network() != network {", "if false {"),
+    ("cli: empty birthday basis accepted", M, "if birthday_basis.trim().is_empty() {", "if false {"),
 ]
 survived = []
 for name, path, old, new in muts:

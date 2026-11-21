@@ -12,7 +12,9 @@ path = "src/main.rs"
 
 [dependencies]
 sync-core = { path = "../sync-core", features = ["core-rest"] }
+lab-storage = { path = "../lab-storage" }
 clap = { version = "4.5", features = ["derive"] }
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]

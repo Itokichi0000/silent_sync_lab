@@ -5,6 +5,8 @@
 //! * [`fixture_gen`] — deterministic offline fixture chain.
 //! * [`fake_core_rest`] — an in-process stand-in for Bitcoin Core's REST
 //!   interface that can be made to lie.
+//! * [`test_source`] / [`sync_suite`] — a scriptable source and the behavioural
+//!   suite every `SyncStore` implementation must pass.
 //! * [`regtest_node`] — start/stop a throwaway Bitcoin Core regtest node.
 //! * [`regtest_wallet`] — fund test keys and build signed silent payment
 //!   transactions on that node.
@@ -13,3 +15,5 @@ pub mod fake_core_rest;
 pub mod fixture_gen;
 pub mod regtest_node;
 pub mod regtest_wallet;
+pub mod sync_suite;
+pub mod test_source;

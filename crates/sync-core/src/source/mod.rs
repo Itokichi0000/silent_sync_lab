@@ -125,6 +125,18 @@ pub trait ScanSource {
     fn tip(&self) -> Result<BlockRef, SourceError>;
     /// Scan data for every block in `from..=to`, ascending.
     fn fetch_range(&self, from: u32, to: u32) -> Result<ScanBatch, SourceError>;
+    /// Position of the block at `height` on the source's current chain,
+    /// without scan data. Used to locate fork points; backends should
+    /// override the default, which fetches the whole block.
+    fn block_ref(&self, height: u32) -> Result<BlockRef, SourceError> {
+        self.fetch_range(height, height)?
+            .blocks
+            .first()
+            .map(|b| b.block)
+            .ok_or_else(|| {
+                SourceError::InvalidData(format!("no block returned for height {height}"))
+            })
+    }
     /// Transfer counters; sources without I/O keep the default.
     fn stats(&self) -> SourceStats {
         SourceStats::default()

@@ -1,0 +1,73 @@
+$ python3 scripts/mutation_check.py <scratch copy>
+killed       pow check removed  <- fixture_adapter_checks_proof_of_work
+killed       pow: canonical bits check removed  <- fixture_adapter_checks_proof_of_work
+killed       pow: network limit check removed  <- fixture_adapter_checks_proof_of_work, |, |
+killed       bip34 mismatch accepted  <- fixture_adapter_checks_the_coinbase_height
+killed       bip34 missing accepted  <- fixture_adapter_checks_the_coinbase_height
+killed       coinbase-first (early) removed  <- fixture_adapter_checks_coinbase_position_and_duplicates
+killed       coinbase position (loop) removed  <- fixture_adapter_checks_coinbase_position_and_duplicates
+killed       duplicate txid in block removed  <- fixture_adapter_checks_coinbase_position_and_duplicates
+killed       link of block 1 to genesis removed  <- fixture_adapter_requires_block_one_to_build_on_the_network_genesis
+killed       parent link removed  <- inconsistent_responses_are_refused
+killed       requested-hash check removed  <- inconsistent_responses_are_refused
+killed       witness commitment: mismatch accepted  <- witness_stripped_blocks_from_the_node_are_refused, |, |, |
+killed       witness commitment: reserved value not required  <- witness_stripped_blocks_from_the_node_are_refused
+killed       witness without commitment accepted  <- fixture_adapter_rejects_witness_stripped_blocks
+killed       merkle root check removed  <- inconsistent_responses_are_refused
+killed       prevout list count unchecked  <- inconsistent_responses_are_refused
+killed       prevout count per tx unchecked  <- inconsistent_responses_are_refused
+killed       core: mainnet chain name accepted  <- source::bitcoin_core::tests::mainnet_and_unknown_chains_are_refused
+killed       core: genesis hash not verified  <- mainnet_and_foreign_chains_are_refused
+killed       core: non-loopback host accepted  <- core_backend_without_a_node_fails_closed, |, |
+killed       core: trailing bytes after block accepted  <- inconsistent_responses_are_refused
+killed       core: trailing bytes after spent outputs accepted  <- source::bitcoin_core::tests::spent_outputs_decoding_is_strict
+killed       core: range beyond tip not refused  <- ranges_outside_the_node_s_chain_are_refused
+killed       core: chain switch at tip() unnoticed  <- mainnet_and_foreign_chains_are_refused
+killed       core: tip header not checked  <- ranges_outside_the_node_s_chain_are_refused
+killed       core: blocks not linked within a fetch  <- inconsistent_responses_are_refused, |, |, |, |
+killed       core: block not checked against requested hash  <- inconsistent_responses_are_refused
+killed       missing-witness check removed  <- engine_fails_the_range_when_a_source_serves_stripped_transactions, scanner_refuses_segwit_spends_without_witness
+killed       missing-witness: p2sh-wrapped dropped  <- scanner_refuses_segwit_spends_without_witness, |, |
+killed       missing-witness: any p2sh flagged  <- scanner_refuses_segwit_spends_without_witness
+killed       segwit>1 rule removed  <- scan_on_fixture_reports_the_expected_outputs_as_json
+killed       prevout count check removed  <- engine_propagates_transaction_errors_and_refuses_other_chains, missing_prevouts_are_an_error_not_a_silent_miss
+killed       engine: empty block accepted  <- engine_rejects_structurally_impossible_blocks
+killed       engine: coinbase position unchecked  <- engine_rejects_structurally_impossible_blocks
+killed       engine: duplicate txid unchecked  <- engine_rejects_structurally_impossible_blocks
+killed       engine: self-parent unchecked  <- engine_rejects_structurally_impossible_blocks
+killed       engine: hash link unchecked  <- engine_rejects_short_reordered_duplicated_or_unlinked_batches
+killed       engine: chain mismatch unchecked  <- engine_propagates_transaction_errors_and_refuses_other_chains
+killed       signet mapped to testnet  <- network::tests::networks_map_to_their_well_known_genesis_blocks
+killed       chain identity deserialize unverified  <- network::tests::chain_identity_cannot_be_deserialized_with_a_foreign_genesis
+killed       mainnet name accepted as regtest  <- mainnet_is_refused_by_every_command
+killed       sync: zero chunk size accepted  <- the_store_is_protected_from_misuse
+killed       sync: binding chain unchecked  <- a_store_only_syncs_what_it_is_bound_to
+killed       sync: binding wallet unchecked  <- a_store_only_syncs_what_it_is_bound_to
+killed       sync: binding backend unchecked  <- a_store_only_syncs_what_it_is_bound_to
+killed       sync: binding labels unchecked  <- a_store_only_syncs_what_it_is_bound_to
+killed       sync: binding scanner version unchecked  <- a_store_only_syncs_what_it_is_bound_to
+killed       sync: reorg never detected  <- reorg_is_reported_and_resolved
+killed       sync: lagging source treated as reorg  <- a_source_behind_the_checkpoint_is_refused, |, |
+killed       sync: source below birthday treated as reorg  <- a_source_behind_the_checkpoint_is_refused
+killed       sync: target above tip accepted  <- the_store_is_protected_from_misuse
+killed       sync: chunk not linked to checkpoint  <- blocks_that_do_not_extend_the_checkpoint_are_refused, |, |, |
+killed       sync: batch not re-checked  <- short_batches_are_refused_by_sync
+killed       store: append need not extend checkpoint  <- stores_reject_inconsistent_appends
+killed       store: first block need not be birthday  <- stores_reject_inconsistent_appends
+killed       store: blocks in a call need not link  <- stores_reject_inconsistent_appends
+killed       store: detection network unchecked  <- stores_reject_inconsistent_appends
+killed       store: detection block membership unchecked  <- stores_reject_inconsistent_appends
+killed       store: empty append accepted  <- stores_reject_inconsistent_appends
+killed       sqlite: existing file overwritten  <- the_store_is_protected_from_misuse
+killed       sqlite: schema version unchecked  <- files_are_never_overwritten_and_foreign_files_are_refused
+killed       sqlite: double initialize accepted  <- a_store_only_syncs_what_it_is_bound_to
+killed       sqlite: zero birthday accepted  <- the_store_is_protected_from_misuse
+killed       sqlite: file permissions not restricted  <- database_file_is_owner_only
+killed       cli: store network unchecked  <- the_store_is_protected_from_misuse
+killed       cli: empty birthday basis accepted  <- the_store_is_protected_from_misuse
+
+# The entry 'store: duplicate outputs accepted' did not compile as first written
+# (the mutation itself was ill-formed). Re-run after fixing the entry:
+killed       store: duplicate outputs accepted  <- stores_reject_inconsistent_appends
+
+SURVIVORS: none (67 mutations)

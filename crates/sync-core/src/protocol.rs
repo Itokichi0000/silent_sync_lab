@@ -16,6 +16,7 @@
 
 use crate::{
     bitcoin::{
+        hashes::{sha256, Hash, HashEngine},
         key::Secp256k1,
         script::Instruction,
         secp256k1::{self, PublicKey, Scalar, SecretKey},
@@ -61,6 +62,19 @@ impl ReceiverKeys {
 
     pub fn spend_public_key(&self) -> PublicKey {
         self.spend_pk
+    }
+
+    /// A stable public identifier for this receiver, derived from its two
+    /// public keys. It is not secret, but it is the same on every network and
+    /// in every store, so it links them; do not publish it next to a
+    /// transaction history.
+    pub fn wallet_id(&self) -> String {
+        let mut engine = sha256::Hash::engine();
+        engine.input(b"silent-sync-lab/wallet-id/v1");
+        engine.input(&self.scan_public_key().serialize());
+        engine.input(&self.spend_pk.serialize());
+        let digest = sha256::Hash::from_engine(engine);
+        digest.to_string()[..32].to_string()
     }
 
     /// The unlabelled silent payment address for `network`.

@@ -98,30 +98,55 @@ pub fn scan_range(
     };
     let (first_block, last_block) = (first.block, last.block);
 
-    let mut report = ScanReport {
+    let mut counters = ScanCounters::default();
+    let detected = scan_blocks(&backend_id, chain, scanner, &batch.blocks, &mut counters)?;
+
+    Ok(ScanReport {
         chain,
-        backend_id: backend_id.clone(),
+        backend_id,
         first_block,
         last_block,
         labels_scanned: scanner.labels().collect(),
-        blocks_scanned: 0,
-        txs_seen: 0,
-        txs_scanned: 0,
-        txs_skipped: BTreeMap::new(),
-        detected_received_outputs: Vec::new(),
-    };
+        blocks_scanned: counters.blocks,
+        txs_seen: counters.txs_seen,
+        txs_scanned: counters.txs_scanned,
+        txs_skipped: counters.txs_skipped,
+        detected_received_outputs: detected,
+    })
+}
+
+/// Counters accumulated while scanning blocks.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScanCounters {
+    pub blocks: u64,
+    pub txs_seen: u64,
+    pub txs_scanned: u64,
+    pub txs_skipped: BTreeMap<&'static str, u64>,
+}
+
+/// Scans already-fetched blocks and returns what was detected in them,
+/// ordered by (height, position in block, vout). Any error aborts the whole
+/// call: callers must not record a block as scanned unless this returned `Ok`.
+pub(crate) fn scan_blocks(
+    backend_id: &str,
+    chain: ChainIdentity,
+    scanner: &ReceiveScanner,
+    blocks: &[BlockEvidence],
+    counters: &mut ScanCounters,
+) -> Result<Vec<DetectedOutput>, ScanError> {
+    let mut detected = Vec::new();
     let mut seen_txids = BTreeSet::<Txid>::new();
 
-    for block in &batch.blocks {
+    for block in blocks {
         let provenance = MatchProvenance {
-            backend_id: backend_id.clone(),
+            backend_id: backend_id.to_string(),
             evidence_kind: block.evidence.kind(),
         };
         match &block.evidence {
             Evidence::FullBlock(txs) => {
-                check_full_block(&backend_id, block.block.height, txs, &mut seen_txids)?;
+                check_full_block(backend_id, block.block.height, txs, &mut seen_txids)?;
                 for entry in txs {
-                    report.txs_seen += 1;
+                    counters.txs_seen += 1;
                     let outcome =
                         scanner
                             .scan_tx(&entry.tx, &entry.prevouts)
@@ -132,18 +157,18 @@ pub fn scan_range(
                             })?;
                     match outcome {
                         TxScanOutcome::NotEligible(reason) => {
-                            *report
+                            *counters
                                 .txs_skipped
                                 .entry(SkipReason::as_str(reason))
                                 .or_default() += 1;
                         }
                         TxScanOutcome::Scanned { mut matches } => {
-                            report.txs_scanned += 1;
+                            counters.txs_scanned += 1;
                             matches.sort_by_key(|m| m.outpoint.vout);
                             for m in matches {
                                 // The match also carries the output tweak; it
                                 // is dropped here on purpose.
-                                report.detected_received_outputs.push(DetectedOutput {
+                                detected.push(DetectedOutput {
                                     network: chain.network(),
                                     block: block.block,
                                     txid: m.outpoint.txid,
@@ -158,10 +183,9 @@ pub fn scan_range(
                 }
             }
         }
-        report.blocks_scanned += 1;
+        counters.blocks += 1;
     }
-
-    Ok(report)
+    Ok(detected)
 }
 
 /// Structural facts every real block satisfies, checked regardless of what the
@@ -202,7 +226,7 @@ fn check_full_block(
 }
 
 /// Verifies that a batch is exactly `from..=to`, ascending and hash-linked.
-fn check_batch(
+pub(crate) fn check_batch(
     backend_id: &str,
     blocks: &[BlockEvidence],
     from: u32,

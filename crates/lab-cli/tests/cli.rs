@@ -37,7 +37,7 @@ fn run(args: &[&str]) -> (Output, String, String) {
 }
 
 fn sync_args<'a>(extra: &[&'a str]) -> Vec<&'a str> {
-    let mut args = vec!["sync", "--backend", "fixture", "--fixture", FIXTURE];
+    let mut args = vec!["scan", "--backend", "fixture", "--fixture", FIXTURE];
     args.extend_from_slice(extra);
     args
 }
@@ -93,7 +93,7 @@ fn address_show_uses_test_network_prefixes_only() {
 }
 
 #[test]
-fn sync_on_fixture_reports_the_expected_outputs_as_json() {
+fn scan_on_fixture_reports_the_expected_outputs_as_json() {
     let (output, stdout, stderr) = run(&sync_args(&["--label", "1", "--json"]));
     assert!(output.status.success(), "{stderr}");
     let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
@@ -180,7 +180,7 @@ fn sync_on_fixture_reports_the_expected_outputs_as_json() {
 }
 
 #[test]
-fn sync_text_output_does_not_claim_a_balance() {
+fn scan_text_output_does_not_claim_a_balance() {
     let (output, stdout, stderr) = run(&sync_args(&["--from", "2", "--to", "3"]));
     assert!(output.status.success(), "{stderr}");
     assert!(stdout.contains("detected_received_outputs: 3"), "{stdout}");
@@ -190,7 +190,7 @@ fn sync_text_output_does_not_claim_a_balance() {
 }
 
 #[test]
-fn sync_fails_closed() {
+fn scan_fails_closed() {
     // Range beyond the fixture: error, nothing reported.
     let (output, stdout, stderr) = run(&sync_args(&["--to", "99"]));
     assert_eq!(output.status.code(), Some(1));
@@ -204,11 +204,11 @@ fn sync_fails_closed() {
     assert!(stderr.contains("chain mismatch"), "{stderr}");
 
     // Missing / unreadable fixture.
-    let (output, stdout, _) = run(&["sync", "--backend", "fixture"]);
+    let (output, stdout, _) = run(&["scan", "--backend", "fixture"]);
     assert_eq!(output.status.code(), Some(1));
     assert!(stdout.is_empty());
     let (output, stdout, _) = run(&[
-        "sync",
+        "scan",
         "--backend",
         "fixture",
         "--fixture",
@@ -220,7 +220,7 @@ fn sync_fails_closed() {
 
 #[test]
 fn unimplemented_backends_say_so_instead_of_pretending() {
-    let (output, stdout, stderr) = run(&["sync", "--backend", "oracle-v2"]);
+    let (output, stdout, stderr) = run(&["scan", "--backend", "oracle-v2"]);
     assert_eq!(output.status.code(), Some(3));
     assert!(stdout.is_empty());
     assert!(stderr.contains("not implemented yet") && stderr.contains("Nothing was scanned"));
@@ -229,7 +229,7 @@ fn unimplemented_backends_say_so_instead_of_pretending() {
     assert!(output.status.success());
     assert!(stdout.contains("backend core      : not probed"));
     assert!(stdout.contains("backend oracle-v2 : NOT IMPLEMENTED"));
-    assert!(stdout.contains("persistence       : NOT IMPLEMENTED"));
+    assert!(stdout.contains("persistence       : SQLite store"));
 }
 
 /// Without a node, the Core backend must fail visibly and scan nothing.
@@ -237,7 +237,7 @@ fn unimplemented_backends_say_so_instead_of_pretending() {
 fn core_backend_without_a_node_fails_closed() {
     // Port 9 (discard) on loopback: nothing listens there.
     let url = "http://127.0.0.1:9";
-    let (output, stdout, stderr) = run(&["sync", "--backend", "core", "--core-rest-url", url]);
+    let (output, stdout, stderr) = run(&["scan", "--backend", "core", "--core-rest-url", url]);
     assert_eq!(output.status.code(), Some(1));
     assert!(stdout.is_empty());
     assert!(
@@ -258,7 +258,7 @@ fn core_backend_without_a_node_fails_closed() {
         "https://127.0.0.1:18443",
         "http://example.com",
     ] {
-        let (output, stdout, stderr) = run(&["sync", "--backend", "core", "--core-rest-url", url]);
+        let (output, stdout, stderr) = run(&["scan", "--backend", "core", "--core-rest-url", url]);
         assert_eq!(output.status.code(), Some(1), "{url}");
         assert!(stdout.is_empty());
         assert!(stderr.contains("refusing REST URL"), "{url}: {stderr}");

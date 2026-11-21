@@ -107,9 +107,39 @@ U-1, U-2, U-5 は上流への報告候補（未報告。DECISIONS O-002）。
 - bdk-sp の `oracles/src/tweaks/blindbit.rs` は HTTP の `block-height`, `tweaks/{height}?dustLimit=`, `info` を使う。**これは Oracle v2 が deprecated としている経路**であり、応答形式が現行 v2 と一致するかは未確認。
 - ライセンス: MIT。
 - `UNVERIFIED`:
-  - gRPC の protobuf スキーマ（別リポジトリ `blindbit-lib` にあり、未取得）
-  - regtest での実ビルド・実起動・実応答（未実施。Phase 4 の Gate 条件）
+  - gRPC の protobuf スキーマ（別リポジトリ `blindbit-lib` にあり、未取得）。本プロジェクトは下記のとおり HTTP を使う
   - `docker-compose-example.yaml` が v2 でそのまま使えるか（v1 時代の `leveldb_data` ボリューム名が残っている）
+  - `tweaks_cut_through_with_dust_filter=1` や `tweaks_only=1` の構成での挙動（未実行）
+  - signet / 実ネットワーク上での挙動
+
+### 4.1 regtest での実動作（Phase 4 の前提確認として実施）
+
+commit `f9ab7fd` を Go 1.24.7 でビルド（`go build ./cmd/blindbit-oracle`、成功）し、標準シナリオを載せた Bitcoin Core 32.1 の regtest ノード（REST）に接続した。構成: `chain = "regtest"`, `sync_start_height = 1`, `tweaks_only = 0`, `tweaks_full_basic = 1`, 他は 0。
+
+- `blindbit-oracle sync` は高さ 108 まで完了し、`run` で HTTP（と gRPC）を待ち受けた。**regtest で実際に動く。**
+- **HTTP の JSON エンドポイントは「deprecated」だが有効**で、次の形式で応答した。
+
+| エンドポイント | 実際の応答 |
+|---|---|
+| `GET /info` | `{"network":"regtest","height":108,"tweaks_only":false,"tweaks_full_basic":true,…}` |
+| `GET /tweaks/<h>` | `{"block_identifier":{"block_hash":"…","block_height":h},"index":["02…", …]}`（33 バイト公開鍵の 16 進） |
+| `GET /utxos/<h>` | `index` に `{txid, vout, amount, pubkey}`（Taproot 出力。`pubkey` は x-only） |
+| `GET /compute-index/<h>` | `index` に `{txid, tweak, outputs:[出力鍵の先頭 8 バイト, …]}` |
+| `GET /full-block/<h>` | `index` に `{txid, tweak, inputs:[使用した Taproot outpoint], utxos:[{vout, amount, pubkey}]}`。**tweak・txid・出力（vout と金額）が 1 応答で揃う** |
+| `GET /spent-outputs/<h>` | 使用された出力鍵の先頭 8 バイトの一覧 |
+
+実測で分かった、クライアント側が知っておくべき挙動:
+
+| # | 挙動 | 影響 |
+|---|---|---|
+| B-1 | **範囲外の高さ（`/tweaks/999`、`/full-block/999`、`/tweaks/0`）に HTTP 200 で `block_hash: ""`・空の `index` を返す** | 「tweak が無いブロック」と区別できる情報は空の `block_hash` だけ。これを見ないクライアントは、未同期の範囲を「入金なし」と誤認する |
+| B-2 | **SegWit v2 の出力を使う tx にも tweak を返す**（シナリオの該当 tx。確認時の txid は `76bf5b2d…1e7e`、60,000 sat の出力。txid は実行ごとに変わる） | BIP352 は当該 tx をスキャンしないと定めている。tweak だけを受け取るクライアントは prevout を持たないので、自分ではこの規則を適用できない。Core 直接方式（本プロジェクト）とは検出結果が 1 件食い違う |
+| B-3 | ブロックの識別はハッシュと高さのみ。親ハッシュもヘッダも返さない | クライアントは別経路のヘッダなしにチェーンの連続性を確認できない |
+| B-4 | この構成では、後で使用された出力も `/utxos` に残る（使用情報は `/spent-outputs` で別途提供） | cut-through を有効にした構成では変わるはず（未検証） |
+| B-5 | `dustLimit` は `tweaks_full_basic` の構成では効かない（1 sat の出力を持つ tx の tweak も返る） | README の説明どおり（dust フィルタ用インデックスが別） |
+| B-6 | 不正な高さ（`/tweaks/abc`）は HTTP 400 と JSON エラー | — |
+
+B-1 と B-2 は上流への報告候補（未報告。DECISIONS O-002）。
 
 ## 5. Index server specification (WIP)
 

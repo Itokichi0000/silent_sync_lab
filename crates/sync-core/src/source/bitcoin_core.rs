@@ -290,6 +290,16 @@ impl ScanSource for CoreRestSource {
         Ok(ScanBatch { blocks })
     }
 
+    fn block_ref(&self, height: u32) -> Result<BlockRef, SourceError> {
+        let hash = self.block_hash_at(height)?;
+        let header = self.header(hash)?;
+        Ok(BlockRef {
+            height,
+            hash,
+            prev_hash: header.prev_blockhash,
+        })
+    }
+
     fn stats(&self) -> SourceStats {
         SourceStats {
             requests: self.requests.load(Ordering::Relaxed),

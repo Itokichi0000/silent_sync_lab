@@ -310,6 +310,25 @@ fn block(height: u32, prev: BlockHash, txs: Vec<Transaction>) -> Block {
 
 /// Builds the fixture. Pure and deterministic: the same output on every call.
 pub fn generate() -> FixtureFile {
+    build(false)
+}
+
+/// A competing chain for reorg tests. Heights 1–5 are byte-identical to
+/// [`generate`]; from height 6 on it differs and it is one block longer:
+///
+/// * 6': a payment to the receiver that exists only on this branch;
+/// * 7': coinbase only (the main chain's change-only payment is gone);
+/// * 8': the *same* 1 sat transaction as the main chain's height 8, now in a
+///   different block;
+/// * 9': coinbase only.
+pub fn generate_fork() -> FixtureFile {
+    build(true)
+}
+
+/// Height up to which [`generate`] and [`generate_fork`] are identical.
+pub const FORK_HEIGHT: u32 = 5;
+
+fn build(fork: bool) -> FixtureFile {
     let network = LabNetwork::Regtest;
     let receiver = lab_receiver_keys();
     let other = other_receiver_keys();
@@ -445,49 +464,79 @@ pub fn generate() -> FixtureFile {
         )]);
     }
 
-    // Height 6: transactions BIP352 says must not be scanned.
-    {
-        // No eligible input (P2WSH only).
-        let ins_a = [input(5, InputKind::P2wsh)];
-        let (ta, pa) = tx(&ins_a, vec![(90_000, unrelated_p2tr(1))]);
+    if !fork {
+        // Height 6: transactions BIP352 says must not be scanned.
+        {
+            // No eligible input (P2WSH only).
+            let ins_a = [input(5, InputKind::P2wsh)];
+            let (ta, pa) = tx(&ins_a, vec![(90_000, unrelated_p2tr(1))]);
 
-        // Spends a SegWit v2 output next to an eligible input. The output is
-        // what a non-compliant sender would derive for the receiver; BIP352
-        // receivers must not scan this transaction, so it is NOT expected.
-        let ins_b = [input(6, InputKind::P2wpkh), input(7, InputKind::SegwitV2)];
-        let sp_b = silent_payment_scripts(&ins_b, std::slice::from_ref(&plain));
-        let (tb, pb) = tx(&ins_b, vec![(60_000, sp_b[0].clone())]);
+            // Spends a SegWit v2 output next to an eligible input. The output is
+            // what a non-compliant sender would derive for the receiver; BIP352
+            // receivers must not scan this transaction, so it is NOT expected.
+            let ins_b = [input(6, InputKind::P2wpkh), input(7, InputKind::SegwitV2)];
+            let sp_b = silent_payment_scripts(&ins_b, std::slice::from_ref(&plain));
+            let (tb, pb) = tx(&ins_b, vec![(60_000, sp_b[0].clone())]);
 
-        // Eligible input but no taproot output.
-        let ins_c = [input(8, InputKind::P2wpkh)];
-        let (tc, pc) = tx(&ins_c, vec![(90_000, p2wpkh_script(&sender_key(8)))]);
+            // Eligible input but no taproot output.
+            let ins_c = [input(8, InputKind::P2wpkh)];
+            let (tc, pc) = tx(&ins_c, vec![(90_000, p2wpkh_script(&sender_key(8)))]);
 
-        plan.push(vec![(ta, pa, vec![]), (tb, pb, vec![]), (tc, pc, vec![])]);
-    }
+            plan.push(vec![(ta, pa, vec![]), (tb, pb, vec![]), (tc, pc, vec![])]);
+        }
 
-    // Height 7: a payment to the change label only (k = 0). Found by any
-    // wallet that has the keys, because the change label is always scanned.
-    {
-        let ins = [input(10, InputKind::P2wpkh)];
-        let sp = silent_payment_scripts(&ins, std::slice::from_ref(&label_change));
-        let (t, p) = tx(
-            &ins,
-            vec![(80_000, unrelated_p2tr(3)), (15_000, sp[0].clone())],
-        );
-        plan.push(vec![(
-            t,
-            p,
-            vec![(1, 0, Some(0), "change label (m = 0) alone")],
-        )]);
-    }
+        // Height 7: a payment to the change label only (k = 0). Found by any
+        // wallet that has the keys, because the change label is always scanned.
+        {
+            let ins = [input(10, InputKind::P2wpkh)];
+            let sp = silent_payment_scripts(&ins, std::slice::from_ref(&label_change));
+            let (t, p) = tx(
+                &ins,
+                vec![(80_000, unrelated_p2tr(3)), (15_000, sp[0].clone())],
+            );
+            plan.push(vec![(
+                t,
+                p,
+                vec![(1, 0, Some(0), "change label (m = 0) alone")],
+            )]);
+        }
 
-    // Height 8: a dust-sized payment. Detection is cryptographic; value must
-    // never be a reason to ignore an output.
-    {
-        let ins = [input(9, InputKind::P2wpkh)];
-        let sp = silent_payment_scripts(&ins, std::slice::from_ref(&plain));
-        let (t, p) = tx(&ins, vec![(1, sp[0].clone()), (90_000, unrelated_p2tr(2))]);
-        plan.push(vec![(t, p, vec![(0, 0, None, "1 sat payment")])]);
+        // Height 8: a dust-sized payment. Detection is cryptographic; value must
+        // never be a reason to ignore an output.
+        {
+            let ins = [input(9, InputKind::P2wpkh)];
+            let sp = silent_payment_scripts(&ins, std::slice::from_ref(&plain));
+            let (t, p) = tx(&ins, vec![(1, sp[0].clone()), (90_000, unrelated_p2tr(2))]);
+            plan.push(vec![(t, p, vec![(0, 0, None, "1 sat payment")])]);
+        }
+    } else {
+        // Height 6': a payment that only exists on the fork.
+        {
+            let ins = [input(20, InputKind::P2wpkh)];
+            let sp = silent_payment_scripts(&ins, std::slice::from_ref(&plain));
+            let (t, p) = tx(&ins, vec![(33_000, sp[0].clone())]);
+            plan.push(vec![(t, p, vec![(0, 0, None, "payment only on the fork")])]);
+        }
+        // Height 7': coinbase only.
+        plan.push(vec![]);
+        // Height 8': the main chain's 1 sat transaction, confirmed here too.
+        {
+            let ins = [input(9, InputKind::P2wpkh)];
+            let sp = silent_payment_scripts(&ins, std::slice::from_ref(&plain));
+            let (t, p) = tx(&ins, vec![(1, sp[0].clone()), (90_000, unrelated_p2tr(2))]);
+            plan.push(vec![(
+                t,
+                p,
+                vec![(
+                    0,
+                    0,
+                    None,
+                    "1 sat payment (same transaction as on the main chain)",
+                )],
+            )]);
+        }
+        // Height 9': coinbase only.
+        plan.push(vec![]);
     }
 
     for (index, planned) in plan.into_iter().enumerate() {
@@ -521,18 +570,25 @@ pub fn generate() -> FixtureFile {
 
     FixtureFile {
         format: FIXTURE_FORMAT.to_string(),
-        description: "Deterministic regtest-shaped chain for Silent Sync Lab Phase 1. \
-                      Receiver = BIP352 test vector #0 keys. Transactions carry placeholder \
-                      signatures and are NOT consensus-valid. `expected_detections` is \
-                      sender-side knowledge of outputs created for the receiver. Regenerate \
-                      with `cargo run -p lab-testkit --bin gen_fixture`."
-            .to_string(),
+        description: if fork {
+            "Fork of the deterministic fixture chain (identical up to height 5), for reorg \
+             tests. Generated in memory by lab-testkit; not stored in the repository."
+                .to_string()
+        } else {
+            MAIN_DESCRIPTION.to_string()
+        },
         network,
         genesis_hash: network.genesis_hash(),
         blocks,
         expected_detections: expected,
     }
 }
+
+const MAIN_DESCRIPTION: &str = "Deterministic regtest-shaped chain for Silent Sync Lab Phase 1. \
+                      Receiver = BIP352 test vector #0 keys. Transactions carry placeholder \
+                      signatures and are NOT consensus-valid. `expected_detections` is \
+                      sender-side knowledge of outputs created for the receiver. Regenerate \
+                      with `cargo run -p lab-testkit --bin gen_fixture`.";
 
 /// Canonical on-disk form.
 pub fn generate_json() -> String {

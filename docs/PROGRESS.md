@@ -7,7 +7,7 @@
 | 0 | 上流調査・セットアップ | **完了**（Gate 0 通過） |
 | 1 | 暗号処理を作らない受信検出（fixture） | **完了**（Gate 1 通過） |
 | 2 | Bitcoin Core / regtest 統合 | **完了**（Gate 2 通過） |
-| 3 | 永続化・再開・復元 | 未着手 |
+| 3 | 永続化・再開・復元 | **完了**（Gate 3 通過） |
 | 4 | 第二バックエンド | 未着手 |
 | 5 | ベンチマーク・故障注入 | 未着手 |
 | 6 | 進路決定 | 未着手 |
@@ -31,7 +31,6 @@
 
 ## Not done（このフェーズの対象外、または未実施）
 
-- [ ] SQLite 永続化、チェックポイント、中断再開、reorg（Phase 3）
 - [ ] tweak 方式の `Evidence`、Oracle アダプタ、`Verifier::cross_check`（Phase 4）
 - [ ] ベンチマーク、故障注入レポート、`export` / `bench` / `status` / `received list` / `lab init` コマンド（Phase 3〜5）
 - [ ] `docs/THREAT_MODEL.md`, `docs/BENCHMARK_PROTOCOL.md`（Phase 4〜5 の前に作成）
@@ -213,6 +212,53 @@ Phase 2 以降の前提として未解決のもの:
 1. fixture アダプタと Core アダプタは、同じチェーンに対して**同一の検出結果・同一のバッチ**を返す（`honest_node_gives_the_same_result_as_the_fixture_adapter`）。設計書 §1.4-3 の「同じ検出結果」の最初の実証。
 2. `/rest/spenttxouts` のおかげで、prevout をノードから追加の往復なしに正確な金額で取れる。1 ブロックあたり 3 リクエスト（ハッシュ、ブロック、使用済み出力）。
 3. Bitcoin Core 30 未満ではこの経路は使えない（`spenttxouts` が無い）。
+
+## Phase 3 Result
+
+- **実装したファイル**:
+  - `crates/sync-core/src/store.rs`（`SyncStore` トレイト、不変条件 `check_append`、`MemoryStore`）, `src/sync.rs`（再開可能な同期と reorg 処理）, `src/engine.rs`（ブロック走査を共通化）, `ScanSource::block_ref`、`ReceiverKeys::wallet_id`
+  - `crates/lab-storage/`（新規）: SQLite 実装 `SqliteStore`
+  - `crates/lab-testkit/src/{sync_suite.rs,test_source.rs}`（全ストア実装に適用する振る舞いテスト群と、reorg・遅延・障害・競合を演じるソース）、`fixture_gen::generate_fork`、`bin/scenario_node.rs`
+  - `crates/lab-cli/src/main.rs`: `lab init` / `sync`（永続）/ `status` / `received list` を追加、従来のステートレス実行は `scan` に改名
+  - テスト: `crates/sync-core/tests/sync_memory.rs`, `crates/lab-storage/tests/sync_sqlite.rs`, `crates/lab-cli/tests/store_cli.rs`, `regtest_cli.rs`（実 reorg）
+- **実行したコマンド**: `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets --locked -- -D warnings` / `cargo test --workspace --locked` / `BITCOIND_EXE=… cargo test --workspace --locked -- --ignored` / `python3 scripts/mutation_check.py <スクラッチコピー>`
+- **テスト結果**: **成功**
+  | 対象 | 件数 |
+  |---|---|
+  | 通常テスト | 100 passed（同期スイート: メモリ 14、SQLite 18。CLI の永続系 7） |
+  | 実ノード E2E（Bitcoin Core 32.1） | 6 passed（うち実 reorg 1） |
+  | 検査の無効化チェック | 67 件すべて検出 |
+  - 1 回目のゲートで 2 点失敗し、修正した: (1) 整形差分 1 ファイル、(2) 実 reorg の E2E が**順序依存の比較**をしており不安定だった（同じ高さに 2 件あるとき、ストアは txid 順で返す）。比較を順序非依存に直し、E2E 全体を 6 回連続で実行して全て成功を確認。
+  - 無効化チェックの 1 項目は、無効化の書き方自体がコンパイルできなかったため修正して再実行した（ログに明記）。
+- **出力証拠**: `docs/logs/phase3_cargo_fmt.log`, `phase3_cargo_clippy.log`, `phase3_cargo_test.log`, `phase3_regtest_e2e.log`, `phase3_mutation_check.log`
+- **安全性で気をつけたこと**:
+  - ストアに鍵・tweak を保存しない。SQLite ファイルのバイト列に scan 鍵・spend 鍵・全出力の tweak が現れないことを検査。ファイルは 0600。
+  - 既存のストアを上書きしない。別ネットワーク・別ウォレット・別バックエンド・別ラベル集合・別スキャナ版のストアには触れずにエラーにする。
+  - 遅れているだけのソースを reorg と誤認して結果を捨てない。チェーンが動いた場合は中断する。
+  - 追記と巻き戻しはアトミック。SIGKILL 後のストアが「走査済みの接頭部と完全に一致」することを確認。
+- **未完成 / ブロッカー**: ラベルを後から追加する運用（自動再スキャン）は未実装（O-006）。reorg の深さ上限なし（O-013）。
+
+### Gate 3 判定: 通過
+
+| 条件 | 根拠 |
+|---|---|
+| 途中で強制終了 → 再開しても検出漏れと重複なし | `killed_sync_resumes_without_loss_or_duplicates`（CLI プロセスを SIGKILL。直後のストアは走査済み接頭部と一致、再開後は期待 7 件と完全一致）。加えて全チャンクサイズ × 全停止位置、ソース障害、コミット失敗の注入 |
+| reorg で取り消されたブロック内の検出を正しく修正できる | fixture の分岐チェーン（両実装のスイート、CLI）と、実ノードの `invalidateblock`（`persistent_sync_follows_a_real_reorg`: 孤立した 2 件が消え、再承認後に新しいブロックで再検出） |
+
+### 設計書のテストケースとの対応（Phase 3）
+
+| ID | 状態 | 備考 |
+|---|---|---|
+| T07 50% で中断 → 再開 | **済** | 50% 停止、全停止位置、SIGKILL |
+| T08 DB 削除 → birthday から復元 | **済** | birthday 1〜8 のすべてで「完全再スキャンのうち birthday 以上の部分」と一致。birthday が 1 ブロック遅いと最初の入金を失うことも確認 |
+| T09 再編成 | **済** | fixture と実ノード |
+| T05 ラベル | 追記 | ラベル集合をストアに固定。別の集合での同期は拒否 |
+
+### Phase 3 で分かったこと
+
+1. 「ソースがチェックポイントより短い」は 2 通りある: 別のチェーンに切り替わった（reorg）か、同じチェーンの手前にいるだけか。後者で巻き戻すと、正しい結果を捨てることになる。区別には保存済みのブロックハッシュ列が必要で、チェックポイント 1 点だけでは足りない。
+2. 再承認された同じ tx は、同じ txid・vout のまま別のブロックに属する検出として現れる。検出の同一性は outpoint、所属は (高さ, ブロックハッシュ) で持つ必要がある。
+3. テストの比較が暗黙の順序に依存していると、実ノードでは txid が毎回変わるため不安定になる。fixture（決定的）では表に出なかった。
 
 ## 次に取り組む最小タスク（Phase 1 完了時点の記録）
 

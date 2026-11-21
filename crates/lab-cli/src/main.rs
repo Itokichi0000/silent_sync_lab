@@ -2,28 +2,34 @@
 //!
 //! EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
 //!
-//! This binary only parses arguments, calls `sync-core` and prints. It has no
-//! send, sign or balance functionality.
+//! This binary only parses arguments, calls `sync-core` / `lab-storage` and
+//! prints. It has no send, sign or balance functionality.
 
 mod lab_keys;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use lab_storage::SqliteStore;
 use std::{
     fmt::Write as _,
     io::{self, Write as _},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
+    time::Duration,
 };
 use sync_core::{
     engine::{scan_range, ScanReport},
+    models::DetectedOutput,
     network::{ChainIdentity, LabNetwork},
     protocol::ReceiveScanner,
     source::{bitcoin_core::CoreRestSource, fixture::FixtureSource, ScanSource},
+    store::{StoreMeta, SyncStore},
+    sync::{new_store_meta, sync, SyncOptions, SyncReport},
     EXPERIMENTAL_BANNER,
 };
 
 /// Exit code for "understood, but not implemented in this phase".
 const EXIT_NOT_IMPLEMENTED: u8 = 3;
+const DEFAULT_DB: &str = "silent-sync-lab.sqlite3";
 
 #[derive(Parser)]
 #[command(
@@ -56,11 +62,29 @@ enum Command {
         #[command(subcommand)]
         action: AddressAction,
     },
-    /// Scan a block range for outputs paid to the lab receiver.
-    ///
-    /// Stateless in this phase: nothing is persisted and there is no resume
-    /// (planned for Phase 3).
+    /// Manage the local lab store.
+    Lab {
+        #[command(subcommand)]
+        action: LabAction,
+    },
+    /// Stateless scan of a block range: nothing is stored, nothing is resumed.
+    Scan(ScanArgs),
+    /// Bring the lab store up to the source's tip: resumes from the stored
+    /// checkpoint and handles reorganizations.
     Sync(SyncArgs),
+    /// Show what the lab store is bound to and how far it is synced.
+    Status {
+        #[command(flatten)]
+        db: DbArg,
+        /// Print as JSON on stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect what was detected.
+    Received {
+        #[command(subcommand)]
+        action: ReceivedAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -73,8 +97,50 @@ enum AddressAction {
     },
 }
 
+#[derive(Subcommand)]
+enum LabAction {
+    /// Create the lab store and bind it to a network, backend, label set and
+    /// wallet birthday. An existing store is never overwritten.
+    Init {
+        #[command(flatten)]
+        db: DbArg,
+        #[command(flatten)]
+        source: SourceArgs,
+        /// First block height to scan. Payments confirmed below it will never
+        /// be found, so choose a height at or below the wallet's first use.
+        #[arg(long)]
+        birthday: u32,
+        /// Why that height is safe (recorded in the store).
+        #[arg(long)]
+        birthday_basis: String,
+        /// Label integer to scan for in addition to the change label
+        /// (repeatable). Cannot be changed later without a new store.
+        #[arg(long = "label")]
+        labels: Vec<u32>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReceivedAction {
+    /// List detected outputs. This is not a balance: spent status is not tracked.
+    List {
+        #[command(flatten)]
+        db: DbArg,
+        /// Print as JSON on stdout.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(clap::Args)]
-struct SyncArgs {
+struct DbArg {
+    /// Path of the lab store.
+    #[arg(long, default_value = DEFAULT_DB)]
+    db: PathBuf,
+}
+
+#[derive(clap::Args)]
+struct SourceArgs {
     /// Data source.
     #[arg(long, value_enum)]
     backend: Backend,
@@ -86,6 +152,12 @@ struct SyncArgs {
     /// [default: http://127.0.0.1:18443 on regtest, http://127.0.0.1:38332 on signet].
     #[arg(long)]
     core_rest_url: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct ScanArgs {
+    #[command(flatten)]
+    source: SourceArgs,
     /// First height to scan [default: 1].
     #[arg(long)]
     from: Option<u32>,
@@ -95,6 +167,30 @@ struct SyncArgs {
     /// Label integer to scan for in addition to the change label (repeatable).
     #[arg(long = "label")]
     labels: Vec<u32>,
+    /// Print the report as JSON on stdout.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct SyncArgs {
+    #[command(flatten)]
+    db: DbArg,
+    #[command(flatten)]
+    source: SourceArgs,
+    /// Stop at this height instead of the source's tip.
+    #[arg(long)]
+    to: Option<u32>,
+    /// Stop after this many blocks (whole chunks); the store stays resumable.
+    #[arg(long)]
+    max_blocks: Option<u64>,
+    /// Blocks fetched, scanned and committed per step.
+    #[arg(long, default_value_t = 100)]
+    chunk_size: u32,
+    /// Pause between chunks (milliseconds). For demonstrations and tests of
+    /// interruption; has no other effect.
+    #[arg(long, default_value_t = 0, hide = true)]
+    chunk_delay_ms: u64,
     /// Print the report as JSON on stdout.
     #[arg(long)]
     json: bool,
@@ -136,6 +232,10 @@ impl Failure {
     }
 }
 
+fn fail(e: impl std::fmt::Display) -> Failure {
+    Failure::error(e.to_string())
+}
+
 /// Writes `text` to stdout in one go. A closed or broken stdout is reported
 /// as an error instead of panicking (as `println!` would): the consumer did
 /// not receive the result, so the command must not look successful.
@@ -145,6 +245,12 @@ fn emit(text: &str) -> Result<(), Failure> {
         .write_all(text.as_bytes())
         .and_then(|()| stdout.flush())
         .map_err(|e| Failure::error(format!("cannot write to stdout: {e}")))
+}
+
+fn emit_json(value: &impl serde::Serialize) -> Result<(), Failure> {
+    let json = serde_json::to_string_pretty(value)
+        .map_err(|e| Failure::error(format!("cannot serialize: {e}")))?;
+    emit(&(json + "\n"))
 }
 
 fn main() -> ExitCode {
@@ -161,12 +267,28 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<(), Failure> {
+    let network = cli.network;
     match cli.command {
-        Command::Doctor { core_rest_url } => doctor(cli.network, core_rest_url.as_deref()),
+        Command::Doctor { core_rest_url } => doctor(network, core_rest_url.as_deref()),
         Command::Address {
             action: AddressAction::Show { label },
-        } => address_show(cli.network, label),
-        Command::Sync(args) => sync(cli.network, args),
+        } => address_show(network, label),
+        Command::Lab {
+            action:
+                LabAction::Init {
+                    db,
+                    source,
+                    birthday,
+                    birthday_basis,
+                    labels,
+                },
+        } => lab_init(network, &db.db, &source, birthday, &birthday_basis, &labels),
+        Command::Scan(args) => scan(network, args),
+        Command::Sync(args) => sync_command(network, args),
+        Command::Status { db, json } => status(network, &db.db, json),
+        Command::Received {
+            action: ReceivedAction::List { db, json },
+        } => received_list(network, &db.db, json),
     }
 }
 
@@ -175,6 +297,43 @@ fn default_core_rest_url(network: LabNetwork) -> &'static str {
         LabNetwork::Regtest => "http://127.0.0.1:18443",
         LabNetwork::Signet => "http://127.0.0.1:38332",
     }
+}
+
+fn open_source(network: LabNetwork, args: &SourceArgs) -> Result<Box<dyn ScanSource>, Failure> {
+    let source: Box<dyn ScanSource> = match args.backend {
+        Backend::Fixture => {
+            let path = args
+                .fixture
+                .as_deref()
+                .ok_or_else(|| Failure::error("`--backend fixture` requires `--fixture <file>`"))?;
+            Box::new(FixtureSource::from_path(path).map_err(fail)?)
+        }
+        Backend::Core => {
+            let url = args
+                .core_rest_url
+                .as_deref()
+                .unwrap_or_else(|| default_core_rest_url(network));
+            eprintln!("connecting to Bitcoin Core REST at {url}");
+            Box::new(
+                CoreRestSource::connect(url)
+                    .map_err(|e| Failure::error(format!("{e}\nnothing was scanned")))?,
+            )
+        }
+        Backend::OracleV2 => {
+            return Err(Failure::not_implemented(
+                "backend `oracle-v2` is not implemented yet (Phase 4). Nothing was scanned.",
+            ))
+        }
+    };
+    let expected = ChainIdentity::for_network(network);
+    if source.chain() != expected {
+        return Err(Failure::error(format!(
+            "chain mismatch: --network is {network} but source `{}` serves {}\nnothing was scanned",
+            source.backend_id(),
+            source.chain().network()
+        )));
+    }
+    Ok(source)
 }
 
 fn doctor(network: LabNetwork, core_rest_url: Option<&str>) -> Result<(), Failure> {
@@ -206,7 +365,8 @@ fn doctor(network: LabNetwork, core_rest_url: Option<&str>) -> Result<(), Failur
         "backend fixture   : available (offline, structurally validated only)".to_string(),
         format!("backend core      : {core}"),
         "backend oracle-v2 : NOT IMPLEMENTED (Phase 4)".to_string(),
-        "persistence       : NOT IMPLEMENTED (Phase 3) — `sync` is a stateless scan".to_string(),
+        "persistence       : SQLite store (`lab init`, `sync`, `status`, `received list`)"
+            .to_string(),
     ];
     emit(&(lines.join("\n") + "\n"))
 }
@@ -215,9 +375,7 @@ fn address_show(network: LabNetwork, label: Option<u32>) -> Result<(), Failure> 
     let keys = lab_keys::lab_receiver_keys().map_err(Failure::error)?;
     let code = match label {
         None => keys.address(network),
-        Some(m) => keys
-            .labelled_address(network, m)
-            .map_err(|e| Failure::error(e.to_string()))?,
+        Some(m) => keys.labelled_address(network, m).map_err(fail)?,
     };
     emit(&format!("{code}\n"))?;
     eprintln!("receiver: {}", lab_keys::DESCRIPTION);
@@ -238,37 +396,11 @@ fn address_show(network: LabNetwork, label: Option<u32>) -> Result<(), Failure> 
     Ok(())
 }
 
-fn sync(network: LabNetwork, args: SyncArgs) -> Result<(), Failure> {
-    let source: Box<dyn ScanSource> = match args.backend {
-        Backend::Fixture => {
-            let path = args
-                .fixture
-                .as_deref()
-                .ok_or_else(|| Failure::error("`--backend fixture` requires `--fixture <file>`"))?;
-            Box::new(FixtureSource::from_path(path).map_err(|e| Failure::error(e.to_string()))?)
-        }
-        Backend::Core => {
-            let url = args
-                .core_rest_url
-                .as_deref()
-                .unwrap_or_else(|| default_core_rest_url(network));
-            eprintln!("connecting to Bitcoin Core REST at {url}");
-            Box::new(
-                CoreRestSource::connect(url)
-                    .map_err(|e| Failure::error(format!("{e}\nnothing was scanned")))?,
-            )
-        }
-        Backend::OracleV2 => {
-            return Err(Failure::not_implemented(
-                "backend `oracle-v2` is not implemented yet (Phase 4). Nothing was scanned.",
-            ))
-        }
-    };
-
+fn scan(network: LabNetwork, args: ScanArgs) -> Result<(), Failure> {
+    let source = open_source(network, &args.source)?;
     let keys = lab_keys::lab_receiver_keys().map_err(Failure::error)?;
-    let scanner =
-        ReceiveScanner::new(&keys, &args.labels).map_err(|e| Failure::error(e.to_string()))?;
-    let tip = source.tip().map_err(|e| Failure::error(e.to_string()))?;
+    let scanner = ReceiveScanner::new(&keys, &args.labels).map_err(fail)?;
+    let tip = source.tip().map_err(fail)?;
     let from = args.from.unwrap_or(1);
     let to = args.to.unwrap_or(tip.height);
 
@@ -290,50 +422,335 @@ fn sync(network: LabNetwork, args: SyncArgs) -> Result<(), Failure> {
     })?;
 
     if args.json {
-        let json = serde_json::to_string_pretty(&report)
-            .map_err(|e| Failure::error(format!("cannot serialize report: {e}")))?;
-        emit(&(json + "\n"))
+        emit_json(&report)
     } else {
-        emit(&render_report(&report))
+        emit(&render_scan_report(&report))
     }
 }
 
-fn render_report(report: &ScanReport) -> String {
+fn lab_init(
+    network: LabNetwork,
+    db: &Path,
+    source_args: &SourceArgs,
+    birthday: u32,
+    birthday_basis: &str,
+    labels: &[u32],
+) -> Result<(), Failure> {
+    if birthday_basis.trim().is_empty() {
+        return Err(Failure::error(
+            "`--birthday-basis` must say why the birthday height is safe",
+        ));
+    }
+    let source = open_source(network, source_args)?;
+    let keys = lab_keys::lab_receiver_keys().map_err(Failure::error)?;
+    let scanner = ReceiveScanner::new(&keys, labels).map_err(fail)?;
+    let meta = new_store_meta(
+        source.as_ref(),
+        &scanner,
+        &keys.wallet_id(),
+        birthday,
+        birthday_basis.trim(),
+    );
+    let mut store = SqliteStore::create(db).map_err(fail)?;
+    if let Err(e) = store.initialize(&meta) {
+        drop(store);
+        // Do not leave a half-made store behind.
+        let _ = std::fs::remove_file(db);
+        return Err(fail(e));
+    }
+    eprintln!("created {}", db.display());
+    eprintln!(
+        "note: payments confirmed below height {birthday} will never be found by this store."
+    );
+    if meta.labels.iter().any(|&m| m != 0) {
+        eprintln!(
+            "note: the label set {:?} is fixed for this store; back the labels up.",
+            meta.labels
+        );
+    }
+    emit(&render_meta(db, &meta, None, 0, 0))
+}
+
+/// Opens the store and checks it against `--network`.
+fn open_store(network: LabNetwork, db: &Path) -> Result<(SqliteStore, StoreMeta), Failure> {
+    let store = SqliteStore::open(db).map_err(fail)?;
+    let meta = store.meta().map_err(fail)?.ok_or_else(|| {
+        Failure::error(format!(
+            "{} is not initialized; run `lab init`",
+            db.display()
+        ))
+    })?;
+    if meta.chain.network() != network {
+        return Err(Failure::error(format!(
+            "store {} is for {}, but --network is {network}",
+            db.display(),
+            meta.chain.network()
+        )));
+    }
+    Ok((store, meta))
+}
+
+fn sync_command(network: LabNetwork, args: SyncArgs) -> Result<(), Failure> {
+    let (mut store, meta) = open_store(network, &args.db.db)?;
+    let source = open_source(network, &args.source)?;
+    let keys = lab_keys::lab_receiver_keys().map_err(Failure::error)?;
+    // The label set is part of the store's binding, not a per-run choice.
+    let extra: Vec<u32> = meta.labels.iter().copied().filter(|&m| m != 0).collect();
+    let scanner = ReceiveScanner::new(&keys, &extra).map_err(fail)?;
+    let wallet_id = keys.wallet_id();
+    let aborted = |e: sync_core::sync::SyncError| {
+        Failure::error(format!(
+            "{e}\nsync aborted: the store keeps what was committed before the error and can be resumed"
+        ))
+    };
+
+    eprintln!(
+        "syncing {} on `{}` ({network}) from the stored checkpoint",
+        args.db.db.display(),
+        source.backend_id()
+    );
+    let mut options = SyncOptions {
+        chunk_size: args.chunk_size,
+        target_height: args.to,
+        max_blocks: args.max_blocks,
+    };
+
+    // One `sync` call per chunk when a delay is requested, so that the pause
+    // sits between commits. The reports are merged.
+    let report = if args.chunk_delay_ms == 0 {
+        sync(source.as_ref(), &scanner, &wallet_id, &mut store, &options).map_err(aborted)?
+    } else {
+        let mut merged: Option<SyncReport> = None;
+        let mut remaining = args.max_blocks;
+        loop {
+            options.max_blocks =
+                Some(u64::from(args.chunk_size).min(remaining.unwrap_or(u64::MAX)));
+            let step = sync(source.as_ref(), &scanner, &wallet_id, &mut store, &options)
+                .map_err(aborted)?;
+            if let Some(cp) = step.checkpoint {
+                eprintln!("committed up to height {}", cp.height);
+            }
+            let done = step.caught_up || step.blocks_scanned == 0;
+            if let Some(left) = remaining.as_mut() {
+                *left = left.saturating_sub(step.blocks_scanned);
+            }
+            let stop = done || remaining == Some(0);
+            merged = Some(match merged {
+                None => step,
+                Some(mut all) => {
+                    all.blocks_scanned += step.blocks_scanned;
+                    all.txs_seen += step.txs_seen;
+                    all.txs_scanned += step.txs_scanned;
+                    for (reason, count) in step.txs_skipped {
+                        *all.txs_skipped.entry(reason).or_default() += count;
+                    }
+                    all.new_detections.extend(step.new_detections);
+                    all.checkpoint = step.checkpoint;
+                    all.caught_up = step.caught_up;
+                    all
+                }
+            });
+            if stop {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(args.chunk_delay_ms));
+        }
+        merged.ok_or_else(|| Failure::error("sync made no step"))?
+    };
+
+    if args.json {
+        emit_json(&report)
+    } else {
+        emit(&render_sync_report(&report))
+    }
+}
+
+#[derive(serde::Serialize)]
+struct StatusJson<'a> {
+    store: String,
+    binding: &'a StoreMeta,
+    checkpoint: Option<sync_core::models::BlockRef>,
+    blocks_stored: u64,
+    detected_received_outputs: u64,
+}
+
+fn status(network: LabNetwork, db: &Path, json: bool) -> Result<(), Failure> {
+    let (store, meta) = open_store(network, db)?;
+    let checkpoint = store.checkpoint().map_err(fail)?;
+    let blocks = store.block_count().map_err(fail)?;
+    let detected = store.detections().map_err(fail)?.len() as u64;
+    if json {
+        emit_json(&StatusJson {
+            store: db.display().to_string(),
+            binding: &meta,
+            checkpoint,
+            blocks_stored: blocks,
+            detected_received_outputs: detected,
+        })
+    } else {
+        emit(&render_meta(db, &meta, checkpoint, blocks, detected))
+    }
+}
+
+fn received_list(network: LabNetwork, db: &Path, json: bool) -> Result<(), Failure> {
+    let (store, _) = open_store(network, db)?;
+    let detections = store.detections().map_err(fail)?;
+    if json {
+        emit_json(&detections)
+    } else {
+        let mut out = String::new();
+        let _ = writeln!(out, "detected_received_outputs: {}", detections.len());
+        render_detections(&mut out, &detections);
+        let _ = writeln!(
+            out,
+            "note: detected outputs are not a balance; spent status is not tracked."
+        );
+        emit(&out)
+    }
+}
+
+fn render_detections(out: &mut String, detections: &[DetectedOutput]) {
+    for d in detections {
+        let label = d.label.map_or_else(|| "-".to_string(), |m| m.to_string());
+        let _ = writeln!(
+            out,
+            "  height {:>4}  {}:{}  {} sat  label {}",
+            d.block.height, d.txid, d.vout, d.value_sats, label
+        );
+    }
+}
+
+fn render_meta(
+    db: &Path,
+    meta: &StoreMeta,
+    checkpoint: Option<sync_core::models::BlockRef>,
+    blocks: u64,
+    detected: u64,
+) -> String {
     let mut out = String::new();
-    // Writing to a `String` cannot fail.
     let mut line = |text: String| {
         let _ = writeln!(out, "{text}");
     };
-    line(format!("backend              : {}", report.backend_id));
-    line(format!("network              : {}", report.chain.network()));
-    line(format!(
-        "range                : {} ({}) ..= {} ({})",
-        report.first_block.height,
-        report.first_block.hash,
-        report.last_block.height,
-        report.last_block.hash
-    ));
-    line(format!(
-        "labels scanned       : {:?}",
-        report.labels_scanned
-    ));
-    line(format!("blocks scanned       : {}", report.blocks_scanned));
-    line(format!("transactions seen    : {}", report.txs_seen));
-    line(format!("transactions scanned : {}", report.txs_scanned));
-    for (reason, count) in &report.txs_skipped {
-        line(format!("  not scanned ({reason}): {count}"));
+    line(format!("store                : {}", db.display()));
+    line(format!("network              : {}", meta.chain.network()));
+    line(format!("backend              : {}", meta.backend_id));
+    line(format!("wallet id (public)   : {}", meta.wallet_id));
+    line(format!("labels scanned       : {:?}", meta.labels));
+    line(format!("birthday             : {}", meta.birthday));
+    line(format!("birthday basis       : {}", meta.birthday_basis));
+    line(format!("scanner version      : {}", meta.scanner_version));
+    match checkpoint {
+        Some(cp) => line(format!(
+            "checkpoint           : {} ({})",
+            cp.height, cp.hash
+        )),
+        None => line("checkpoint           : none (nothing scanned yet)".to_string()),
     }
-    line(format!(
-        "detected_received_outputs: {}",
-        report.detected_received_outputs.len()
-    ));
-    for d in &report.detected_received_outputs {
-        let label = d.label.map_or_else(|| "-".to_string(), |m| m.to_string());
+    line(format!("blocks stored        : {blocks}"));
+    line(format!("detected_received_outputs: {detected}"));
+    line("note: detected outputs are not a balance; spent status is not tracked.".to_string());
+    out
+}
+
+fn render_scan_report(report: &ScanReport) -> String {
+    let mut out = String::new();
+    {
+        let mut line = |text: String| {
+            let _ = writeln!(out, "{text}");
+        };
+        line(format!("backend              : {}", report.backend_id));
+        line(format!("network              : {}", report.chain.network()));
         line(format!(
-            "  height {:>4}  {}:{}  {} sat  label {}",
-            d.block.height, d.txid, d.vout, d.value_sats, label
+            "range                : {} ({}) ..= {} ({})",
+            report.first_block.height,
+            report.first_block.hash,
+            report.last_block.height,
+            report.last_block.hash
+        ));
+        line(format!(
+            "labels scanned       : {:?}",
+            report.labels_scanned
+        ));
+        line(format!("blocks scanned       : {}", report.blocks_scanned));
+        line(format!("transactions seen    : {}", report.txs_seen));
+        line(format!("transactions scanned : {}", report.txs_scanned));
+        for (reason, count) in &report.txs_skipped {
+            line(format!("  not scanned ({reason}): {count}"));
+        }
+        line(format!(
+            "detected_received_outputs: {}",
+            report.detected_received_outputs.len()
         ));
     }
-    line("note: detected outputs are not a balance; spent status is not tracked.".to_string());
+    render_detections(&mut out, &report.detected_received_outputs);
+    let _ = writeln!(
+        out,
+        "note: detected outputs are not a balance; spent status is not tracked."
+    );
+    out
+}
+
+fn render_sync_report(report: &SyncReport) -> String {
+    let mut out = String::new();
+    {
+        let mut line = |text: String| {
+            let _ = writeln!(out, "{text}");
+        };
+        line(format!("backend              : {}", report.backend_id));
+        line(format!("network              : {}", report.chain.network()));
+        match report.resumed_from {
+            Some(cp) => line(format!(
+                "resumed from         : {} ({})",
+                cp.height, cp.hash
+            )),
+            None => line(format!(
+                "resumed from         : nothing stored; starting at birthday {}",
+                report.birthday
+            )),
+        }
+        if let Some(reorg) = &report.reorg {
+            line(format!(
+                "REORG                : checkpoint {} ({}) is no longer on the chain",
+                reorg.abandoned_checkpoint.height, reorg.abandoned_checkpoint.hash
+            ));
+            line(format!(
+                "  rolled back to height {} ({} blocks, {} detections removed)",
+                reorg.fork_height,
+                reorg.blocks_rolled_back,
+                reorg.detections_removed.len()
+            ));
+        }
+        line(format!("blocks scanned       : {}", report.blocks_scanned));
+        line(format!("transactions seen    : {}", report.txs_seen));
+        line(format!("transactions scanned : {}", report.txs_scanned));
+        match report.checkpoint {
+            Some(cp) => line(format!(
+                "checkpoint           : {} ({})",
+                cp.height, cp.hash
+            )),
+            None => line("checkpoint           : none".to_string()),
+        }
+        line(format!(
+            "source tip           : {} ({})",
+            report.source_tip.height, report.source_tip.hash
+        ));
+        line(format!(
+            "caught up            : {}",
+            if report.caught_up {
+                "yes"
+            } else {
+                "no (stopped by --to / --max-blocks; run sync again to continue)"
+            }
+        ));
+        line(format!(
+            "newly detected_received_outputs: {}",
+            report.new_detections.len()
+        ));
+    }
+    render_detections(&mut out, &report.new_detections);
+    let _ = writeln!(
+        out,
+        "note: detected outputs are not a balance; spent status is not tracked."
+    );
     out
 }

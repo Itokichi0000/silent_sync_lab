@@ -238,6 +238,19 @@ impl ScanSource for FixtureSource {
             .ok_or_else(|| invalid("fixture contains no blocks"))
     }
 
+    fn block_ref(&self, height: u32) -> Result<BlockRef, SourceError> {
+        let (first, last) = (self.first_height(), self.last_height());
+        if height < first || height > last {
+            return Err(SourceError::RangeUnavailable {
+                from: height,
+                to: height,
+                available_from: first,
+                available_to: last,
+            });
+        }
+        Ok(self.blocks[(height - 1) as usize].block)
+    }
+
     fn fetch_range(&self, from: u32, to: u32) -> Result<ScanBatch, SourceError> {
         if from > to {
             return Err(SourceError::InvalidRange { from, to });

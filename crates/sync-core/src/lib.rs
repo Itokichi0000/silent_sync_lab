@@ -11,15 +11,15 @@
 //! orchestration, eligibility pre-checks that inspect scripts, data-source
 //! validation and fail-closed error handling.
 //!
-//! Scope implemented so far (Phase 1): fixture-backed scanning of a block
-//! range. Persistence, reorg handling, Bitcoin Core and oracle backends are
-//! *not* implemented yet; see `docs/PROGRESS.md`.
+//! What exists and what does not is tracked in `docs/PROGRESS.md`.
 
 pub mod engine;
 pub mod models;
 pub mod network;
 pub mod protocol;
 pub mod source;
+pub mod store;
+pub mod sync;
 
 /// Re-export of the exact `bitcoin` crate version used by the upstream scanner,
 /// so downstream crates cannot accidentally mix incompatible versions.
