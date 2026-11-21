@@ -12,12 +12,12 @@ EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
 | `wall_ms` | 計測区間の経過時間（ソースを開くところから、結果が確定するまで） | `std::time::Instant` |
 | `connect_ms` | そのうち、ソースを開くのにかかった時間 | 同上 |
 | `cpu_ms` | **クライアントプロセスの** CPU 時間（user + system） | Linux の `/proc/self/stat`。分解能は 1 tick（通常 10 ms）。他の OS では `null` |
-| `requests` / `downloaded_bytes` | 計測区間に送った HTTP リクエスト数と、受信した本文のバイト数 | `ScanSource::stats()` の差分。Oracle バックエンドは Oracle とヘッダ用ノードの合計 |
+| `requests` / `downloaded_bytes` | 計測区間に送った HTTP リクエスト数と、受信した本文のバイト数。**接続時のリクエストを含む**（`wall_ms` と同じ区間） | 計測区間の中で開いたソースの `ScanSource::stats()`。Oracle バックエンドは Oracle とヘッダ用ノードの合計。計測後に範囲の先頭・末尾のハッシュを記録するための 2 リクエストは含まない |
 | `txs_seen` | 見た tx の数（候補数） | スキャンのカウンタ |
 | `txs_scanned` | BIP352 の適格条件を満たし実際にスキャンした tx の数 | 同上 |
 | `detected_count` | 範囲全体で検出した出力数 | 同上 |
 | `verification_status` | そのファイルの最初の成功 run と検出集合が一致するか | 自動 |
-| `error` | 失敗した run のエラー（失敗も 1 件として記録する） | 自動 |
+| `error` | 失敗した run の**エラーの分類**（失敗も 1 件として記録する）。エラーの文面は txid・パス・URL を含み得るので結果には入れず、実行時の stderr にだけ出す | 自動 |
 
 **測らないもの（`null` のまま。推定値を入れない）**
 
@@ -56,8 +56,8 @@ EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
 | C | `core`（Bitcoin Core REST、フルブロック） | 実ノード上の署名済み tx のチェーン | 10 / 100 / 1000 ブロック |
 | D | `oracle-v2`（BlindBit Oracle HTTP + 自ノードのヘッダ） | 同じ実ノード | 同上 |
 
-- A / B のチェーン: 1 ブロックあたり coinbase + 4 tx（他人宛ての支払い、Taproot 同士、Taproot 出力なし、非適格入力）。10 ブロックごとに受信者宛ての支払い 1 件。署名はプレースホルダ（コンセンサス上は無効）。
-- C / D のチェーン: 1 ブロックあたり coinbase + 3 tx（silent payment、Taproot 同士、Taproot 出力なし）。10 ブロックごとに受信者宛て。すべて実際に署名されたコンセンサス有効な tx。
+- A / B のチェーン: 1 ブロックあたり coinbase + 4 tx（他人宛ての支払い、Taproot 同士、Taproot 出力なし、非適格入力。`tx seen` は coinbase を含めて 5）。10 ブロックごとに受信者宛ての支払い 1 件。署名はプレースホルダ（コンセンサス上は無効）。
+- C / D のチェーン: 1 ブロックあたり coinbase + 3 tx（silent payment、Taproot 同士、Taproot 出力なし。`tx seen` は coinbase を含めて 4）。10 ブロックごとに受信者宛て。すべて実際に署名されたコンセンサス有効な tx。
   計測範囲はシナリオの最初のブロックから始まる（それ以前の資金準備ブロックは範囲外）。
 - **A/B と C/D はチェーンが違うので、数値を直接比べない。** 比べてよいのは A と B、C と D、および同じバックエンドの範囲違い・モード違い。
 - 実ノードのブロックは非常に小さい（数百バイト〜1 KB 台）。**mainnet のブロックの大きさ・tx 数とは桁が違う**ので、絶対値は実運用の目安にならない。
@@ -83,6 +83,7 @@ done
 mkfifo "$OUT/hold" && (sleep infinity > "$OUT/hold" &)
 target/release/bench_node 1000 10 < "$OUT/hold" > "$OUT/node.json" &
 #   node.json から rest_url / oracle_url / from を読む。範囲は from..from+9, from..from+99, from..from+999
+#   （リポジトリに置く bench_node.json は、ここから URL を除いたもの）
 target/release/silent-sync bench --backends core,oracle-v2 \
     --core-rest-url "$REST" --oracle-url "$ORACLE" --from $FROM --to $((FROM + N - 1)) \
     --label 1 --repeat 5 --work-dir "$OUT" --output "$OUT/node_$N.json" \
@@ -99,7 +100,9 @@ target/release/silent-sync export --input ... --format json --output docs/benchm
 ## 6. 結果ファイル
 
 - 形式 `silent-sync-lab/benchmark-v1`（JSON）。`environment`（ツール・スキャナ・コンパイラのバージョン、ターゲット、ビルド種別、OS、論理 CPU 数、`--note`）と `runs`（全試行）。
-- **個人データを含めない**: txid、出力、ウォレット識別子、ファイルパス、URL は入らない（テスト `results_hold_no_personal_data`）。計測範囲の最初と最後のブロックハッシュは入る。
+- **個人データを含めない**: txid、出力、ウォレット識別子、ファイルパス、URL は入らない（テスト `results_hold_no_personal_data`、失敗した run について `failed_runs_record_a_class_not_the_error_text`）。計測範囲の最初と最後のブロックハッシュは入る。
+- 例外は `--note` で、利用者が書いた文字列がそのまま（1 行に整形して）記録される。書く内容は利用者の責任。
+- 結果は全 run の終了後に 1 回だけ書き出す。途中で中断すると何も残らない。
 - `export` は複数の結果ファイルをまとめられる（同じビルド・同じ機械のものに限る。違えば拒否）。
 
 ## 7. 既知の限界
