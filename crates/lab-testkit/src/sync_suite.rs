@@ -642,6 +642,102 @@ pub fn reorg_reaching_below_the_birthday_rescans_from_the_birthday(new_store: St
     assert_eq!(store.detections().expect("d").len(), 2);
 }
 
+/// A source may only make us discard as many scanned blocks as the caller
+/// allows. A deeper "reorganization" is refused before anything is changed,
+/// and without walking the store further down than the limit.
+pub fn reorgs_deeper_than_the_limit_are_refused(new_store: StoreFactory<'_>) {
+    let source = TestSource::new();
+    let depth = MAIN_TIP - FORK_HEIGHT; // 3 blocks of the main chain are not on the fork
+    let synced_on_main = || {
+        let mut store = new_store();
+        source.on_fork.set(false);
+        init(store.as_mut(), &source, 1);
+        run(&source, store.as_mut(), &SyncOptions::default());
+        source.on_fork.set(true);
+        store
+    };
+    let with_limit = |limit: Option<u32>| SyncOptions::default().with_max_reorg_depth(limit);
+    assert_eq!(
+        SyncOptions::default().max_reorg_depth,
+        Some(silent_sync::sync::DEFAULT_MAX_REORG_DEPTH)
+    );
+
+    for limit in [0, 1, depth - 1] {
+        let mut store = synced_on_main();
+        let before = (
+            store.checkpoint().expect("c"),
+            store.detections().expect("d"),
+            store.block_count().expect("n"),
+        );
+        let result = sync(
+            &source,
+            &scanner(),
+            &wallet_id(),
+            store.as_mut(),
+            &with_limit(Some(limit)),
+        );
+        assert_eq!(
+            result,
+            Err(SyncError::ReorgTooDeep {
+                backend_id: "fixture".to_string(),
+                checkpoint: MAIN_TIP,
+                // The search stops one block past the limit.
+                at_least: limit + 1,
+                limit,
+            }),
+            "limit {limit}"
+        );
+        assert_eq!(
+            (
+                store.checkpoint().expect("c"),
+                store.detections().expect("d"),
+                store.block_count().expect("n"),
+            ),
+            before,
+            "limit {limit}: a refused reorg must not change the store"
+        );
+    }
+
+    // Exactly at the limit, above it, and without a limit: followed.
+    for limit in [Some(depth), Some(depth + 1), None] {
+        let mut store = synced_on_main();
+        let report = run(&source, store.as_mut(), &with_limit(limit));
+        let reorg = report.reorg.expect("reorg");
+        assert_eq!(
+            (reorg.fork_height, reorg.blocks_rolled_back),
+            (FORK_HEIGHT, u64::from(depth)),
+            "limit {limit:?}"
+        );
+        assert_store_matches(store.as_ref(), source.fork_chain(), 1);
+    }
+
+    // A fork below the birthday discards the whole store: that counts too.
+    let birthday = FORK_HEIGHT + 1;
+    let mut store = new_store();
+    source.on_fork.set(false);
+    init(store.as_mut(), &source, birthday);
+    run(&source, store.as_mut(), &SyncOptions::default());
+    source.on_fork.set(true);
+    let stored = MAIN_TIP - birthday + 1;
+    assert!(matches!(
+        sync(
+            &source,
+            &scanner(),
+            &wallet_id(),
+            store.as_mut(),
+            &with_limit(Some(stored - 1))
+        ),
+        Err(SyncError::ReorgTooDeep { .. })
+    ));
+    assert_eq!(store.block_count().expect("n"), u64::from(stored));
+    let report = run(&source, store.as_mut(), &with_limit(Some(stored)));
+    assert_eq!(
+        report.reorg.expect("reorg").blocks_rolled_back,
+        u64::from(stored)
+    );
+    source.on_fork.set(false);
+}
+
 /// A source that is merely behind must not make us forget scanned blocks.
 pub fn a_source_behind_the_checkpoint_is_refused(new_store: StoreFactory<'_>) {
     let source = TestSource::new();
@@ -1088,6 +1184,7 @@ macro_rules! sync_store_suite {
             birthday_bounds_what_a_restored_wallet_finds,
             reorg_rolls_back_and_rescans,
             reorg_reaching_below_the_birthday_rescans_from_the_birthday,
+            reorgs_deeper_than_the_limit_are_refused,
             a_source_behind_the_checkpoint_is_refused,
             target_and_chunk_limits_are_respected,
             blocks_that_do_not_extend_the_checkpoint_are_refused,

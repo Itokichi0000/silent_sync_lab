@@ -107,7 +107,12 @@
 //! let _ = silent_sync::SyncOptions::default().with_chunk_size(10);
 //! ```
 //! ```compile_fail
-//! let _ = silent_sync::SyncOptions { chunk_size: 10, target_height: None, max_blocks: None };
+//! let _ = silent_sync::SyncOptions {
+//!     chunk_size: 10,
+//!     target_height: None,
+//!     max_blocks: None,
+//!     max_reorg_depth: None,
+//! };
 //! ```
 //! ```compile_fail
 //! fn f(keys: &silent_sync::ReceiverKeys) {

@@ -238,6 +238,27 @@ fn persistent_sync_follows_a_real_reorg() {
         node.generate_block_with(faucet.miner_address(), &[]);
     }
     assert_eq!(node.block_count(), tip + 1);
+
+    // The reorganization is two blocks deep. With a limit of one it is
+    // refused and nothing is forgotten; `none` and the default follow it.
+    let (code, stdout, stderr) = run(&[
+        "sync",
+        "--db",
+        &db,
+        "--backend",
+        "core",
+        "--core-rest-url",
+        &url,
+        "--max-reorg-depth",
+        "1",
+    ]);
+    assert_eq!(code, Some(1));
+    assert!(
+        stdout.is_empty() && stderr.contains("more than the limit of 1"),
+        "{stderr}"
+    );
+    assert_eq!(received(), want);
+
     let reorg = sync_json();
     assert_eq!(reorg["reorg"]["fork_height"], tip - 2);
     assert_eq!(reorg["reorg"]["blocks_rolled_back"], 2);

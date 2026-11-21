@@ -166,6 +166,11 @@ muts = [
     ("sync: max blocks ignored", S, ".is_some_and(|max| report.blocks_scanned >= max)", ".is_some_and(|_| false)"),
     ("sync: checkpoint not advanced after a commit", S, "            report.checkpoint = Some(*last);\n", ""),
     ("sync: progress callback not called", S, "on_commit(*last);", "let _ = (last, &on_commit);"),
+    ("sync: reorg depth limit ignored", S, "Some(limit) if depth > limit => Err(", "Some(limit) if false && depth > limit => Err("),
+    ("sync: reorg exactly at the limit refused", S, "Some(limit) if depth > limit => Err(", "Some(limit) if depth >= limit => Err("),
+    ("sync: reorg depth unchecked while walking down", S, "        too_deep(height)?;\n", ""),
+    ("sync: reorg below the birthday not counted", S, "            too_deep(meta.birthday - 1)?;\n", ""),
+    ("sync: no reorg depth limit by default", S, "max_reorg_depth: Some(DEFAULT_MAX_REORG_DEPTH),", "max_reorg_depth: None,"),
     # --- store invariants ---
     ("store: append need not extend checkpoint", T, "if u64::from(first.height) != u64::from(cp.height) + 1 || first.prev_hash != cp.hash {", "if false {"),
     ("store: first block need not be birthday", T, "if first.height != meta.birthday {", "if false {"),
@@ -221,6 +226,7 @@ muts = [
     ("cli: source chain not compared with --network", M, "    if source.chain() != expected {", "    if false {"),
     ("cli: store network unchecked", M, "if meta.chain.network() != network {", "if false {"),
     ("cli: empty birthday basis accepted", M, "if birthday_basis.trim().is_empty() {", "if false {"),
+    ("cli: reorg depth limit not passed on", M, "        .with_max_reorg_depth(args.max_reorg_depth.0);", "        ;"),
     ("cli: verify succeeds despite differences", M, "    if report.identical {\n        Ok(())", "    if true {\n        Ok(())"),
     ("cli: doctor succeeds with an unusable backend", M, "    if usable {\n        Ok(())", "    if true {\n        Ok(())"),
 ]

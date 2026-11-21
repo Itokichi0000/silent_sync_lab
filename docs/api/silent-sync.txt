@@ -404,10 +404,13 @@ impl SyncStore for MemoryStore
     pub chunk_size: u32,
     pub target_height: Option<u32>,
     pub max_blocks: Option<u64>,
+    pub max_reorg_depth: Option<u32>,
+pub const DEFAULT_MAX_REORG_DEPTH: u32 = 100;
 impl SyncOptions
     pub fn with_chunk_size(mut self, chunk_size: u32) -> Self
     pub fn with_target_height(mut self, target_height: Option<u32>) -> Self
     pub fn with_max_blocks(mut self, max_blocks: Option<u64>) -> Self
+    pub fn with_max_reorg_depth(mut self, max_reorg_depth: Option<u32>) -> Self
 impl Default for SyncOptions
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] #[non_exhaustive] pub enum SyncError
     #[error(transparent)]
@@ -445,6 +448,18 @@ impl Default for SyncOptions
     },
     #[error("chunk size must be at least 1")]
     InvalidChunkSize,
+    #[error(
+        "source `{backend_id}` no longer has the stored checkpoint {checkpoint} on its chain, \
+         and its chain differs for at least {at_least} blocks below it — more than the limit \
+         of {limit}; refusing to discard scanned blocks. If this reorganization is real, \
+         raise the limit"
+    )]
+    ReorgTooDeep {
+        backend_id: String,
+        checkpoint: u32,
+        at_least: u32,
+        limit: u32,
+    },
     #[error("sync interrupted after changing the store: {cause}")]
     Interrupted {
         cause: Box<SyncError>,

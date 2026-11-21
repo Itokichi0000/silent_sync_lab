@@ -54,7 +54,20 @@ pub struct SyncOptions {
     /// Stop after committing at least this many blocks in this call (whole
     /// chunks are always committed). The store stays resumable.
     pub max_blocks: Option<u64>,
+    /// Deepest reorganization that is followed: how many scanned blocks a
+    /// call may discard when the source's chain no longer contains the
+    /// checkpoint. A source that asks for more is refused and the store is
+    /// left as it is. `None` removes the limit.
+    ///
+    /// The default is [`DEFAULT_MAX_REORG_DEPTH`].
+    pub max_reorg_depth: Option<u32>,
 }
+
+/// Default for [`SyncOptions::max_reorg_depth`]: 100 blocks, the depth after
+/// which Bitcoin itself treats a block as final enough to spend its coinbase.
+/// A source that rewrites more than that is far more likely to be wrong, or
+/// lying, than to describe a real reorganization.
+pub const DEFAULT_MAX_REORG_DEPTH: u32 = 100;
 
 impl SyncOptions {
     /// Blocks fetched, scanned and committed per step (at least 1).
@@ -74,6 +87,12 @@ impl SyncOptions {
         self.max_blocks = max_blocks;
         self
     }
+
+    /// Deepest reorganization that is followed (`None`: no limit).
+    pub fn with_max_reorg_depth(mut self, max_reorg_depth: Option<u32>) -> Self {
+        self.max_reorg_depth = max_reorg_depth;
+        self
+    }
 }
 
 impl Default for SyncOptions {
@@ -82,6 +101,7 @@ impl Default for SyncOptions {
             chunk_size: 100,
             target_height: None,
             max_blocks: None,
+            max_reorg_depth: Some(DEFAULT_MAX_REORG_DEPTH),
         }
     }
 }
@@ -144,6 +164,25 @@ pub enum SyncError {
     #[error("chunk size must be at least 1")]
     /// `chunk_size` was 0.
     InvalidChunkSize,
+    /// Following the source would discard more scanned blocks than
+    /// [`SyncOptions::max_reorg_depth`] allows. Nothing was changed.
+    #[error(
+        "source `{backend_id}` no longer has the stored checkpoint {checkpoint} on its chain, \
+         and its chain differs for at least {at_least} blocks below it — more than the limit \
+         of {limit}; refusing to discard scanned blocks. If this reorganization is real, \
+         raise the limit"
+    )]
+    ReorgTooDeep {
+        /// Backend that was asked.
+        backend_id: String,
+        /// Height of the stored checkpoint.
+        checkpoint: u32,
+        /// Number of stored blocks found not to be on the source's chain
+        /// when the search was stopped (the fork is at least this deep).
+        at_least: u32,
+        /// The limit that was exceeded.
+        limit: u32,
+    },
     /// The call failed after it had already changed the store. `partial`
     /// reports exactly what was changed (a reorg rollback and/or committed
     /// chunks); the store is consistent and can be synced again.
@@ -325,6 +364,7 @@ fn resolve_reorg(
     meta: &StoreMeta,
     checkpoint: BlockRef,
     source_tip: BlockRef,
+    max_reorg_depth: Option<u32>,
 ) -> Result<Option<(ReorgReport, Option<BlockRef>)>, SyncError> {
     let on_chain = |height: u32, stored: BlockRef| -> Result<bool, SyncError> {
         Ok(source.block_ref(height)?.hash == stored.hash)
@@ -349,12 +389,29 @@ fn resolve_reorg(
         }
     }
 
-    // Walk down to the highest height where both sides agree.
+    // Walk down to the highest height where both sides agree — but not
+    // further than the caller allows: every step down is a scanned block
+    // that would be discarded. Checked before each step, so a source cannot
+    // make this loop walk the whole store, and before anything is changed.
+    let too_deep = |fork_height: u32| {
+        let depth = checkpoint.height - fork_height;
+        match max_reorg_depth {
+            Some(limit) if depth > limit => Err(SyncError::ReorgTooDeep {
+                backend_id: source.backend_id().to_string(),
+                checkpoint: checkpoint.height,
+                at_least: depth,
+                limit,
+            }),
+            _ => Ok(()),
+        }
+    };
     let mut height = checkpoint.height.min(source_tip.height);
     let fork_height = loop {
         if height < meta.birthday {
+            too_deep(meta.birthday - 1)?;
             break meta.birthday - 1;
         }
+        too_deep(height)?;
         let stored = store.block_at(height)?.ok_or_else(|| {
             StoreError::Invariant(format!(
                 "no stored block at height {height} below the checkpoint"
@@ -438,7 +495,14 @@ pub fn sync_with_progress(
     // From here on the checkpoint is tracked in memory: after the store has
     // been changed, nothing below depends on reading it back.
     let (reorg, checkpoint) = match resumed_from {
-        Some(stored) => match resolve_reorg(source, store, &meta, stored, source_tip)? {
+        Some(stored) => match resolve_reorg(
+            source,
+            store,
+            &meta,
+            stored,
+            source_tip,
+            options.max_reorg_depth,
+        )? {
             Some((reorg, after)) => (Some(reorg), after),
             None => (None, Some(stored)),
         },

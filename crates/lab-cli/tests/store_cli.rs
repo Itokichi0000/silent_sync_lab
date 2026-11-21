@@ -454,6 +454,21 @@ fn the_store_is_protected_from_misuse() {
         &sync_args(&db, &fork, &["--to", "99"]),
         "the store was not changed",
     );
+    // The other chain differs for three blocks below the checkpoint: with a
+    // lower limit the reorganization is refused, not followed.
+    for limit in ["0", "2"] {
+        let args = sync_args(&db, &fork, &["--max-reorg-depth", limit]);
+        refused(&args, &format!("more than the limit of {limit}"));
+        refused(&args, "the store was not changed");
+    }
+    // The limit is a number of blocks or `none`; anything else is a usage error.
+    let (code, stdout, stderr) = run(&sync_args(&db, FIXTURE, &["--max-reorg-depth", "many"]));
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(
+        stdout.is_empty() && stderr.contains("expected a number of blocks or `none`"),
+        "{stderr}"
+    );
+    ok(&sync_args(&db, FIXTURE, &["--max-reorg-depth", "none"]));
     // A different backend than the store was created with: a reachable one
     // is refused by the store's binding ...
     let node = FakeCoreRest::serve(&fixture_gen::generate());

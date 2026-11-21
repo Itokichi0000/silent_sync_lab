@@ -325,6 +325,10 @@ struct SyncArgs {
     /// Blocks fetched, scanned and committed per step.
     #[arg(long, default_value_t = 100)]
     chunk_size: u32,
+    /// Refuse a reorganization that would discard more than this many scanned
+    /// blocks (nothing is changed). `none` removes the limit.
+    #[arg(long, default_value = "100", value_parser = parse_reorg_limit)]
+    max_reorg_depth: ReorgLimit,
     /// Pause between chunks (milliseconds). For demonstrations and tests of
     /// interruption; has no other effect.
     #[arg(long, default_value_t = 0, hide = true)]
@@ -347,6 +351,20 @@ enum Backend {
     /// --fixture is given, otherwise your node). A model of an index server
     /// for comparisons; nothing is fetched from a third party.
     LocalIndex,
+}
+
+/// `--max-reorg-depth`: a number of blocks, or `none`.
+#[derive(Clone, Copy)]
+struct ReorgLimit(Option<u32>);
+
+fn parse_reorg_limit(value: &str) -> Result<ReorgLimit, String> {
+    if value == "none" {
+        return Ok(ReorgLimit(None));
+    }
+    value
+        .parse::<u32>()
+        .map(|depth| ReorgLimit(Some(depth)))
+        .map_err(|_| format!("expected a number of blocks or `none`, got `{value}`"))
 }
 
 fn parse_network(value: &str) -> Result<Network, String> {
@@ -1103,7 +1121,8 @@ fn sync_command(network: Network, args: SyncArgs) -> Result<(), Failure> {
     let options = SyncOptions::default()
         .with_chunk_size(args.chunk_size)
         .with_target_height(args.to)
-        .with_max_blocks(args.max_blocks);
+        .with_max_blocks(args.max_blocks)
+        .with_max_reorg_depth(args.max_reorg_depth.0);
     let delay = Duration::from_millis(args.chunk_delay_ms);
     let mut on_commit = |checkpoint: silent_sync::models::BlockRef| {
         eprintln!("committed up to height {}", checkpoint.height);

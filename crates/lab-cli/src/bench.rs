@@ -377,6 +377,7 @@ fn sync_class(e: &SyncError) -> &'static str {
         SyncError::TargetAboveTip { .. } => "sync: target above tip",
         SyncError::ChainMovedDuringSync { .. } => "sync: chain moved during sync",
         SyncError::InvalidChunkSize => "sync: invalid chunk size",
+        SyncError::ReorgTooDeep { .. } => "sync: reorganization deeper than the limit",
         SyncError::Interrupted { cause, .. } => sync_class(cause),
         _ => "sync: other error",
     }
