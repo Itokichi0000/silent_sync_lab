@@ -11,8 +11,10 @@
 //!
 //! * **Does**: scan block ranges ([`scan_range`]), keep a resumable,
 //!   reorg-aware store up to date ([`sync()`]), compare two data sources
-//!   ([`cross_check`]), and compare what a store holds with a fresh scan
-//!   through a reference source ([`audit_store`]).
+//!   ([`cross_check`]), compare what a store holds with a fresh scan
+//!   through a reference source ([`audit_store`]), and scan a store's range
+//!   again with more labels into a store that can replace it
+//!   ([`rescan_into`]).
 //! * **Does not**: send, sign, track spent outputs or balances, or store
 //!   keys. A detected output is not a balance.
 //! * **Mainnet is not representable**: [`Network`] has no mainnet variant,
@@ -114,6 +116,17 @@
 //! | `low-level` | per-transaction entry points of [`ReceiveScanner`] and their result types |
 //! | `secret-output-tweaks` | not part of the SDK; lets conformance tests read per-output tweaks |
 //!
+//! ## Labels
+//!
+//! A store is bound to the label set it was scanned with. Blocks already
+//! scanned were not checked for a label added later, and an output sent to
+//! an unknown label also hides the outputs after it in the same transaction,
+//! so adding a label means scanning the whole range again. [`rescan_into`]
+//! does that into a second store and says when it is safe to replace the
+//! first with it; `silent-sync-sqlite` provides the replacement as one atomic
+//! file rename. Keep a backup of the labels in use: a wallet restored without
+//! one does not find the payments made to it.
+//!
 //! ## Implementing your own source or store
 //!
 //! Implement [`ScanSource`] or [`SyncStore`]. A store must enforce
@@ -131,6 +144,7 @@ pub mod engine;
 pub mod models;
 pub mod network;
 pub mod protocol;
+pub mod rescan;
 pub mod source;
 pub mod store;
 pub mod sync;
@@ -145,6 +159,7 @@ pub use engine::{scan_range, ScanError, ScanReport};
 pub use models::{BlockRef, DetectedOutput, EvidenceKind, MatchProvenance};
 pub use network::{ChainIdentity, Network, NetworkError};
 pub use protocol::{ProtocolError, ReceiveScanner, ReceiverKeys, SilentPaymentAddress};
+pub use rescan::{rescan_into, RescanError, RescanReport};
 pub use source::{ScanSource, SourceError};
 pub use store::{MemoryStore, StoreError, StoreMeta, SyncStore};
 pub use sync::{

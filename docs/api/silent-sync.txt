@@ -106,6 +106,7 @@ pub mod engine;
 pub mod models;
 pub mod network;
 pub mod protocol;
+pub mod rescan;
 pub mod source;
 pub mod store;
 pub mod sync;
@@ -116,6 +117,7 @@ pub use engine::{scan_range, ScanError, ScanReport};
 pub use models::{BlockRef, DetectedOutput, EvidenceKind, MatchProvenance};
 pub use network::{ChainIdentity, Network, NetworkError};
 pub use protocol::{ProtocolError, ReceiveScanner, ReceiverKeys, SilentPaymentAddress};
+pub use rescan::{rescan_into, RescanError, RescanReport};
 pub use source::{ScanSource, SourceError};
 pub use store::{MemoryStore, StoreError, StoreMeta, SyncStore};
 pub use sync::{ new_store_meta, sync, sync_with_progress, ReorgReport, StopReason, SyncError, SyncOptions, SyncReport, };
@@ -270,6 +272,68 @@ impl ReceiveScanner
     #[cfg(any(feature = "local-index", feature = "low-level"))] low_level! fn public_tweak_data_ignoring_segwit_version_rule( tx: &Transaction, prevouts: &[TxOut], ) -> Result<Result<PublicKey, SkipReason>, ProtocolError>
     low_level! fn public_tweak_data( tx: &Transaction, prevouts: &[TxOut], ) -> Result<Result<PublicKey, SkipReason>, ProtocolError>
 impl fmt::Debug for ReceiveScanner
+
+## rescan.rs
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] #[non_exhaustive] pub enum RescanError
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Sync(#[from] SyncError),
+    #[error("the store is bound to a different {field}: stored `{stored}`, given `{given}`")]
+    BindingMismatch {
+        field: &'static str,
+        stored: String,
+        given: String,
+    },
+    #[error(
+        "the scanner does not know every label the store was scanned with (store {stored:?}, \
+         scanner {given:?}); outputs found through a missing label would be lost"
+    )]
+    LabelsRemoved {
+        stored: Vec<u32>,
+        given: Vec<u32>,
+    },
+    #[error(
+        "the fresh store is already bound to something else than this rescan would bind it to; \
+         use an empty store"
+    )]
+    FreshStoreInUse,
+    #[error(
+        "the rescan has reached {} but the store in use is at height {needed}; \
+         run it again to continue",
+        .reached.map_or_else(|| "no block yet".to_string(), |h| format!("height {h}"))
+    )]
+    Incomplete {
+        reached: Option<u32>,
+        needed: u32,
+    },
+    #[error(
+        "the checkpoint of the store in use (height {height}) is not on the chain that was \
+         rescanned; sync the store in use first, then start the rescan again with an empty \
+         fresh store"
+    )]
+    CheckpointNotOnChain {
+        height: u32,
+    },
+    #[error(
+        "the rescan did not reproduce {} output(s) the store in use holds; the two results \
+         disagree and the store was not replaced",
+        outputs.len()
+    )]
+    NotReproduced {
+        outputs: Vec<DetectedOutput>,
+    },
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)] #[non_exhaustive] pub struct RescanReport
+    pub previous_labels: Vec<u32>,
+    pub labels: Vec<u32>,
+    pub previous_scanner_version: String,
+    pub previous_checkpoint: Option<BlockRef>,
+    pub checkpoint: Option<BlockRef>,
+    pub reproduced: u64,
+    pub added: Vec<DetectedOutput>,
+    pub in_new_blocks: u64,
+    pub last_sync: SyncReport,
+pub fn rescan_into( source: &dyn ScanSource, scanner: &ReceiveScanner, wallet_id: &str, current: &dyn SyncStore, fresh: &mut dyn SyncStore, options: &SyncOptions, ) -> Result<RescanReport, RescanError>
 
 ## source/bitcoin_core.rs
 #[derive(Debug)] pub struct CoreRestSource

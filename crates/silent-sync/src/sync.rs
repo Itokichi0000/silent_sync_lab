@@ -307,12 +307,14 @@ pub(crate) struct BindingDifference {
 
 /// Compares a store's binding with what a call was given. `backend_id` is
 /// `None` when the call may legitimately use another backend than the one
-/// the store was filled from (auditing a store against a reference).
+/// the store was filled from (auditing a store against a reference);
+/// `scanner` is `None` when the call may use another label set or scanner
+/// version (scanning a store's range again into a new store).
 pub(crate) fn binding_difference(
     meta: &StoreMeta,
     chain: ChainIdentity,
     backend_id: Option<&str>,
-    scanner: &ReceiveScanner,
+    scanner: Option<&ReceiveScanner>,
     wallet_id: &str,
 ) -> Option<BindingDifference> {
     let differs = |field, stored: String, given: String, hint| {
@@ -344,14 +346,14 @@ pub(crate) fn binding_difference(
             );
         }
     }
-    let labels: Vec<u32> = scanner.labels().collect();
+    let labels: Vec<u32> = scanner?.labels().collect();
     if meta.labels != labels {
         return differs(
             "label set",
             format!("{:?}", meta.labels),
             format!("{labels:?}"),
-            "; blocks already scanned were not checked for other labels, so a new store \
-             (full rescan) is required",
+            "; blocks already scanned were not checked for other labels, so the stored range \
+             has to be scanned again into a new store (`rescan_into`)",
         );
     }
     if meta.scanner_version != SCANNER_VERSION {
@@ -359,7 +361,7 @@ pub(crate) fn binding_difference(
             "scanner version",
             meta.scanner_version.clone(),
             SCANNER_VERSION.to_string(),
-            "; a new store (full rescan) is required",
+            "; the stored range has to be scanned again into a new store (`rescan_into`)",
         );
     }
     None
@@ -375,7 +377,7 @@ fn check_binding(
         meta,
         source.chain(),
         Some(source.backend_id()),
-        scanner,
+        Some(scanner),
         wallet_id,
     ) {
         Some(d) => Err(SyncError::BindingMismatch {

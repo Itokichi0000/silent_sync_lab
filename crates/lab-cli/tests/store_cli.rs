@@ -757,3 +757,198 @@ fn an_interrupted_sync_reports_what_it_changed() {
     assert!(again["reorg"].is_null());
     assert_eq!(again["blocks_scanned"], 0);
 }
+
+/// `lab add-label`: the stored range is scanned again into a file next to
+/// the store, which replaces the store only when the rescan is complete and
+/// holds everything the store held.
+#[test]
+fn a_label_is_added_by_scanning_again_into_a_new_file() {
+    let temp = Temp::new("add-label");
+    let db = temp.db();
+    let rescan_file = format!("{db}.rescan");
+    let add = |fixture: &str, extra: &[&str]| -> (Option<i32>, String, String) {
+        let mut args = vec![
+            "lab",
+            "add-label",
+            "--db",
+            &db,
+            "--backend",
+            "fixture",
+            "--fixture",
+            fixture,
+        ];
+        args.extend_from_slice(extra);
+        run(&args)
+    };
+    let labels = |db: &str| json(&["status", "--db", db, "--json"])["binding"]["labels"].clone();
+    init(&db, "1");
+    ok(&sync_args(&db, FIXTURE, &[]));
+    assert_eq!(received(&db), expected());
+    let before = std::fs::read(&db).unwrap();
+
+    // Nothing to add: refused, and no file is left behind.
+    for known in [&["--label", "1"][..], &["--label", "0", "--label", "1"][..]] {
+        let (code, stdout, stderr) = add(FIXTURE, known);
+        assert_eq!(code, Some(1));
+        assert!(
+            stdout.is_empty()
+                && stderr.contains("already scans for the label set [0, 1]; nothing to add"),
+            "{stderr}"
+        );
+    }
+    // A label is required.
+    assert_eq!(add(FIXTURE, &[]).0, Some(2));
+    // A store filled from one backend is not rescanned through another.
+    let node = FakeCoreRest::serve(&fixture_gen::generate());
+    let (code, stdout, stderr) = run(&[
+        "lab",
+        "add-label",
+        "--db",
+        &db,
+        "--backend",
+        "core",
+        "--core-rest-url",
+        &node.url(),
+        "--label",
+        "5",
+    ]);
+    assert_eq!(code, Some(1));
+    assert!(
+        stdout.is_empty()
+            && stderr.contains(
+                "the store is bound to a different backend: stored `fixture`, given \
+                 `bitcoin_core_rest`"
+            )
+            && stderr.contains("rescan not completed: the store was not changed"),
+        "{stderr}"
+    );
+    assert!(!Path::new(&rescan_file).exists());
+    assert_eq!(std::fs::read(&db).unwrap(), before);
+
+    // Interrupted after three blocks: the store is as it was, and the
+    // partial rescan is kept next to it.
+    let (code, stdout, stderr) = add(
+        FIXTURE,
+        &["--label", "5", "--chunk-size", "3", "--max-blocks", "3"],
+    );
+    assert_eq!(code, Some(1));
+    assert!(
+        stdout.is_empty()
+            && stderr.contains("starting the rescan")
+            && stderr
+                .contains("the rescan has reached height 3 but the store in use is at height 8")
+            && stderr.contains("rescan not completed: the store was not changed")
+            && stderr.contains("run the command again to continue"),
+        "{stderr}"
+    );
+    assert!(Path::new(&rescan_file).exists());
+    assert_eq!(std::fs::read(&db).unwrap(), before);
+    assert_eq!(received(&db), expected());
+    assert_eq!(labels(&db), serde_json::json!([0, 1]));
+    // Meanwhile the store keeps working with its own label set.
+    ok(&sync_args(&db, FIXTURE, &[]));
+
+    // A different label now: the kept file belongs to the other rescan.
+    let (code, _, stderr) = add(FIXTURE, &["--label", "6"]);
+    assert_eq!(code, Some(1));
+    assert!(
+        stderr.contains("belongs to another rescan: delete it and run the command again"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(&db).unwrap(), before);
+
+    // Continued to the end: the store now holds what the label reveals.
+    let (code, stdout, stderr) = add(FIXTURE, &["--label", "5", "--chunk-size", "3"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stderr.contains("continuing the rescan"), "{stderr}");
+    assert!(
+        stdout.contains("labels               : [0, 1] -> [0, 1, 5]")
+            && stdout.contains("checkpoint           : height 8")
+            && stdout.contains("found again          : 7 (every output the store held)")
+            && stdout.contains("in newer blocks      : 0")
+            && stdout.contains("added by the rescan  : 1")
+            && stdout.contains("label 5  [full_block]")
+            && stdout.contains("not a balance")
+            && stdout.contains("the label set [0, 1, 5] is now fixed for this store"),
+        "{stdout}"
+    );
+    assert!(!Path::new(&rescan_file).exists());
+    assert_eq!(labels(&db), serde_json::json!([0, 1, 5]));
+    let now = received(&db);
+    assert_eq!(now.len(), 8);
+    assert!(expected().iter().all(|d| now.contains(d)));
+    assert_eq!(now.iter().filter(|d| d.4 == Some(5)).count(), 1);
+    assert_eq!(checkpoint_height(&db), Some(8));
+    // The store syncs and audits with its new label set.
+    let synced = json(&sync_args(&db, FIXTURE, &["--json"]));
+    assert_eq!(synced["blocks_scanned"], 0);
+    assert_eq!(synced["labels_scanned"], serde_json::json!([0, 1, 5]));
+    let audited = json(&[
+        "audit",
+        "--db",
+        &db,
+        "--backend",
+        "fixture",
+        "--fixture",
+        FIXTURE,
+        "--json",
+    ]);
+    assert_eq!(audited["identical"], true);
+    assert_eq!(audited["agreed"], 8);
+
+    // JSON form, with a label nothing was ever sent to.
+    let before = std::fs::read(&db).unwrap();
+    let (code, stdout, stderr) = add(FIXTURE, &["--label", "9", "--json"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["previous_labels"], serde_json::json!([0, 1, 5]));
+    assert_eq!(report["labels"], serde_json::json!([0, 1, 5, 9]));
+    assert_eq!(report["reproduced"], 8);
+    assert_eq!(report["added"].as_array().unwrap().len(), 0);
+    assert_eq!(report["checkpoint"]["height"], 8);
+    assert_eq!(received(&db), now);
+    assert_ne!(std::fs::read(&db).unwrap(), before, "the binding changed");
+
+    // The source shows another chain than the store is on: not replaced.
+    let before = std::fs::read(&db).unwrap();
+    let fork = temp.fork_fixture();
+    let (code, stdout, stderr) = add(&fork, &["--label", "7"]);
+    assert_eq!(code, Some(1));
+    assert!(
+        stdout.is_empty()
+            && stderr.contains("is not on the chain that was rescanned")
+            && stderr.contains("rescan not completed: the store was not changed")
+            && stderr.contains("run `sync`, delete"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(&db).unwrap(), before);
+    assert_eq!(labels(&db), serde_json::json!([0, 1, 5, 9]));
+
+    // A leftover that is not a store at all.
+    std::fs::write(&rescan_file, b"not a database").unwrap();
+    let (code, _, stderr) = add(FIXTURE, &["--label", "7"]);
+    assert_eq!(code, Some(1));
+    assert!(
+        stderr.contains("is left over from an earlier rescan and cannot be used"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(&db).unwrap(), before);
+
+    // Mainnet is refused here as everywhere.
+    let (code, _, stderr) = run(&[
+        "--network",
+        "mainnet",
+        "lab",
+        "add-label",
+        "--db",
+        &db,
+        "--backend",
+        "fixture",
+        "--fixture",
+        FIXTURE,
+        "--label",
+        "7",
+    ]);
+    assert_ne!(code, Some(0));
+    assert!(stderr.contains("mainnet"), "{stderr}");
+}

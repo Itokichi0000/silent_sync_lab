@@ -6,12 +6,13 @@
 use lab_testkit::{fixture_gen, sync_store_suite, sync_suite::block_refs, test_source::TestSource};
 use silent_sync::{
     protocol::ReceiveScanner,
+    rescan::rescan_into,
     source::ScanSource,
     store::{StoreError, SyncStore},
     sync::{new_store_meta, sync, SyncOptions},
 };
-use silent_sync_sqlite::SqliteStore;
-use std::path::PathBuf;
+use silent_sync_sqlite::{replace_store_file, SqliteStore};
+use std::path::{Path, PathBuf};
 
 fn sqlite_store() -> Box<dyn SyncStore> {
     Box::new(SqliteStore::in_memory().unwrap())
@@ -527,4 +528,225 @@ fn no_key_material_is_written_to_the_database() {
     }
     // Sanity: the public wallet id is there.
     assert!(text.contains(&keys.wallet_id()));
+}
+
+/// The last step of a rescan: the fresh file takes the place of the one in
+/// use, in one rename — and only if nothing the old file holds is lost.
+#[test]
+fn a_rescanned_file_replaces_the_one_in_use_only_if_nothing_is_lost() {
+    let db = TempDb::new("replace");
+    let source = TestSource::new();
+    let more_labels = ReceiveScanner::new(
+        &fixture_gen::lab_receiver_keys(),
+        &[fixture_gen::LABEL_USED, fixture_gen::LABEL_NOT_BACKED_UP],
+    )
+    .unwrap();
+    let fresh_path = db.dir.join("store.sqlite3.rescan");
+    let old = synced_store(&db);
+    let old_detections = old.detections().unwrap();
+    let old_meta = old.meta().unwrap().unwrap();
+    let checkpoint = old.checkpoint().unwrap().unwrap();
+
+    // Candidates that must be refused. Each is built at `candidate`, tried,
+    // and removed again; the file in use never changes.
+    let candidate = db.dir.join("candidate.sqlite3");
+    let in_use = std::fs::read(&db.path).unwrap();
+    let refused = |build: &dyn Fn(&Path), needle: &str| {
+        let _ = std::fs::remove_file(&candidate);
+        build(&candidate);
+        let before = std::fs::read(&candidate).ok();
+        match replace_store_file(&db.path, &candidate) {
+            Err(StoreError::Invariant(reason) | StoreError::Backend(reason)) => assert!(
+                reason.contains(needle),
+                "`{reason}` should mention `{needle}`"
+            ),
+            other => panic!("expected `{needle}`, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&db.path).unwrap(), in_use, "{needle}");
+        assert_eq!(std::fs::read(&candidate).ok(), before, "{needle}");
+    };
+    let with_meta = |path: &Path, meta: &silent_sync::store::StoreMeta| {
+        let mut store = SqliteStore::create(path).unwrap();
+        store.initialize(meta).unwrap();
+        store
+    };
+    let synced_as = |path: &Path,
+                     source: &TestSource,
+                     scanner: &ReceiveScanner,
+                     wallet: &str,
+                     birthday: u32,
+                     target: Option<u32>| {
+        let mut store = with_meta(
+            path,
+            &new_store_meta(source, scanner, wallet, birthday, "test"),
+        );
+        sync(
+            source,
+            scanner,
+            wallet,
+            &mut store,
+            &SyncOptions::default().with_target_height(target),
+        )
+        .unwrap();
+    };
+    drop(old);
+
+    refused(&|_| {}, "does not exist");
+    refused(
+        &|path| {
+            SqliteStore::create(path).unwrap();
+        },
+        "the new store has no binding",
+    );
+    let other_keys = fixture_gen::other_receiver_keys();
+    let other_scanner = ReceiveScanner::new(&other_keys, &[fixture_gen::LABEL_USED]).unwrap();
+    refused(
+        &|path| {
+            synced_as(
+                path,
+                &source,
+                &other_scanner,
+                &other_keys.wallet_id(),
+                1,
+                None,
+            )
+        },
+        "bound to different chains, receivers, backends or birthdays",
+    );
+    refused(
+        &|path| synced_as(path, &source, &more_labels, &wallet_id(), 2, None),
+        "bound to different chains, receivers, backends or birthdays",
+    );
+    refused(
+        &|path| {
+            let mut renamed = TestSource::new();
+            renamed.backend_id = "another_backend".to_string();
+            synced_as(path, &renamed, &more_labels, &wallet_id(), 1, None)
+        },
+        "bound to different chains, receivers, backends or birthdays",
+    );
+    refused(
+        &|path| {
+            let signet = silent_sync::ChainIdentity::for_network(silent_sync::Network::Signet);
+            assert_ne!(signet, old_meta.chain);
+            with_meta(
+                path,
+                &silent_sync::store::StoreMeta {
+                    chain: signet,
+                    ..old_meta.clone()
+                },
+            );
+        },
+        "bound to different chains, receivers, backends or birthdays",
+    );
+    let fewer_labels = ReceiveScanner::new(&fixture_gen::lab_receiver_keys(), &[]).unwrap();
+    refused(
+        &|path| synced_as(path, &source, &fewer_labels, &wallet_id(), 1, None),
+        "not scanned for every label of the old one (old [0, 1], new [0])",
+    );
+    refused(
+        &|path| {
+            synced_as(
+                path,
+                &source,
+                &more_labels,
+                &wallet_id(),
+                1,
+                Some(checkpoint.height - 1),
+            )
+        },
+        "does not contain the old store's checkpoint (height 8)",
+    );
+    refused(
+        &|path| {
+            let fork = TestSource::new();
+            fork.on_fork.set(true);
+            synced_as(path, &fork, &more_labels, &wallet_id(), 1, None)
+        },
+        "does not contain the old store's checkpoint (height 8)",
+    );
+    // The same blocks, one detection short, and one with another amount.
+    let blocks = block_refs(1, checkpoint.height);
+    for (edit, missing) in [
+        (
+            &(|d: &mut Vec<silent_sync::models::DetectedOutput>| {
+                d.remove(1);
+            }) as &dyn Fn(&mut Vec<silent_sync::models::DetectedOutput>),
+            1,
+        ),
+        (
+            &|d: &mut Vec<silent_sync::models::DetectedOutput>| d[4].value_sats += 1,
+            4,
+        ),
+    ] {
+        let lost = &old_detections[missing];
+        refused(
+            &|path| {
+                let mut detections = old_detections.clone();
+                edit(&mut detections);
+                with_meta(path, &old_meta)
+                    .append(&blocks, &detections)
+                    .unwrap();
+            },
+            &format!(
+                "does not hold the detection {}:{} of the old one",
+                lost.txid, lost.vout
+            ),
+        );
+    }
+    let _ = std::fs::remove_file(&candidate);
+    // A file in use that does not exist is not "replaced" either.
+    assert!(matches!(
+        replace_store_file(&db.dir.join("missing.sqlite3"), &db.path),
+        Err(StoreError::Backend(reason)) if reason.contains("does not exist")
+    ));
+    assert_eq!(std::fs::read(&db.path).unwrap(), in_use);
+
+    // The real thing: a rescan with one more label, then the replacement.
+    let current = SqliteStore::open(&db.path).unwrap();
+    let mut fresh = SqliteStore::create(&fresh_path).unwrap();
+    let report = rescan_into(
+        &source,
+        &more_labels,
+        &wallet_id(),
+        &current,
+        &mut fresh,
+        &SyncOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(report.reproduced, old_detections.len() as u64);
+    assert_eq!(report.added.len(), 1);
+    let rescanned = std::fs::read(&fresh_path).unwrap();
+    drop((current, fresh));
+
+    replace_store_file(&db.path, &fresh_path).unwrap();
+    assert!(!fresh_path.exists(), "the fresh file was moved, not copied");
+    assert_eq!(std::fs::read(&db.path).unwrap(), rescanned);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&db.path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let mut store = SqliteStore::open(&db.path).unwrap();
+    let meta = store.meta().unwrap().unwrap();
+    assert_eq!(
+        meta.labels,
+        vec![0, fixture_gen::LABEL_USED, fixture_gen::LABEL_NOT_BACKED_UP]
+    );
+    assert_eq!(store.checkpoint().unwrap(), Some(checkpoint));
+    let now = store.detections().unwrap();
+    assert_eq!(now.len(), old_detections.len() + 1);
+    assert!(old_detections.iter().all(|d| now.contains(d)));
+    // It syncs on with the new label set.
+    let again = sync(
+        &source,
+        &more_labels,
+        &wallet_id(),
+        &mut store,
+        &SyncOptions::default(),
+    )
+    .unwrap();
+    assert!(again.caught_up);
+    assert_eq!(again.blocks_scanned, 0);
 }

@@ -15,6 +15,7 @@ use silent_sync::{
     models::{DetectedOutput, EvidenceKind},
     network::{ChainIdentity, Network},
     protocol::ReceiveScanner,
+    rescan::{rescan_into, RescanError, RescanReport},
     source::{
         bitcoin_core::CoreRestSource,
         blindbit::BlindbitHttpSource,
@@ -26,7 +27,7 @@ use silent_sync::{
     sync::{new_store_meta, sync_with_progress, StopReason, SyncError, SyncOptions, SyncReport},
     verify::{cross_check, VerificationReport},
 };
-use silent_sync_sqlite::SqliteStore;
+use silent_sync_sqlite::{replace_store_file, SqliteStore};
 use std::{
     fmt::Write as _,
     io::{self, Write as _},
@@ -205,9 +206,32 @@ enum LabAction {
         #[arg(long)]
         birthday_basis: String,
         /// Label integer to scan for in addition to the change label
-        /// (repeatable). Cannot be changed later without a new store.
+        /// (repeatable). Adding one later means scanning everything again
+        /// (`lab add-label`).
         #[arg(long = "label")]
         labels: Vec<u32>,
+    },
+    /// Add labels to the lab store. Blocks already scanned were not checked
+    /// for them, so the whole stored range is scanned again — into a new
+    /// file next to the store, which replaces the store only when it holds
+    /// everything the store held. Interrupted, it continues on the next run.
+    AddLabel {
+        #[command(flatten)]
+        db: DbArg,
+        #[command(flatten)]
+        source: SourceArgs,
+        /// Label integer to add (repeatable).
+        #[arg(long = "label", required = true)]
+        labels: Vec<u32>,
+        /// Blocks fetched, scanned and committed per step.
+        #[arg(long, default_value_t = 100)]
+        chunk_size: u32,
+        /// Stop after this many blocks (whole chunks); run again to continue.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+        /// Print the report as JSON on stdout.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -464,6 +488,26 @@ fn run(cli: Cli) -> Result<(), Failure> {
                     labels,
                 },
         } => lab_init(network, &db.db, &source, birthday, &birthday_basis, &labels),
+        Command::Lab {
+            action:
+                LabAction::AddLabel {
+                    db,
+                    source,
+                    labels,
+                    chunk_size,
+                    max_blocks,
+                    json,
+                },
+        } => lab_add_label(
+            network,
+            &db.db,
+            &source,
+            &labels,
+            SyncOptions::default()
+                .with_chunk_size(chunk_size)
+                .with_max_blocks(max_blocks),
+            json,
+        ),
         Command::Scan(args) => scan(network, args),
         Command::Sync(args) => sync_command(network, args),
         Command::Status { db, json } => status(network, &db.db, json),
@@ -1218,6 +1262,152 @@ fn lab_init(
         );
     }
     emit(&render_meta(db, &meta, None, 0, 0))
+}
+
+/// Where the rescan of `db` is kept until it replaces `db`: next to it, so
+/// that the replacement is a rename within one file system.
+fn rescan_path(db: &Path) -> PathBuf {
+    let mut name = db.file_name().unwrap_or_default().to_os_string();
+    name.push(".rescan");
+    db.with_file_name(name)
+}
+
+fn lab_add_label(
+    network: Network,
+    db: &Path,
+    source_args: &SourceArgs,
+    add: &[u32],
+    options: SyncOptions,
+    json: bool,
+) -> Result<(), Failure> {
+    let (store, meta) = open_store(network, db)?;
+    let mut labels = meta.labels.clone();
+    labels.extend(add.iter().copied().filter(|m| !meta.labels.contains(m)));
+    labels.sort_unstable();
+    labels.dedup();
+    if labels == meta.labels {
+        return Err(Failure::error(format!(
+            "the store already scans for the label set {:?}; nothing to add",
+            meta.labels
+        )));
+    }
+    let source = open_source(network, source_args)?;
+    let keys = lab_keys::lab_receiver_keys().map_err(Failure::error)?;
+    let extra: Vec<u32> = labels.iter().copied().filter(|&m| m != 0).collect();
+    let scanner = ReceiveScanner::new(&keys, &extra).map_err(fail)?;
+
+    let fresh_path = rescan_path(db);
+    let continued = fresh_path.exists();
+    let mut fresh = if continued {
+        SqliteStore::open(&fresh_path).map_err(|e| {
+            Failure::error(format!(
+                "{e}\n{} is left over from an earlier rescan and cannot be used; delete it and \
+                 run the command again. The store was not changed",
+                fresh_path.display()
+            ))
+        })?
+    } else {
+        SqliteStore::create(&fresh_path).map_err(fail)?
+    };
+    eprintln!(
+        "{} the rescan of {} with labels {:?} on `{}` ({network}); the store is not changed \
+         until the rescan is complete",
+        if continued { "continuing" } else { "starting" },
+        db.display(),
+        labels,
+        source.backend_id()
+    );
+    let result = rescan_into(
+        source.as_ref(),
+        &scanner,
+        &keys.wallet_id(),
+        &store,
+        &mut fresh,
+        &options,
+    );
+    let report = match result {
+        Ok(report) => report,
+        Err(e) => {
+            let untouched = fresh.meta().ok().flatten().is_none();
+            drop(fresh);
+            let kept = format!(
+                "what was scanned so far is kept in {}",
+                fresh_path.display()
+            );
+            let advice = match &e {
+                // Nothing was written: do not leave an empty file behind.
+                _ if untouched && !continued => {
+                    let _ = std::fs::remove_file(&fresh_path);
+                    String::new()
+                }
+                RescanError::Incomplete { .. } | RescanError::Sync(_) => {
+                    format!("; {kept}, run the command again to continue")
+                }
+                RescanError::FreshStoreInUse => format!(
+                    "; {} belongs to another rescan: delete it and run the command again",
+                    fresh_path.display()
+                ),
+                RescanError::CheckpointNotOnChain { .. } => format!(
+                    "; run `sync`, delete {} and add the label again",
+                    fresh_path.display()
+                ),
+                _ => format!("; {kept}"),
+            };
+            return Err(Failure::error(format!(
+                "{e}\nrescan not completed: the store was not changed{advice}"
+            )));
+        }
+    };
+    drop((store, fresh));
+    replace_store_file(db, &fresh_path).map_err(|e| {
+        Failure::error(format!(
+            "{e}\nthe rescan is complete but the store was not replaced; it is kept in {}",
+            fresh_path.display()
+        ))
+    })?;
+
+    if json {
+        emit_json(&report)
+    } else {
+        emit(&render_rescan_report(db, &report))
+    }
+}
+
+fn render_rescan_report(db: &Path, report: &RescanReport) -> String {
+    let mut out = String::new();
+    {
+        let mut line = |text: String| {
+            let _ = writeln!(out, "{text}");
+        };
+        line(format!("store                : {}", db.display()));
+        line(format!(
+            "labels               : {:?} -> {:?}",
+            report.previous_labels, report.labels
+        ));
+        line(format!(
+            "checkpoint           : {}",
+            report
+                .checkpoint
+                .map_or_else(|| "none".to_string(), |cp| format!("height {}", cp.height))
+        ));
+        line(format!(
+            "found again          : {} (every output the store held)",
+            report.reproduced
+        ));
+        line(format!("in newer blocks      : {}", report.in_new_blocks));
+        line(format!("added by the rescan  : {}", report.added.len()));
+    }
+    render_detections(&mut out, &report.added);
+    let _ = writeln!(
+        out,
+        "note: detected outputs are not a balance; spent status is not tracked."
+    );
+    let _ = writeln!(
+        out,
+        "note: the label set {:?} is now fixed for this store; back the labels up.",
+        report.labels
+    );
+    out
 }
 
 /// Opens the store and checks it against `--network`.

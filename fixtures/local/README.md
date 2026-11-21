@@ -4,7 +4,7 @@
 |---|---|
 | `regtest_basic_v1.json` | Phase 1 用の決定的な regtest 形チェーン（高さ 1〜8、17 tx） |
 
-- 生成器: `crates/lab-testkit/src/fixture_gen.rs`（**テストデータ生成専用**。上流 `bdk_sp` の送信関数を使う唯一の場所で、`sync-core` 本体と CLI には含まれない）
+- 生成器: `crates/lab-testkit/src/fixture_gen.rs`（**テストデータ生成専用**。上流 `bdk_sp` の送信関数を使う唯一の場所で、`silent-sync` 本体と CLI には含まれない）
 - 再生成: `cargo run -p lab-testkit --bin gen_fixture -- fixtures/local/regtest_basic_v1.json`
 - テスト `committed_fixture_is_exactly_what_the_generator_produces` が、コミット済みファイルと生成結果の完全一致を検査する。
 

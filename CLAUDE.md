@@ -29,13 +29,14 @@ crates/silent-sync/   同期コア（SDK 候補）。CLI・表示・ストレー
   src/sync.rs         永続同期（再開、reorg と深さの上限、中断時の部分レポート）
   src/verify.rs       cross_check（2 ソースの突き合わせと差分の説明）
   src/audit.rs        audit_store（保存済みの検出結果と参照ソースの再スキャンの照合。ストアは読むだけ）
+  src/rescan.rs       rescan_into（ラベル追加時の再スキャン。別のストアに作り直し、差し替えは呼び出し側）
   src/source/         ScanSource トレイト、Evidence（FullBlock / TweakIndex）、fixture アダプタ
   src/source/block_check.rs   フルブロック共通の構造検査
   src/source/http.rs          ループバック専用 HTTP（IPv4 リテラル + ポート、上限つき）
   src/source/bitcoin_core.rs  Bitcoin Core REST バックエンド（feature `core-rest`、genesis からヘッダ鎖を検証）
   src/source/blindbit.rs      BlindBit Oracle v2 HTTP バックエンド（feature `blindbit-http`）
   src/source/local_index.rs   フルブロックから手元で計算する tweak インデックス
-crates/silent-sync-sqlite/ SyncStore の SQLite 実装。依存方向は silent-sync-sqlite → silent-sync
+crates/silent-sync-sqlite/ SyncStore の SQLite 実装と、再スキャン後のファイル差し替え。依存方向は silent-sync-sqlite → silent-sync
 crates/lab-cli/     薄い CLI（バイナリ名 silent-sync）。依存方向は lab-cli → silent-sync, silent-sync-sqlite
   src/bench.rs        計測・集計・エクスポート（結果に個人データを入れない）
 crates/lab-testkit/ テスト専用。fixture / 長いチェーンの生成、regtest ノード・Oracle 操作、

@@ -17,6 +17,7 @@ use silent_sync::{
     models::{BlockRef, DetectedOutput, EvidenceKind},
     network::{ChainIdentity, Network},
     protocol::{ReceiveScanner, TxScanOutcome},
+    rescan::{rescan_into, RescanError},
     source::{
         fixture::FixtureSource,
         local_index::{IndexPolicy, LocalTweakIndex},
@@ -1681,6 +1682,485 @@ pub fn audit_refuses_what_it_cannot_carry_out(new_store: StoreFactory<'_>) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// rescan_into: the stored range scanned again into a fresh store
+// ---------------------------------------------------------------------------
+
+fn scanner_with(labels: &[u32]) -> ReceiveScanner {
+    ReceiveScanner::new(&fixture_gen::lab_receiver_keys(), labels).expect("scanner")
+}
+
+fn snapshot(
+    store: &dyn SyncStore,
+) -> (
+    Option<StoreMeta>,
+    Option<BlockRef>,
+    Vec<DetectedOutput>,
+    u64,
+) {
+    (
+        store.meta().expect("meta"),
+        store.checkpoint().expect("checkpoint"),
+        store.detections().expect("detections"),
+        store.block_count().expect("count"),
+    )
+}
+
+/// What a stateless scan with `scanner` finds on `chain`.
+fn reference_with(
+    scanner: &ReceiveScanner,
+    chain: &dyn ScanSource,
+    from: u32,
+    to: u32,
+) -> Vec<DetectedOutput> {
+    let regtest = ChainIdentity::for_network(Network::Regtest);
+    let mut found = scan_range(chain, scanner, regtest, from, to)
+        .expect("reference scan")
+        .detected_received_outputs;
+    silent_sync::store::sort_detections(&mut found);
+    found
+}
+
+/// A label added later: the range is scanned again into a fresh store, which
+/// then holds everything the old one held plus what the label reveals. The
+/// store in use is never touched.
+pub fn a_rescan_with_more_labels_keeps_everything_and_adds_what_they_reveal(
+    new_store: StoreFactory<'_>,
+) {
+    let source = TestSource::new();
+    let mut current = new_store();
+    init(current.as_mut(), &source, 2);
+    run(&source, current.as_mut(), &options(3));
+    let before = snapshot(current.as_ref());
+    let held = before.2.clone();
+
+    let more = scanner_with(&[LABEL_USED, LABEL_NOT_BACKED_UP]);
+    let mut fresh = new_store();
+    let report = rescan_into(
+        &source,
+        &more,
+        &wallet_id(),
+        current.as_ref(),
+        fresh.as_mut(),
+        &options(3),
+    )
+    .expect("rescan");
+
+    let expected = reference_with(&more, source.main_chain(), 2, MAIN_TIP);
+    assert!(
+        expected.len() > held.len(),
+        "the added label reveals something"
+    );
+    assert_eq!(fresh.detections().expect("d"), expected);
+    assert_eq!(report.previous_labels, vec![0, LABEL_USED]);
+    assert_eq!(report.labels, vec![0, LABEL_USED, LABEL_NOT_BACKED_UP]);
+    assert_eq!(report.previous_scanner_version, SCANNER_VERSION);
+    assert_eq!(report.previous_checkpoint, before.1);
+    assert_eq!(report.checkpoint, before.1);
+    assert_eq!(report.reproduced, held.len() as u64);
+    assert_eq!(report.in_new_blocks, 0);
+    let added: Vec<DetectedOutput> = expected
+        .iter()
+        .filter(|d| !held.contains(d))
+        .cloned()
+        .collect();
+    assert_eq!(report.added, added);
+    assert!(report
+        .added
+        .iter()
+        .any(|d| d.label == Some(LABEL_NOT_BACKED_UP)));
+    assert!(report.last_sync.caught_up);
+    assert_eq!(report.last_sync.labels_scanned, report.labels);
+
+    // The fresh store is bound like the old one, except for the labels.
+    let old_meta = before.0.clone().expect("meta");
+    let new_meta = fresh.meta().expect("meta").expect("initialized");
+    assert_eq!(new_meta.labels, vec![0, LABEL_USED, LABEL_NOT_BACKED_UP]);
+    assert_eq!(
+        StoreMeta {
+            labels: old_meta.labels.clone(),
+            ..new_meta
+        },
+        old_meta
+    );
+    assert_eq!(fresh.block_count().expect("n"), before.3);
+    assert_eq!(
+        snapshot(current.as_ref()),
+        before,
+        "the store in use is only read"
+    );
+
+    // It takes over: syncing and auditing with the new label set work on it,
+    // and the old label set is refused.
+    let again = sync(
+        &source,
+        &more,
+        &wallet_id(),
+        fresh.as_mut(),
+        &SyncOptions::default(),
+    )
+    .expect("sync");
+    assert_eq!(again.blocks_scanned, 0);
+    assert!(
+        audit_store(
+            &source,
+            &more,
+            &wallet_id(),
+            fresh.as_ref(),
+            &AuditOptions::default()
+        )
+        .expect("audit")
+        .identical
+    );
+    assert!(matches!(
+        sync(
+            &source,
+            &scanner(),
+            &wallet_id(),
+            fresh.as_mut(),
+            &SyncOptions::default()
+        ),
+        Err(SyncError::BindingMismatch {
+            field: "label set",
+            ..
+        })
+    ));
+
+    // The same label set: a plain rebuild, which adds nothing.
+    let mut rebuilt = new_store();
+    let report = rescan_into(
+        &source,
+        &scanner(),
+        &wallet_id(),
+        current.as_ref(),
+        rebuilt.as_mut(),
+        &SyncOptions::default(),
+    )
+    .expect("rebuild");
+    assert_eq!(report.previous_labels, report.labels);
+    assert!(report.added.is_empty());
+    assert_eq!(report.reproduced, held.len() as u64);
+    assert_eq!(snapshot(rebuilt.as_ref()), before);
+
+    // Blocks the source has beyond the old checkpoint are scanned as well,
+    // and counted separately.
+    let mut behind = new_store();
+    init(behind.as_mut(), &source, 1);
+    run(
+        &source,
+        behind.as_mut(),
+        &SyncOptions::default().with_target_height(Some(4)),
+    );
+    let held_behind = behind.detections().expect("d");
+    let mut ahead = new_store();
+    let report = rescan_into(
+        &source,
+        &more,
+        &wallet_id(),
+        behind.as_ref(),
+        ahead.as_mut(),
+        &SyncOptions::default(),
+    )
+    .expect("rescan");
+    assert_eq!(report.previous_checkpoint.map(|c| c.height), Some(4));
+    assert_eq!(report.checkpoint.map(|c| c.height), Some(MAIN_TIP));
+    let all = reference_with(&more, source.main_chain(), 1, MAIN_TIP);
+    assert_eq!(ahead.detections().expect("d"), all);
+    assert_eq!(report.reproduced, held_behind.len() as u64);
+    assert_eq!(
+        report.in_new_blocks,
+        all.iter().filter(|d| d.block.height > 4).count() as u64
+    );
+    assert!(report.in_new_blocks > 0);
+    assert_eq!(
+        report.added,
+        all.iter()
+            .filter(|d| d.block.height <= 4 && !held_behind.contains(d))
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+
+    // A store that has not scanned anything yet.
+    let mut unsynced = new_store();
+    init(unsynced.as_mut(), &source, 1);
+    let mut first = new_store();
+    let report = rescan_into(
+        &source,
+        &more,
+        &wallet_id(),
+        unsynced.as_ref(),
+        first.as_mut(),
+        &SyncOptions::default(),
+    )
+    .expect("rescan");
+    assert_eq!((report.previous_checkpoint, report.reproduced), (None, 0));
+    assert!(report.added.is_empty());
+    assert_eq!(report.in_new_blocks, all.len() as u64);
+    assert_eq!(first.detections().expect("d"), all);
+}
+
+/// A rescan that stops early keeps what it has, continues when called again,
+/// and is not `Ok` before the fresh store reaches the store in use.
+pub fn an_unfinished_rescan_is_an_error_and_can_be_continued(new_store: StoreFactory<'_>) {
+    let source = TestSource::new();
+    let mut current = new_store();
+    init(current.as_mut(), &source, 1);
+    run(&source, current.as_mut(), &SyncOptions::default());
+    let before = snapshot(current.as_ref());
+    let more = scanner_with(&[LABEL_USED, LABEL_NOT_BACKED_UP]);
+    let rescan = |fresh: &mut dyn SyncStore, opts: &SyncOptions| {
+        rescan_into(&source, &more, &wallet_id(), current.as_ref(), fresh, opts)
+    };
+
+    // Limited by the caller.
+    let mut fresh = new_store();
+    let step = options(3).with_max_blocks(Some(3));
+    assert_eq!(
+        rescan(fresh.as_mut(), &step),
+        Err(RescanError::Incomplete {
+            reached: Some(3),
+            needed: MAIN_TIP
+        })
+    );
+    assert_eq!(
+        rescan(fresh.as_mut(), &step),
+        Err(RescanError::Incomplete {
+            reached: Some(6),
+            needed: MAIN_TIP
+        })
+    );
+    // An outage in between: the sync error is passed on, progress is kept.
+    source.fetches_left.set(Some(0));
+    assert!(matches!(
+        rescan(fresh.as_mut(), &step),
+        Err(RescanError::Sync(SyncError::Scan(ScanError::Source(
+            SourceError::Unavailable(_)
+        ))))
+    ));
+    source.fetches_left.set(None);
+    assert_eq!(fresh.checkpoint().expect("c").map(|c| c.height), Some(6));
+    let report = rescan(fresh.as_mut(), &step).expect("rescan");
+    assert_eq!(report.checkpoint, before.1);
+    assert_eq!(report.reproduced, before.2.len() as u64);
+    assert_eq!(report.last_sync.blocks_scanned, 2, "only the last call");
+    assert_eq!(
+        fresh.detections().expect("d"),
+        reference_with(&more, source.main_chain(), 1, MAIN_TIP)
+    );
+
+    // A target below the store in use.
+    let mut short = new_store();
+    assert_eq!(
+        rescan(
+            short.as_mut(),
+            &SyncOptions::default().with_target_height(Some(MAIN_TIP - 1))
+        ),
+        Err(RescanError::Incomplete {
+            reached: Some(MAIN_TIP - 1),
+            needed: MAIN_TIP
+        })
+    );
+
+    // A source that is behind the store in use.
+    source.visible_tip.set(Some(5));
+    let mut lagging = new_store();
+    assert_eq!(
+        rescan(lagging.as_mut(), &SyncOptions::default()),
+        Err(RescanError::Incomplete {
+            reached: Some(5),
+            needed: MAIN_TIP
+        })
+    );
+    source.visible_tip.set(None);
+    assert!(rescan(lagging.as_mut(), &SyncOptions::default()).is_ok());
+
+    assert_eq!(snapshot(current.as_ref()), before);
+}
+
+/// Everything that would make the fresh store a wrong replacement is
+/// refused; what is refused before scanning leaves the fresh store empty.
+pub fn a_rescan_that_could_lose_something_is_refused(new_store: StoreFactory<'_>) {
+    let source = TestSource::new();
+    let mut current = new_store();
+    init(current.as_mut(), &source, 1);
+    run(&source, current.as_mut(), &SyncOptions::default());
+    let before = snapshot(current.as_ref());
+    let more = scanner_with(&[LABEL_USED, LABEL_NOT_BACKED_UP]);
+    let all = SyncOptions::default();
+
+    // Not a store.
+    let mut fresh = new_store();
+    let unbound = new_store();
+    assert_eq!(
+        rescan_into(
+            &source,
+            &more,
+            &wallet_id(),
+            unbound.as_ref(),
+            fresh.as_mut(),
+            &all
+        ),
+        Err(RescanError::Store(StoreError::NotInitialized))
+    );
+
+    // Labels can be added, not removed or exchanged.
+    for labels in [&[][..], &[LABEL_NOT_BACKED_UP][..]] {
+        let fewer = scanner_with(labels);
+        assert_eq!(
+            rescan_into(
+                &source,
+                &fewer,
+                &wallet_id(),
+                current.as_ref(),
+                fresh.as_mut(),
+                &all
+            ),
+            Err(RescanError::LabelsRemoved {
+                stored: vec![0, LABEL_USED],
+                given: fewer.labels().collect(),
+            })
+        );
+    }
+
+    // Another receiver, backend or chain.
+    let other = fixture_gen::other_receiver_keys();
+    let other_scanner = ReceiveScanner::new(&other, &[LABEL_USED]).expect("scanner");
+    assert!(matches!(
+        rescan_into(
+            &source,
+            &other_scanner,
+            &other.wallet_id(),
+            current.as_ref(),
+            fresh.as_mut(),
+            &all
+        ),
+        Err(RescanError::BindingMismatch {
+            field: "wallet",
+            ..
+        })
+    ));
+    let mut renamed = TestSource::new();
+    renamed.backend_id = "another_backend".to_string();
+    assert!(matches!(
+        rescan_into(
+            &renamed,
+            &more,
+            &wallet_id(),
+            current.as_ref(),
+            fresh.as_mut(),
+            &all
+        ),
+        Err(RescanError::BindingMismatch {
+            field: "backend",
+            ..
+        })
+    ));
+    source
+        .chain_override
+        .set(Some(ChainIdentity::for_network(Network::Signet)));
+    assert!(matches!(
+        rescan_into(
+            &source,
+            &more,
+            &wallet_id(),
+            current.as_ref(),
+            fresh.as_mut(),
+            &all
+        ),
+        Err(RescanError::BindingMismatch { field: "chain", .. })
+    ));
+    source.chain_override.set(None);
+    assert_eq!(
+        fresh.meta().expect("meta"),
+        None,
+        "nothing refused so far has touched the fresh store"
+    );
+
+    // A fresh store that already belongs to something else.
+    let mut used = new_store();
+    init(used.as_mut(), &source, 1);
+    let used_before = snapshot(used.as_ref());
+    assert_eq!(
+        rescan_into(
+            &source,
+            &more,
+            &wallet_id(),
+            current.as_ref(),
+            used.as_mut(),
+            &all
+        ),
+        Err(RescanError::FreshStoreInUse)
+    );
+    let mut other_birthday = new_store();
+    init(other_birthday.as_mut(), &source, 2);
+    assert_eq!(
+        rescan_into(
+            &source,
+            &scanner(),
+            &wallet_id(),
+            current.as_ref(),
+            other_birthday.as_mut(),
+            &all
+        ),
+        Err(RescanError::FreshStoreInUse)
+    );
+    assert_eq!(snapshot(used.as_ref()), used_before);
+
+    // The chain the source shows no longer contains the checkpoint of the
+    // store in use.
+    source.on_fork.set(true);
+    let mut on_fork = new_store();
+    assert_eq!(
+        rescan_into(
+            &source,
+            &more,
+            &wallet_id(),
+            current.as_ref(),
+            on_fork.as_mut(),
+            &all
+        ),
+        Err(RescanError::CheckpointNotOnChain { height: MAIN_TIP })
+    );
+    source.on_fork.set(false);
+
+    // The store in use holds something the rescan does not find again:
+    // an output that does not exist, and an amount that is not the chain's.
+    let honest = reference(source.main_chain(), 1, MAIN_TIP);
+    let invented_txid = Txid::from_byte_array([9; 32]);
+    let holds_more = store_holding(new_store, &source, &|d| {
+        let mut invented = d[0].clone();
+        invented.txid = invented_txid;
+        d.push(invented);
+        d[3].value_sats += 1;
+    });
+    let mut replacement = new_store();
+    match rescan_into(
+        &source,
+        &more,
+        &wallet_id(),
+        holds_more.as_ref(),
+        replacement.as_mut(),
+        &all,
+    ) {
+        Err(RescanError::NotReproduced { outputs }) => {
+            let mut ids: Vec<(Txid, u32, u64)> = outputs
+                .iter()
+                .map(|d| (d.txid, d.vout, d.value_sats))
+                .collect();
+            ids.sort();
+            let mut want = vec![
+                (invented_txid, honest[0].vout, honest[0].value_sats),
+                (honest[3].txid, honest[3].vout, honest[3].value_sats + 1),
+            ];
+            want.sort();
+            assert_eq!(ids, want);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    assert_eq!(snapshot(current.as_ref()), before);
+}
+
 /// Expands to one `#[test]` per suite case, each run against stores produced
 /// by `$factory` (an expression of type `fn() -> Box<dyn SyncStore>`).
 #[macro_export]
@@ -1709,6 +2189,9 @@ macro_rules! sync_store_suite {
             audit_reports_what_a_store_lacks_adds_or_alters,
             audit_names_the_blocks_of_another_chain,
             audit_refuses_what_it_cannot_carry_out,
+            a_rescan_with_more_labels_keeps_everything_and_adds_what_they_reveal,
+            an_unfinished_rescan_is_an_error_and_can_be_continued,
+            a_rescan_that_could_lose_something_is_refused,
         );
     };
     (@cases $factory:expr; $($case:ident,)*) => {

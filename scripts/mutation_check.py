@@ -43,6 +43,7 @@ O = "crates/silent-sync/src/source/blindbit.rs"
 L = "crates/silent-sync/src/source/local_index.rs"
 V = "crates/silent-sync/src/verify.rs"
 A = "crates/silent-sync/src/audit.rs"
+R = "crates/silent-sync/src/rescan.rs"
 E = "crates/silent-sync/src/engine.rs"
 P = "crates/silent-sync/src/protocol.rs"
 N = "crates/silent-sync/src/network.rs"
@@ -148,7 +149,7 @@ muts = [
     ("core: range lookup validates per block", C, "    fn block_refs(&self, from: u32, to: u32) -> Result<Vec<BlockRef>, SourceError> {\n        self.verified_refs(from, to)\n    }", "    fn block_refs(&self, from: u32, to: u32) -> Result<Vec<BlockRef>, SourceError> {\n        (from..=to).map(|height| self.block_ref(height)).collect()\n    }"),
     # --- persistent sync ---
     # --- audit of a store against a reference ---
-    ("audit: binding unchecked", A, "if let Some(d) = binding_difference(&meta, reference.chain(), None, scanner, wallet_id) {", "if let Some(d) = binding_difference(&meta, reference.chain(), None, scanner, wallet_id).filter(|_| false) {"),
+    ("audit: binding unchecked", A, "if let Some(d) = binding_difference(&meta, reference.chain(), None, Some(scanner), wallet_id) {", "if let Some(d) = binding_difference(&meta, reference.chain(), None, Some(scanner), wallet_id).filter(|_| false) {"),
     ("audit: empty range accepted", A, "if first > last || first < meta.birthday || last > checkpoint.height {", "if first < meta.birthday || last > checkpoint.height {"),
     ("audit: range below the birthday accepted", A, "if first > last || first < meta.birthday || last > checkpoint.height {", "if first > last || last > checkpoint.height {"),
     ("audit: range above the checkpoint accepted", A, "if first > last || first < meta.birthday || last > checkpoint.height {", "if first > last || first < meta.birthday {"),
@@ -161,6 +162,15 @@ muts = [
     ("audit: label differences ignored", A, "} else if s.value_sats != r.value_sats || s.label != r.label {", "} else if s.value_sats != r.value_sats {"),
     ("audit: identical despite different block hashes", A, "report.identical = report.differences.is_empty() && report.block_hash_mismatches.is_empty();", "report.identical = report.differences.is_empty();"),
     ("audit: identical despite differences", A, "report.identical = report.differences.is_empty() && report.block_hash_mismatches.is_empty();", "report.identical = report.block_hash_mismatches.is_empty();"),
+    # --- scanning a store's range again into a fresh store ---
+    ("rescan: binding unchecked", R, "        wallet_id,\n    ) {\n        return Err(RescanError::BindingMismatch {", "        wallet_id,\n    )\n    .filter(|_| false)\n    {\n        return Err(RescanError::BindingMismatch {"),
+    ("rescan: another backend accepted", R, "        Some(source.backend_id()),\n        None,\n        wallet_id,", "        None,\n        None,\n        wallet_id,"),
+    ("rescan: removed labels accepted", R, "if !meta.labels.iter().all(|m| labels.contains(m)) {", "if false {"),
+    ("rescan: fresh store of another binding accepted", R, "Some(existing) if existing == fresh_meta => {}", "Some(_existing) if true => {}"),
+    ("rescan: unfinished rescan accepted", R, "if !checkpoint.is_some_and(|cp| cp.height >= previous.height) {", "if false {"),
+    ("rescan: checkpoint on another chain accepted", R, "if fresh.block_at(previous.height)? != Some(previous) {", "if false {"),
+    ("rescan: lost detections accepted", R, "if !not_reproduced.is_empty() {", "if false {"),
+    ("rescan: altered detections accepted", R, ".filter(|d| by_outpoint.get(&OutPoint::new(d.txid, d.vout)) != Some(d))", ".filter(|d| !by_outpoint.contains_key(&OutPoint::new(d.txid, d.vout)))"),
     ("sync: zero chunk size accepted", S, "if options.chunk_size == 0 {", "if false {"),
     ("sync: binding chain unchecked", S, "if meta.chain != chain {", "if false {"),
     ("sync: binding wallet unchecked", S, "if meta.wallet_id != wallet_id {", "if false {"),
@@ -225,6 +235,13 @@ muts = [
     ("sqlite: negative vout wrapped", Q, 'vout: u32::try_from(vout).map_err(|_| corrupt("vout"))?,', "vout: vout as u32,"),
     ("sqlite: negative value wrapped", Q, 'value_sats: u64::try_from(value).map_err(|_| corrupt("value"))?,', "value_sats: value as u64,"),
     ("sqlite: negative label wrapped", Q, '                        .map(|m| u32::try_from(m).map_err(|_| corrupt("label")))\n                        .transpose()?,', "                        .map(|m| m as u32),"),
+    ("sqlite replace: chain not compared", Q, "            &old_meta.chain,\n", "            &new_meta.chain,\n"),
+    ("sqlite replace: receiver not compared", Q, "            &old_meta.wallet_id,\n", "            &new_meta.wallet_id,\n"),
+    ("sqlite replace: backend not compared", Q, "            &old_meta.backend_id,\n", "            &new_meta.backend_id,\n"),
+    ("sqlite replace: birthday not compared", Q, "            old_meta.birthday,\n", "            new_meta.birthday,\n"),
+    ("sqlite replace: labels not compared", Q, "if !old_meta.labels.iter().all(|m| new_meta.labels.contains(m)) {", "if false {"),
+    ("sqlite replace: checkpoint not compared", Q, "if new.block_at(checkpoint.height)? != Some(checkpoint) {", "if false {"),
+    ("sqlite replace: lost detections accepted", Q, "if let Some(lost) = old.detections()?.iter().find(|d| !held.contains(d)) {", "if let Some(lost) = old.detections()?.iter().find(|_| false) {"),
     # --- benchmark records ---
     ("bench: restore mismatch not flagged", K, "mode_check_passed: original.is_none_or(|held| held == detections),", "mode_check_passed: true,"),
     ("bench: failed runs counted in the statistics", K, "                .filter(|r| r.error.is_none())\n", "                .filter(|_| true)\n"),
@@ -242,6 +259,8 @@ muts = [
     ("cli: store network unchecked", M, "if meta.chain.network() != network {", "if false {"),
     ("cli: empty birthday basis accepted", M, "if birthday_basis.trim().is_empty() {", "if false {"),
     ("cli: reorg depth limit not passed on", M, "        .with_max_reorg_depth(args.max_reorg_depth.0);", "        ;"),
+    ("cli: add-label with nothing to add proceeds", M, "    if labels == meta.labels {", "    if false {"),
+    ("cli: add-label block limit not passed on", M, "                .with_max_blocks(max_blocks),", "                ,"),
     ("cli: audit succeeds despite differences", M, "    if audit.identical {\n        Ok(())", "    if true {\n        Ok(())"),
     ("cli: audit first height not passed on", M, "        .with_first_height(args.from)\n", ""),
     ("cli: audit last height not passed on", M, "        .with_last_height(args.to);", "        ;"),

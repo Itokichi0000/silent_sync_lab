@@ -166,7 +166,7 @@ pub fn audit_store(
     options: &AuditOptions,
 ) -> Result<StoreAuditReport, AuditError> {
     let meta = store.meta()?.ok_or(StoreError::NotInitialized)?;
-    if let Some(d) = binding_difference(&meta, reference.chain(), None, scanner, wallet_id) {
+    if let Some(d) = binding_difference(&meta, reference.chain(), None, Some(scanner), wallet_id) {
         return Err(AuditError::BindingMismatch {
             field: d.field,
             stored: d.stored,

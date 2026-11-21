@@ -12,6 +12,11 @@
 //! transaction, so a process killed at any point leaves either the previous
 //! or the new state on disk.
 //!
+//! A store whose range was scanned again into a second file (to add labels,
+//! see `silent_sync::rescan`) is exchanged for it with
+//! [`replace_store_file`]: one atomic rename, after checking that the new
+//! file holds everything the old one holds.
+//!
 //! One process per store file is the supported use. Writes take the SQLite
 //! write lock up front and wait a few seconds for it, so a second process
 //! either waits or fails with a clean error; it cannot interleave a commit.
@@ -248,6 +253,85 @@ fn restrict_permissions(path: &Path) -> Result<(), StoreError> {
 
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &Path) -> Result<(), StoreError> {
+    Ok(())
+}
+
+/// Puts the store file `fresh` in the place of the store file `current`,
+/// in one atomic rename: after a crash the path holds either the old store
+/// or the new one, never a mixture.
+///
+/// This is the last step of a rescan
+/// ([`rescan_into`](silent_sync::rescan::rescan_into)), and the only one
+/// that cannot be undone, so it checks for itself that nothing is lost:
+/// `fresh` must be bound like `current` (chain, receiver, backend, birthday),
+/// know every label `current` knows, contain `current`'s checkpoint block,
+/// and hold every detection `current` holds, exactly as it is. Anything else
+/// is refused and both files stay as they are.
+///
+/// Both files must be closed, on the same file system, and not in use by
+/// another process.
+pub fn replace_store_file(current: &Path, fresh: &Path) -> Result<(), StoreError> {
+    let refuse = |why: String| {
+        StoreError::Invariant(format!(
+            "refusing to replace {} with {}: {why}",
+            current.display(),
+            fresh.display()
+        ))
+    };
+    {
+        let old = SqliteStore::open(current)?;
+        let new = SqliteStore::open(fresh)?;
+        let old_meta = old.meta()?.ok_or(StoreError::NotInitialized)?;
+        let new_meta = new
+            .meta()?
+            .ok_or_else(|| refuse("the new store has no binding".to_string()))?;
+        if (
+            &old_meta.chain,
+            &old_meta.wallet_id,
+            &old_meta.backend_id,
+            old_meta.birthday,
+        ) != (
+            &new_meta.chain,
+            &new_meta.wallet_id,
+            &new_meta.backend_id,
+            new_meta.birthday,
+        ) {
+            return Err(refuse(
+                "the two stores are bound to different chains, receivers, backends or birthdays"
+                    .to_string(),
+            ));
+        }
+        if !old_meta.labels.iter().all(|m| new_meta.labels.contains(m)) {
+            return Err(refuse(format!(
+                "the new store was not scanned for every label of the old one (old {:?}, new {:?})",
+                old_meta.labels, new_meta.labels
+            )));
+        }
+        if let Some(checkpoint) = old.checkpoint()? {
+            if new.block_at(checkpoint.height)? != Some(checkpoint) {
+                return Err(refuse(format!(
+                    "the new store does not contain the old store's checkpoint (height {})",
+                    checkpoint.height
+                )));
+            }
+        }
+        let held = new.detections()?;
+        if let Some(lost) = old.detections()?.iter().find(|d| !held.contains(d)) {
+            return Err(refuse(format!(
+                "the new store does not hold the detection {}:{} of the old one",
+                lost.txid, lost.vout
+            )));
+        }
+        // Both connections are closed here, before the file is moved.
+    }
+    std::fs::rename(fresh, current).map_err(backend)?;
+    // Make the rename itself durable where the platform allows it.
+    #[cfg(unix)]
+    if let Some(dir) = current.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::File::open(dir)
+            .and_then(|d| d.sync_all())
+            .map_err(backend)?;
+    }
     Ok(())
 }
 

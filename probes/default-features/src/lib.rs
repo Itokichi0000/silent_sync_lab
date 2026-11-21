@@ -8,14 +8,15 @@
 //!
 //! ```
 //! use silent_sync::{
-//!     audit_store, cross_check, new_store_meta, scan_range, sync, sync_with_progress,
-//!     AuditError, AuditOptions, BlockRef, ChainIdentity, DetectedOutput, EvidenceKind,
-//!     MemoryStore, Network, ReceiveScanner, ReceiverKeys, ScanError, ScanSource,
-//!     SilentPaymentAddress, StoreAuditReport, StoreError, StoreMeta, SyncError, SyncOptions,
-//!     SyncReport, SyncStore, VerificationReport,
+//!     audit_store, cross_check, new_store_meta, rescan_into, scan_range, sync,
+//!     sync_with_progress, AuditError, AuditOptions, BlockRef, ChainIdentity, DetectedOutput,
+//!     EvidenceKind, MemoryStore, Network, ReceiveScanner, ReceiverKeys, RescanError,
+//!     RescanReport, ScanError, ScanSource, SilentPaymentAddress, StoreAuditReport, StoreError,
+//!     StoreMeta, SyncError, SyncOptions, SyncReport, SyncStore, VerificationReport,
 //! };
 //! # let _ = (scan_range, sync, sync_with_progress, cross_check, new_store_meta, audit_store);
-//! # fn audit(_: (AuditError, AuditOptions, StoreAuditReport)) {}
+//! # let _ = rescan_into;
+//! # fn audit(_: (AuditError, AuditOptions, StoreAuditReport, RescanError, RescanReport)) {}
 //! # fn names(_: (BlockRef, ChainIdentity, DetectedOutput, EvidenceKind, MemoryStore, Network)) {}
 //! # fn more(_: (ScanError, StoreError, StoreMeta, SyncError, SyncOptions, SyncReport)) {}
 //! # fn rest(_: (&ReceiveScanner, &ReceiverKeys, &SilentPaymentAddress, &dyn ScanSource)) {}
@@ -135,10 +136,11 @@ mod tests {
         bitcoin::secp256k1::{Secp256k1, SecretKey},
         models::BlockRef,
         network::ChainIdentity,
+        rescan_into,
         source::{ScanBatch, ScanSource, SourceCapabilities, SourceError},
         store::{MemoryStore, StoreError, SyncStore},
         sync::{new_store_meta, sync, SyncError, SyncOptions},
-        AuditError, AuditOptions, EvidenceKind, Network, ReceiveScanner, ReceiverKeys,
+        AuditError, AuditOptions, EvidenceKind, Network, ReceiveScanner, ReceiverKeys, RescanError,
     };
 
     /// A source an embedder might write: here one that cannot be reached.
@@ -223,6 +225,22 @@ mod tests {
         assert!(store.detections().expect("detections").is_empty());
         // Nothing stored: an audit has nothing to compare, and says so.
         assert_eq!(audit(&store), Err(AuditError::NothingStored));
+        // A rescan with fewer labels than the store was scanned with is
+        // refused before the fresh store is touched.
+        let fewer = ReceiveScanner::new(&keys, &[]).expect("scanner");
+        let mut fresh = MemoryStore::new();
+        assert!(matches!(
+            rescan_into(
+                &source,
+                &fewer,
+                &keys.wallet_id(),
+                &store,
+                &mut fresh,
+                &options
+            ),
+            Err(RescanError::LabelsRemoved { .. })
+        ));
+        assert_eq!(fresh.meta().expect("meta"), None);
     }
 
     #[test]

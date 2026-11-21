@@ -20,6 +20,7 @@ Bitcoin [BIP352 (Silent Payments)](https://github.com/bitcoin/bips/blob/master/b
 | 永続同期: チェックポイント、中断からの再開、reorg の巻き戻しと報告（深さの上限つき）、birthday からの復元 | 自分のシード・鍵の取り込み（公開テスト鍵のみ） |
 | 2 つのデータ源の突き合わせ（`verify`）と、差分の tx 単位の説明 | リモート（ループバック以外）のサーバへの接続 |
 | 保存済みの検出結果を参照ソース（自分のノード）で照合する監査（`audit`） | 監査結果による証拠種別の格上げ |
+| ラベルの追加（`lab add-label`。範囲全体を別ファイルへスキャンし直し、何も失わないことを確かめてから差し替える） | ラベルの削除、再スキャンなしでのラベル追加 |
 | ベンチマーク（JSON / CSV / Markdown）と故障注入 | 使用済みかどうかの追跡 |
 
 「検出した出力」は「未使用残高」でも「着金の確認」でもありません。
@@ -92,6 +93,12 @@ cargo run -p lab-cli -- verify --backend local-index --fixture fixtures/local/re
 
 ```bash
 cargo run -p lab-cli -- audit --db /tmp/lab.sqlite3 --backend fixture --fixture fixtures/local/regtest_basic_v1.json
+```
+
+ラベルの追加（スキャン済みの範囲を、新しいラベルを含めてスキャンし直します。中断しても元のストアは変わらず、再実行で続きから進みます）:
+
+```bash
+cargo run -p lab-cli -- lab add-label --db /tmp/lab.sqlite3 --backend fixture --fixture fixtures/local/regtest_basic_v1.json --label 5
 ```
 
 - `--network` は `regtest`（既定）か `signet`。`mainnet` はエラーになります。

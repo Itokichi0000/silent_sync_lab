@@ -11,7 +11,7 @@ EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
 | 成果 | 状態 | 根拠 |
 |---|---|---|
 | BIP352 受信検出（上流 `bdk_sp` を呼ぶ。独自の暗号なし） | 公式ベクトル 29 件を通過。上流の逸脱 2 点を補正 | `tests/bip352_vectors.rs`、RESEARCH §3.3、D-005 / D-006 |
-| 同期コア `silent-sync`（CLI・表示・DB に依存しない） | 公開項目 約 110。フルブロック型と tweak インデックス型の 2 種の証拠を別の型で扱う | `crates/silent-sync`（約 4,800 行 + テスト約 4,600 行） |
+| 同期コア `silent-sync`（CLI・表示・DB に依存しない） | 公開項目 約 110（この資料の作成時点。SDK 化の整理後の一覧は `docs/api/`）。フルブロック型と tweak インデックス型の 2 種の証拠を別の型で扱う | `crates/silent-sync`（約 4,800 行 + テスト約 4,600 行） |
 | バックエンド 4 種 | fixture / Bitcoin Core REST / BlindBit Oracle v2 HTTP / ローカル計算のインデックス | Gate 2・4 |
 | 永続化・再開・reorg | ストア抽象 + SQLite。中断・強制終了・reorg・ソース遅延を扱う | Gate 3、D-024〜D-027、D-034 |
 | バックエンド間の突き合わせ（`verify`） | 差分を tx 単位で説明 | D-033、実ノード + 実 Oracle で確認 |
@@ -77,7 +77,7 @@ EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
 
 - 公開 API の整理と安定化方針（現状は実験の都合で公開している項目が多い）。
 - 鍵の受け渡しの設計（現状は公開テスト鍵の埋め込み）。scan 鍵をどこに置き、どう渡すか。
-- ヘッダ鎖の永続化（O-016）、reorg 深さの上限（O-013）、ラベル追加時の再スキャン（O-006）。
+- ヘッダ鎖の永続化（O-016）。reorg 深さの上限（O-013 → D-041）とラベル追加時の再スキャン（O-006 → D-043）は、この資料の作成後に実装した。
 - 非同期 I/O の要否、signet / mainnet の扱い（**mainnet は現在、型で拒否している**。外すのは人間レビュー必須の変更）。
 - 上流への報告と、補正を外せる時期の見極め（O-002）。
 - ~~ライセンスの決定~~ → 決定済み（MIT OR Apache-2.0。D-038）。
