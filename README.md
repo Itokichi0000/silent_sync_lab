@@ -138,4 +138,13 @@ cargo test --workspace --locked -- --ignored
 
 ## ライセンス
 
-未定です（[`docs/DECISIONS.md`](docs/DECISIONS.md) O-001）。ライセンスが決まるまで、第三者による利用・再配布の許諾はありません。
+次のいずれかを、利用する側が選べます（Rust のエコシステムで一般的なデュアルライセンス）。
+
+- MIT License（[`LICENSE-MIT`](LICENSE-MIT)）
+- Apache License, Version 2.0（[`LICENSE-APACHE`](LICENSE-APACHE)）
+
+どちらも無保証です。加えて、これは未監査の実験コードであり、mainnet・実資金での利用を想定していません。
+
+`fixtures/bip352/` の公式テストベクトルは BIP リポジトリのもの（BSD-2-Clause）で、出典と条件は [`fixtures/bip352/SOURCE.md`](fixtures/bip352/SOURCE.md) にあります。
+
+特に明示しない限り、このリポジトリへのコントリビューションは、上記のデュアルライセンスで提供されたものとして扱います（Apache-2.0 の定義による）。追加の条件は付きません。
