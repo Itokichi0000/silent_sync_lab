@@ -1,0 +1,20 @@
+# Not part of the main workspace on purpose.
+#
+# In the main workspace every test build enables all features of `silent-sync`
+# (the test helpers need them), so nothing there ever runs the library the way
+# an embedder gets it. These two small crates depend on it exactly as an
+# outside user would — one with default features, one with `low-level` — and
+# check what is and is not reachable. Run each on its own (`-p`), so that
+# their features are not merged:
+#
+#   cargo test --manifest-path probes/Cargo.toml --locked -p probe-default-features
+#   cargo test --manifest-path probes/Cargo.toml --locked -p probe-low-level
+[workspace]
+resolver = "2"
+members = ["default-features", "low-level"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"

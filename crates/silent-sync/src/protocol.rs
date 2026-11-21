@@ -177,99 +177,111 @@ impl fmt::Debug for SilentPaymentAddress {
     }
 }
 
-/// One output that matched the receiver keys.
-///
-/// The upstream match type is serializable including the per-output tweak.
-/// This type is deliberately not `Serialize` and, unless the
-/// `secret-output-tweaks` feature is enabled, **does not hold the tweak at
-/// all**: the scan result that leaves this crate says which output matched,
-/// not how to spend it (DECISIONS D-039).
-#[derive(Clone, PartialEq, Eq)]
-pub struct ScanMatch {
-    pub outpoint: OutPoint,
-    pub script_pubkey: ScriptBuf,
-    pub amount: Amount,
-    /// BIP352 label integer, `None` for the unlabelled address.
-    pub label: Option<u32>,
-    #[cfg(feature = "secret-output-tweaks")]
-    tweak: SecretKey,
-}
+/// What scanning one transaction yields. Public only with the `low-level`
+/// feature; without it these types are internal to the crate.
+mod tx_level {
+    use super::*;
 
-#[cfg(feature = "secret-output-tweaks")]
-impl ScanMatch {
-    /// The output tweak `t_k` (plus the label tweak for labelled outputs).
+    /// One output that matched the receiver keys.
     ///
-    /// **Sensitive**: together with the spend private key it yields the
-    /// output's private key, and on its own it links the output to the
-    /// receiver. Nothing in this crate stores, logs or exports it. It exists
-    /// only with the `secret-output-tweaks` feature, so that conformance
-    /// tests can compare against the BIP352 vectors; it is not part of the
-    /// SDK's API.
-    pub fn sensitive_output_tweak(&self) -> SecretKey {
-        self.tweak
+    /// The upstream match type is serializable including the per-output tweak.
+    /// This type is deliberately not `Serialize` and, unless the
+    /// `secret-output-tweaks` feature is enabled, **does not hold the tweak at
+    /// all**: the scan result that leaves this crate says which output matched,
+    /// not how to spend it (DECISIONS D-039).
+    #[derive(Clone, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub struct ScanMatch {
+        pub outpoint: OutPoint,
+        pub script_pubkey: ScriptBuf,
+        pub amount: Amount,
+        /// BIP352 label integer, `None` for the unlabelled address.
+        pub label: Option<u32>,
+        #[cfg(feature = "secret-output-tweaks")]
+        tweak: SecretKey,
     }
-}
 
-impl From<SpOut> for ScanMatch {
-    fn from(spout: SpOut) -> Self {
-        Self {
-            outpoint: spout.outpoint,
-            script_pubkey: spout.script_pubkey,
-            amount: spout.amount,
-            label: spout.label,
-            #[cfg(feature = "secret-output-tweaks")]
-            tweak: spout.tweak,
+    #[cfg(feature = "secret-output-tweaks")]
+    impl ScanMatch {
+        /// The output tweak `t_k` (plus the label tweak for labelled outputs).
+        ///
+        /// **Sensitive**: together with the spend private key it yields the
+        /// output's private key, and on its own it links the output to the
+        /// receiver. Nothing in this crate stores, logs or exports it. It exists
+        /// only with the `secret-output-tweaks` feature, so that conformance
+        /// tests can compare against the BIP352 vectors; it is not part of the
+        /// SDK's API.
+        pub fn sensitive_output_tweak(&self) -> SecretKey {
+            self.tweak
         }
     }
-}
 
-impl fmt::Debug for ScanMatch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ScanMatch")
-            .field("outpoint", &self.outpoint)
-            .field("script_pubkey", &self.script_pubkey)
-            .field("amount", &self.amount)
-            .field("label", &self.label)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Why a transaction was not scanned. These are normal outcomes defined by
-/// BIP352 ("Scanning silent payment eligible transactions"), not errors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum SkipReason {
-    /// Coinbase transactions have no inputs for shared secret derivation.
-    Coinbase,
-    /// No BIP341 taproot output.
-    NoTaprootOutputs,
-    /// No input from the "Inputs For Shared Secret Derivation" list.
-    NoEligibleInputs,
-    /// The transaction spends an output with SegWit version > 1.
-    SpendsUnknownSegwitVersion,
-    /// The eligible input public keys sum to the point at infinity.
-    InputKeySumIsInfinity,
-}
-
-impl SkipReason {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            SkipReason::Coinbase => "coinbase",
-            SkipReason::NoTaprootOutputs => "no_taproot_outputs",
-            SkipReason::NoEligibleInputs => "no_eligible_inputs",
-            SkipReason::SpendsUnknownSegwitVersion => "spends_unknown_segwit_version",
-            SkipReason::InputKeySumIsInfinity => "input_key_sum_is_infinity",
+    impl From<SpOut> for ScanMatch {
+        fn from(spout: SpOut) -> Self {
+            Self {
+                outpoint: spout.outpoint,
+                script_pubkey: spout.script_pubkey,
+                amount: spout.amount,
+                label: spout.label,
+                #[cfg(feature = "secret-output-tweaks")]
+                tweak: spout.tweak,
+            }
         }
     }
+
+    impl fmt::Debug for ScanMatch {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("ScanMatch")
+                .field("outpoint", &self.outpoint)
+                .field("script_pubkey", &self.script_pubkey)
+                .field("amount", &self.amount)
+                .field("label", &self.label)
+                .finish_non_exhaustive()
+        }
+    }
+
+    /// Why a transaction was not scanned. These are normal outcomes defined by
+    /// BIP352 ("Scanning silent payment eligible transactions"), not errors.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+    pub enum SkipReason {
+        /// Coinbase transactions have no inputs for shared secret derivation.
+        Coinbase,
+        /// No BIP341 taproot output.
+        NoTaprootOutputs,
+        /// No input from the "Inputs For Shared Secret Derivation" list.
+        NoEligibleInputs,
+        /// The transaction spends an output with SegWit version > 1.
+        SpendsUnknownSegwitVersion,
+        /// The eligible input public keys sum to the point at infinity.
+        InputKeySumIsInfinity,
+    }
+
+    impl SkipReason {
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                SkipReason::Coinbase => "coinbase",
+                SkipReason::NoTaprootOutputs => "no_taproot_outputs",
+                SkipReason::NoEligibleInputs => "no_eligible_inputs",
+                SkipReason::SpendsUnknownSegwitVersion => "spends_unknown_segwit_version",
+                SkipReason::InputKeySumIsInfinity => "input_key_sum_is_infinity",
+            }
+        }
+    }
+
+    /// Result of looking at one transaction.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum TxScanOutcome {
+        /// BIP352 says this transaction must not be scanned.
+        NotEligible(SkipReason),
+        /// The transaction was scanned. `matches` may be empty.
+        Scanned { matches: Vec<ScanMatch> },
+    }
 }
 
-/// Result of looking at one transaction.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TxScanOutcome {
-    /// BIP352 says this transaction must not be scanned.
-    NotEligible(SkipReason),
-    /// The transaction was scanned. `matches` may be empty.
-    Scanned { matches: Vec<ScanMatch> },
-}
+#[cfg(not(feature = "low-level"))]
+pub(crate) use tx_level::{ScanMatch, SkipReason, TxScanOutcome};
+#[cfg(feature = "low-level")]
+pub use tx_level::{ScanMatch, SkipReason, TxScanOutcome};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -313,11 +325,11 @@ impl ReceiveScanner {
     }
 
     /// Scanner that checks for exactly `labels` and nothing else — in
-    #[cfg(feature = "low-level")]
     /// particular **not** for the change label unless it is listed.
     ///
     /// This exists for conformance testing against the BIP352 vectors, which
     /// state the exact label set per case. Wallet code should use [`Self::new`].
+    #[cfg(feature = "low-level")]
     pub fn with_exact_labels(keys: &ReceiverKeys, labels: &[u32]) -> Result<Self, ProtocolError> {
         Self::build(keys, labels.iter().copied().collect())
     }

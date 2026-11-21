@@ -1,4 +1,5 @@
 /target
+/probes/target
 **/*.rs.bk
 # Secrets / local state must never be committed.
 .env

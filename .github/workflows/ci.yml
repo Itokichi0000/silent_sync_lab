@@ -38,6 +38,10 @@ jobs:
             echo "::endgroup::"
           done
           cargo clippy -p silent-sync --lib --locked --all-features -- -D warnings
+      # Everything above and below builds the library with all features. This
+      # step uses it as an embedder gets it (see scripts/check_embedder_view.sh).
+      - name: Embedder's view (default features, docs, CLI built alone)
+        run: scripts/check_embedder_view.sh
       # Fast unit + integration tests only. Tests that need Bitcoin Core are
       # `#[ignore]`d here and run in the regtest-e2e job below.
       - name: Test

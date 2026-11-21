@@ -26,10 +26,16 @@
 //! Every [`DetectedOutput`] says which kind of evidence it came from
 //! ([`EvidenceKind`]):
 //!
-//! * `FullBlockWithPrevouts` — the block was checked against a header chain
-//!   verified from the network's genesis block (proof of work, merkle root,
-//!   witness commitment). This holds as long as the source really is your
-//!   own node.
+//! * `FullBlockWithPrevouts` — the scanner saw every transaction of the
+//!   block together with the outputs it spends, and decided itself which
+//!   transactions to scan. What was *verified* about the block depends on
+//!   the source and is stated by its
+//!   [`SourceCapabilities`](source::SourceCapabilities): the Bitcoin Core
+//!   source checks proof of work, merkle root and witness commitment against
+//!   a header chain followed from the network's genesis block, which is worth
+//!   exactly as much as the certainty that the node it talks to is yours.
+//!   Previous outputs created before the scanned range are taken on trust
+//!   from any source.
 //! * `TweakIndex` — an index server's claim. The transaction id, output
 //!   position and amount were **not** checked against the block: such a
 //!   server can omit a payment, alter one, or invent one, and nothing here
@@ -45,7 +51,7 @@
 //! # #[cfg(feature = "core-rest")]
 //! # {
 //! use silent_sync::bitcoin::secp256k1::{PublicKey, SecretKey};
-//! use silent_sync::source::bitcoin_core::CoreRestSource;
+//! use silent_sync::source::CoreRestSource;
 //! use silent_sync::{
 //!     new_store_meta, MemoryStore, ReceiveScanner, ReceiverKeys, SyncOptions, SyncStore,
 //! };
@@ -94,11 +100,11 @@
 //!
 //! | feature | adds |
 //! |---|---|
-//! | `core-rest` | [`source::bitcoin_core`]: your own Bitcoin Core node over REST (loopback only) |
-//! | `blindbit-http` | [`source::blindbit`]: a BlindBit Oracle v2 tweak index over HTTP (loopback only) |
+//! | `core-rest` | `source::CoreRestSource`: your own Bitcoin Core node over REST (loopback only) |
+//! | `blindbit-http` | `source::BlindbitHttpSource`: a BlindBit Oracle v2 tweak index over HTTP (loopback only) |
 //! | `fixture` | `source::fixture`: offline fixture files, for experiments and tests |
 //! | `local-index` | `source::local_index`: a tweak index computed locally, for cross-checks |
-//! | `low-level` | per-transaction entry points of [`ReceiveScanner`] |
+//! | `low-level` | per-transaction entry points of [`ReceiveScanner`] and their result types |
 //! | `secret-output-tweaks` | not part of the SDK; lets conformance tests read per-output tweaks |
 //!
 //! ## Implementing your own source or store

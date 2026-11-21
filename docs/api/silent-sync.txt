@@ -1,332 +1,505 @@
+## Cargo.toml [features]
+core-rest = ["dep:minreq"]
+blindbit-http = ["dep:minreq"]
+fixture = []
+local-index = []
+low-level = []
+secret-output-tweaks = ["low-level"]
+
 ## engine.rs
-pub enum ScanError
-  variant ChainMismatch
-  variant InvalidRange
-  variant Source(#[from] SourceError)
-  variant InconsistentBatch
-  variant Transaction
-pub struct ScanReport
-pub chain: ChainIdentity,
-pub backend_id: String,
-pub evidence_kind: EvidenceKind,
-pub first_block: BlockRef,
-pub last_block: BlockRef,
-pub labels_scanned: Vec<u32>,
-pub blocks_scanned: u64,
-pub txs_seen: u64,
-pub txs_scanned: u64,
-pub txs_skipped: BTreeMap<&'static str, u64>,
-pub detected_received_outputs: Vec<DetectedOutput>,
-pub fn scan_range(source: &dyn ScanSource, scanner: &ReceiveScanner, expected_chain: ChainIdentity, from: u32, to: u32, ) -> Result<ScanReport, ScanError>
-pub const SCAN_CHUNK_BLOCKS: u32 = 100
-pub const MAX_INDEXED_OUTPUTS_PER_BLOCK: usize = 4_000_000 / 172
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] #[non_exhaustive] pub enum ScanError
+    #[error(
+        "chain mismatch: wallet expects {expected:?} but source `{backend_id}` serves {actual:?}"
+    )]
+    ChainMismatch {
+        backend_id: String,
+        expected: ChainIdentity,
+        actual: ChainIdentity,
+    },
+    #[error("invalid range {from}..={to}")]
+    InvalidRange { from: u32, to: u32 },
+    #[error(transparent)]
+    Source(#[from] SourceError),
+    #[error("source `{backend_id}` returned an inconsistent batch: {reason}")]
+    InconsistentBatch { backend_id: String, reason: String },
+    #[error("block {height}: transaction {txid}: {source}")]
+    Transaction {
+        height: u32,
+        txid: Txid,
+        #[source]
+        source: ProtocolError,
+    },
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)] #[non_exhaustive] pub struct ScanReport
+    pub chain: ChainIdentity,
+    pub backend_id: String,
+    pub evidence_kind: EvidenceKind,
+    pub first_block: BlockRef,
+    pub last_block: BlockRef,
+    pub labels_scanned: Vec<u32>,
+    pub blocks_scanned: u64,
+    pub txs_seen: u64,
+    pub txs_scanned: u64,
+    pub txs_skipped: BTreeMap<&'static str, u64>,
+    pub detected_received_outputs: Vec<DetectedOutput>,
+pub fn scan_range( source: &dyn ScanSource, scanner: &ReceiveScanner, expected_chain: ChainIdentity, from: u32, to: u32, ) -> Result<ScanReport, ScanError>
+pub const SCAN_CHUNK_BLOCKS: u32 = 100;
+pub const MAX_INDEXED_OUTPUTS_PER_BLOCK: usize = 4_000_000 / 172;
 
 ## lib.rs
-pub mod engine
-pub mod models
-pub mod network
-pub mod protocol
-pub mod source
-pub mod store
-pub mod sync
-pub mod verify
-pub use bdk_sp::bitcoin
-pub use engine::{scan_range, ScanError, ScanReport}
-pub use models::{BlockRef, DetectedOutput, EvidenceKind, MatchProvenance}
-pub use network::{ChainIdentity, Network, NetworkError}
-pub use protocol::{ProtocolError, ReceiveScanner, ReceiverKeys, SilentPaymentAddress}
-pub use source::{ScanSource, SourceError}
-pub use store::{MemoryStore, StoreError, StoreMeta, SyncStore}
-pub use sync::
-pub use verify::{cross_check, Difference, Explanation, Side, VerificationReport}
+pub mod engine;
+pub mod models;
+pub mod network;
+pub mod protocol;
+pub mod source;
+pub mod store;
+pub mod sync;
+pub mod verify;
+pub use bdk_sp::bitcoin;
+pub use engine::{scan_range, ScanError, ScanReport};
+pub use models::{BlockRef, DetectedOutput, EvidenceKind, MatchProvenance};
+pub use network::{ChainIdentity, Network, NetworkError};
+pub use protocol::{ProtocolError, ReceiveScanner, ReceiverKeys, SilentPaymentAddress};
+pub use source::{ScanSource, SourceError};
+pub use store::{MemoryStore, StoreError, StoreMeta, SyncStore};
+pub use sync::{ new_store_meta, sync, sync_with_progress, ReorgReport, StopReason, SyncError, SyncOptions, SyncReport, };
+pub use verify::{cross_check, Difference, Explanation, Side, VerificationReport};
 
 ## models.rs
-pub struct BlockRef
-pub height: u32,
-pub hash: BlockHash,
-pub prev_hash: BlockHash,
-pub enum EvidenceKind
-  variant FullBlockWithPrevouts
-  variant TweakIndex
-pub struct MatchProvenance
-pub backend_id: String,
-pub evidence_kind: EvidenceKind,
-pub struct DetectedOutput
-pub network: Network,
-pub block: BlockRef,
-pub txid: Txid,
-pub vout: u32,
-pub value_sats: u64,
-pub label: Option<u32>,
-pub provenance: MatchProvenance,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)] pub struct BlockRef
+    pub height: u32,
+    pub hash: BlockHash,
+    pub prev_hash: BlockHash,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)] #[serde(rename_all = "snake_case")] #[non_exhaustive] pub enum EvidenceKind
+    FullBlockWithPrevouts,
+    TweakIndex,
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)] pub struct MatchProvenance
+    pub backend_id: String,
+    pub evidence_kind: EvidenceKind,
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)] pub struct DetectedOutput
+    pub network: Network,
+    pub block: BlockRef,
+    pub txid: Txid,
+    pub vout: u32,
+    pub value_sats: u64,
+    pub label: Option<u32>,
+    pub provenance: MatchProvenance,
 
 ## network.rs
-pub enum Network
-  variant Regtest
-  variant Signet
-pub enum NetworkError
-  variant MainnetRefused
-  variant Unsupported(String)
-  variant GenesisMismatch
-pub const fn as_str(self) -> &'static str
-pub const fn to_bitcoin(self) -> BitcoinNetwork
-pub fn try_from_bitcoin(network: BitcoinNetwork) -> Result<Self, NetworkError>
-pub fn genesis_hash(self) -> BlockHash
-pub struct ChainIdentity
-pub fn network(&self) -> Network
-pub fn genesis_hash(&self) -> BlockHash
-pub fn for_network(network: Network) -> Self
-pub fn verified(network: Network, genesis_hash: BlockHash) -> Result<Self, NetworkError>
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)] #[serde(try_from = "String", into = "String")] pub enum Network
+    Regtest,
+    Signet,
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] #[non_exhaustive] pub enum NetworkError
+    #[error(
+        "mainnet is refused: this is experimental, unaudited software and must not be used \
+         with mainnet or real funds"
+    )]
+    MainnetRefused,
+    #[error("unsupported network `{0}`: only `regtest` and `signet` are supported")]
+    Unsupported(String),
+    #[error("genesis hash mismatch for {network}: expected {expected}, got {actual}")]
+    GenesisMismatch {
+        network: Network,
+        expected: BlockHash,
+        actual: BlockHash,
+    },
+impl Network
+    pub const fn as_str(self) -> &'static str
+    pub const fn to_bitcoin(self) -> BitcoinNetwork
+    pub fn try_from_bitcoin(network: BitcoinNetwork) -> Result<Self, NetworkError>
+    pub fn genesis_hash(self) -> BlockHash
+impl fmt::Display for Network
+impl FromStr for Network
+impl TryFrom<String> for Network
+impl From<Network> for String
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)] #[serde(try_from = "RawChainIdentity", into = "RawChainIdentity")] pub struct ChainIdentity
+    <private field>
+    <private field>
+impl TryFrom<RawChainIdentity> for ChainIdentity
+impl From<ChainIdentity> for RawChainIdentity
+impl ChainIdentity
+    pub fn network(&self) -> Network
+    pub fn genesis_hash(&self) -> BlockHash
+    pub fn for_network(network: Network) -> Self
+    pub fn verified(network: Network, genesis_hash: BlockHash) -> Result<Self, NetworkError>
 
 ## protocol.rs
-pub use bdk_sp::receive::K_MAX
-pub const CHANGE_LABEL: u32 = 0
-pub fn $($rest)*
-pub struct ReceiverKeys
-pub fn new(scan_sk: SecretKey, spend_pk: PublicKey) -> Self
-pub fn scan_public_key(&self) -> PublicKey
-pub fn spend_public_key(&self) -> PublicKey
-pub fn wallet_id(&self) -> String
-pub fn address(&self, network: Network) -> SilentPaymentAddress
-pub fn labelled_address(&self, network: Network, m: u32, ) -> Result<SilentPaymentAddress, ProtocolError>
-pub struct SilentPaymentAddress
-pub fn network(&self) -> Network
-pub fn scan_public_key(&self) -> PublicKey
-pub fn spend_public_key(&self) -> PublicKey
-pub struct ScanMatch
-pub outpoint: OutPoint,
-pub script_pubkey: ScriptBuf,
-pub amount: Amount,
-pub label: Option<u32>,
-pub fn sensitive_output_tweak(&self) -> SecretKey
-pub enum SkipReason
-  variant Coinbase
-  variant NoTaprootOutputs
-  variant NoEligibleInputs
-  variant SpendsUnknownSegwitVersion
-  variant InputKeySumIsInfinity
-pub const fn as_str(self) -> &'static str
-pub enum TxScanOutcome
-  variant NotEligible(SkipReason)
-  variant Scanned
-pub enum ProtocolError
-  variant PrevoutCountMismatch
-  variant MissingWitness
-  variant KMaxExceeded(u32)
-  variant KMaxFallbackInconsistent(usize)
-  variant Label(String)
-  variant Upstream(String)
-  variant UpstreamPanic
+pub use bdk_sp::receive::K_MAX;
+pub const CHANGE_LABEL: u32 = 0;
+macro_rules! low_level
+#[derive(Clone)] pub struct ReceiverKeys
+    <private field>
+    <private field>
+impl ReceiverKeys
+    pub fn new(scan_sk: SecretKey, spend_pk: PublicKey) -> Self
+    pub fn scan_public_key(&self) -> PublicKey
+    pub fn spend_public_key(&self) -> PublicKey
+    pub fn wallet_id(&self) -> String
+    pub fn address(&self, network: Network) -> SilentPaymentAddress
+    pub fn labelled_address( &self, network: Network, m: u32, ) -> Result<SilentPaymentAddress, ProtocolError>
+impl fmt::Debug for ReceiverKeys
+#[derive(Clone, Copy, PartialEq, Eq, Hash)] pub struct SilentPaymentAddress
+    <private field>
+    <private field>
+    <private field>
+impl SilentPaymentAddress
+    pub fn network(&self) -> Network
+    pub fn scan_public_key(&self) -> PublicKey
+    pub fn spend_public_key(&self) -> PublicKey
+impl fmt::Display for SilentPaymentAddress
+impl fmt::Debug for SilentPaymentAddress
+mod tx_level
+    #[derive(Clone, PartialEq, Eq)] #[non_exhaustive] pub struct ScanMatch
+        pub outpoint: OutPoint,
+        pub script_pubkey: ScriptBuf,
+        pub amount: Amount,
+        pub label: Option<u32>,
+        #[cfg(feature = "secret-output-tweaks")]
+        <private field>
+    #[cfg(feature = "secret-output-tweaks")] impl ScanMatch
+        pub fn sensitive_output_tweak(&self) -> SecretKey
+    impl From<SpOut> for ScanMatch
+    impl fmt::Debug for ScanMatch
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)] pub enum SkipReason
+        Coinbase,
+        NoTaprootOutputs,
+        NoEligibleInputs,
+        SpendsUnknownSegwitVersion,
+        InputKeySumIsInfinity,
+    impl SkipReason
+        pub const fn as_str(self) -> &'static str
+    #[derive(Debug, Clone, PartialEq, Eq)] pub enum TxScanOutcome
+        NotEligible(SkipReason),
+        Scanned { matches: Vec<ScanMatch> },
+#[cfg(not(feature = "low-level"))] pub(crate) use tx_level::{ScanMatch, SkipReason, TxScanOutcome};
+#[cfg(feature = "low-level")] pub use tx_level::{ScanMatch, SkipReason, TxScanOutcome};
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] #[non_exhaustive] pub enum ProtocolError
+    #[error("transaction has {inputs} inputs but {prevouts} previous outputs were supplied")]
+    PrevoutCountMismatch { inputs: usize, prevouts: usize },
+    #[error(
+        "input {input} spends a SegWit output but carries no witness; the data was stripped of \
+         witnesses or is not consensus-valid, and scanning it would silently miss payments"
+    )]
+    MissingWitness { input: usize },
+    #[error(
+        "more than K_max={0} outputs matched even after capping the scan (docs/DECISIONS.md D-005)"
+    )]
+    KMaxExceeded(u32),
+    #[error("K_max fallback found {0} matches instead of exactly K_max; refusing to guess")]
+    KMaxFallbackInconsistent(usize),
+    #[error("could not derive label: {0}")]
+    Label(String),
+    #[error("upstream scanner error: {0}")]
+    Upstream(String),
+    #[error("upstream scanner panicked on malformed input; transaction treated as an error")]
+    UpstreamPanic,
 pub struct ReceiveScanner
-pub fn new(keys: &ReceiverKeys, labels: &[u32]) -> Result<Self, ProtocolError>
-#[cfg(feature = "low-level")] pub fn with_exact_labels(keys: &ReceiverKeys, labels: &[u32]) -> Result<Self, ProtocolError>
-pub fn labels(&self) -> impl Iterator<Item = u32> + '_
-#[cfg(feature = "low-level")] pub fn eligibility(tx: &Transaction, prevouts: &[TxOut], ) -> Result<Result<(), SkipReason>, ProtocolError>
-#[cfg(feature = "low-level")] pub fn scan_tx(&self, tx: &Transaction, prevouts: &[TxOut], ) -> Result<TxScanOutcome, ProtocolError>
-#[cfg(feature = "low-level")] pub fn scan_indexed_tx(&self, indexed: &IndexedTx) -> Result<Vec<ScanMatch>, ProtocolError>
-#[cfg(feature = "low-level")] pub fn public_tweak_data_ignoring_segwit_version_rule(tx: &Transaction, prevouts: &[TxOut], ) -> Result<Result<PublicKey, SkipReason>, ProtocolError>
-#[cfg(feature = "low-level")] pub fn public_tweak_data(tx: &Transaction, prevouts: &[TxOut], ) -> Result<Result<PublicKey, SkipReason>, ProtocolError>
+    <private field>
+    <private field>
+    <private field>
+impl ReceiveScanner
+    pub fn new(keys: &ReceiverKeys, labels: &[u32]) -> Result<Self, ProtocolError>
+    #[cfg(feature = "low-level")] pub fn with_exact_labels(keys: &ReceiverKeys, labels: &[u32]) -> Result<Self, ProtocolError>
+    pub fn labels(&self) -> impl Iterator<Item = u32> + '_
+    low_level! fn eligibility( tx: &Transaction, prevouts: &[TxOut], ) -> Result<Result<(), SkipReason>, ProtocolError>
+    low_level! fn scan_tx( &self, tx: &Transaction, prevouts: &[TxOut], ) -> Result<TxScanOutcome, ProtocolError>
+    low_level! fn scan_indexed_tx(&self, indexed: &IndexedTx) -> Result<Vec<ScanMatch>, ProtocolError>
+    #[cfg(any(feature = "local-index", feature = "low-level"))] low_level! fn public_tweak_data_ignoring_segwit_version_rule( tx: &Transaction, prevouts: &[TxOut], ) -> Result<Result<PublicKey, SkipReason>, ProtocolError>
+    low_level! fn public_tweak_data( tx: &Transaction, prevouts: &[TxOut], ) -> Result<Result<PublicKey, SkipReason>, ProtocolError>
+impl fmt::Debug for ReceiveScanner
 
 ## source/bitcoin_core.rs
-pub struct CoreRestSource
-pub fn connect(rest_url: &str) -> Result<Self, SourceError>
-pub fn is_pruned(&self) -> bool
+#[derive(Debug)] pub struct CoreRestSource
+    <private field>
+    <private field>
+    <private field>
+    <private field>
+impl CoreRestSource
+    pub fn connect(rest_url: &str) -> Result<Self, SourceError>
+    pub fn is_pruned(&self) -> bool
+impl CoreRestSource
+impl ScanSource for CoreRestSource
 
 ## source/blindbit.rs
 pub struct BlindbitHttpSource<H>
-pub fn connect(oracle_url: &str, headers: H) -> Result<Self, SourceError>
-pub fn header_source(&self) -> &H
+    <private field>
+    <private field>
+impl<H: ScanSource> BlindbitHttpSource<H>
+    pub fn connect(oracle_url: &str, headers: H) -> Result<Self, SourceError>
+    pub fn header_source(&self) -> &H
+impl<H: ScanSource> ScanSource for BlindbitHttpSource<H>
 
 ## source/fixture.rs
-pub const FIXTURE_FORMAT: &str = "silent-sync-lab/fixture-chain/v1"
-pub struct FixtureFile
-pub format: String,
-pub description: String,
-pub network: Network,
-pub genesis_hash: BlockHash,
-pub blocks: Vec<FixtureBlock>,
-pub expected_detections: Vec<FixtureExpectedDetection>,
-pub struct FixtureBlock
-pub height: u32,
-pub block_hex: String,
-pub prevouts: Vec<Vec<FixturePrevout>>,
-pub struct FixturePrevout
-pub value_sats: u64,
-pub script_pubkey_hex: String,
-pub struct FixtureExpectedDetection
-pub height: u32,
-pub txid: Txid,
-pub vout: u32,
-pub k: u32,
-pub value_sats: u64,
-pub label: Option<u32>,
-pub note: String,
-pub struct FixtureSource
-pub fn from_path(path: &Path) -> Result<Self, SourceError>
-pub fn from_json_str(json: &str) -> Result<Self, SourceError>
-pub fn from_file(file: FixtureFile) -> Result<Self, SourceError>
-pub fn expected_detections(&self) -> &[FixtureExpectedDetection]
+pub const FIXTURE_FORMAT: &str = "silent-sync-lab/fixture-chain/v1";
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct FixtureFile
+    pub format: String,
+    pub description: String,
+    pub network: Network,
+    pub genesis_hash: BlockHash,
+    pub blocks: Vec<FixtureBlock>,
+    #[serde(default)]
+    pub expected_detections: Vec<FixtureExpectedDetection>,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct FixtureBlock
+    pub height: u32,
+    pub block_hex: String,
+    pub prevouts: Vec<Vec<FixturePrevout>>,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct FixturePrevout
+    pub value_sats: u64,
+    pub script_pubkey_hex: String,
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct FixtureExpectedDetection
+    pub height: u32,
+    pub txid: Txid,
+    pub vout: u32,
+    pub k: u32,
+    pub value_sats: u64,
+    pub label: Option<u32>,
+    pub note: String,
+#[derive(Debug, Clone)] pub struct FixtureSource
+    <private field>
+    <private field>
+    <private field>
+impl FixtureSource
+    pub fn from_path(path: &Path) -> Result<Self, SourceError>
+    pub fn from_json_str(json: &str) -> Result<Self, SourceError>
+    pub fn from_file(file: FixtureFile) -> Result<Self, SourceError>
+    pub fn expected_detections(&self) -> &[FixtureExpectedDetection]
+impl ScanSource for FixtureSource
 
 ## source/local_index.rs
-pub enum IndexPolicy
-  variant Bip352
-  variant IgnoreSegwitVersionRule
+#[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum IndexPolicy
+    Bip352,
+    IgnoreSegwitVersionRule,
 pub struct LocalTweakIndex<S>
-pub fn new(inner: S, policy: IndexPolicy) -> Self
-pub fn inner(&self) -> &S
+    <private field>
+    <private field>
+impl<S: ScanSource> LocalTweakIndex<S>
+    pub fn new(inner: S, policy: IndexPolicy) -> Self
+    pub fn inner(&self) -> &S
+impl<S: ScanSource> ScanSource for LocalTweakIndex<S>
 
 ## source/mod.rs
-#[cfg(feature = "core-rest")] pub mod bitcoin_core
-#[cfg(feature = "blindbit-http")] pub mod blindbit
-#[cfg(feature = "fixture")] pub mod fixture
-#[cfg(feature = "local-index")] pub mod local_index
-pub struct SourceCapabilities
-pub evidence_kind: EvidenceKind,
-pub verifies_merkle_root: bool,
-pub verifies_witness_commitment: bool,
-pub verifies_proof_of_work: bool,
-pub consensus_validated: bool,
-pub remote: bool,
-pub struct TxWithPrevouts
-pub tx: Transaction,
-pub prevouts: Vec<TxOut>,
-pub struct IndexedOutput
-pub vout: u32,
-pub value_sats: u64,
-pub output_key: [u8
-pub struct IndexedTx
-pub txid: Txid,
-pub tweak: PublicKey,
-pub outputs: Vec<IndexedOutput>,
-pub enum Evidence
-  variant FullBlock(Vec<TxWithPrevouts>)
-  variant TweakIndex(Vec<IndexedTx>)
-pub fn kind(&self) -> EvidenceKind
-pub struct BlockEvidence
-pub block: BlockRef,
-pub evidence: Evidence,
-pub struct ScanBatch
-pub blocks: Vec<BlockEvidence>,
-pub enum SourceError
-  variant InvalidRange
-  variant RangeUnavailable
-  variant InvalidData(String)
-  variant Unavailable(String)
-  variant Network(#[from] NetworkError)
-pub struct SourceStats
-pub requests: u64,
-pub downloaded_bytes: u64,
+#[cfg(feature = "core-rest")] pub mod bitcoin_core;
+#[cfg(feature = "blindbit-http")] pub mod blindbit;
+#[cfg(feature = "fixture")] pub mod fixture;
+#[cfg(feature = "local-index")] pub mod local_index;
+#[cfg(feature = "core-rest")] pub use bitcoin_core::CoreRestSource;
+#[cfg(feature = "blindbit-http")] pub use blindbit::BlindbitHttpSource;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)] pub struct SourceCapabilities
+    pub evidence_kind: EvidenceKind,
+    pub verifies_merkle_root: bool,
+    pub verifies_witness_commitment: bool,
+    pub verifies_proof_of_work: bool,
+    pub consensus_validated: bool,
+    pub remote: bool,
+#[derive(Debug, Clone, PartialEq, Eq)] pub struct TxWithPrevouts
+    pub tx: Transaction,
+    pub prevouts: Vec<TxOut>,
+#[derive(Debug, Clone, PartialEq, Eq)] pub struct IndexedOutput
+    pub vout: u32,
+    pub value_sats: u64,
+    pub output_key: [u8; 32],
+#[derive(Debug, Clone, PartialEq, Eq)] pub struct IndexedTx
+    pub txid: Txid,
+    pub tweak: PublicKey,
+    pub outputs: Vec<IndexedOutput>,
+#[derive(Debug, Clone, PartialEq, Eq)] #[non_exhaustive] pub enum Evidence
+    FullBlock(Vec<TxWithPrevouts>),
+    TweakIndex(Vec<IndexedTx>),
+impl Evidence
+    pub fn kind(&self) -> EvidenceKind
+#[derive(Debug, Clone, PartialEq, Eq)] pub struct BlockEvidence
+    pub block: BlockRef,
+    pub evidence: Evidence,
+#[derive(Debug, Clone, PartialEq, Eq, Default)] pub struct ScanBatch
+    pub blocks: Vec<BlockEvidence>,
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] #[non_exhaustive] pub enum SourceError
+    #[error("invalid range {from}..={to}")]
+    InvalidRange { from: u32, to: u32 },
+    #[error("range {from}..={to} is not fully available (source covers {available_from}..={available_to})")]
+    RangeUnavailable {
+        from: u32,
+        to: u32,
+        available_from: u32,
+        available_to: u32,
+    },
+    #[error("source data is invalid: {0}")]
+    InvalidData(String),
+    #[error("source is unavailable: {0}")]
+    Unavailable(String),
+    #[error(transparent)]
+    Network(#[from] NetworkError),
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)] pub struct SourceStats
+    pub requests: u64,
+    pub downloaded_bytes: u64,
 pub trait ScanSource
+    fn backend_id(&self) -> &str;
+    fn capabilities(&self) -> SourceCapabilities;
+    fn chain(&self) -> ChainIdentity;
+    fn tip(&self) -> Result<BlockRef, SourceError>;
+    fn fetch_range(&self, from: u32, to: u32) -> Result<ScanBatch, SourceError>;
+    fn block_ref(&self, height: u32) -> Result<BlockRef, SourceError>
+    fn block_refs(&self, from: u32, to: u32) -> Result<Vec<BlockRef>, SourceError>
+    fn stats(&self) -> SourceStats
 
 ## store.rs
-pub const SCANNER_VERSION: &str = concat!("sync-core/", env!("CARGO_PKG_VERSION"), "+bdk_sp@bb373e566fa2" )
-pub struct StoreMeta
-pub chain: ChainIdentity,
-pub wallet_id: String,
-pub backend_id: String,
-pub labels: Vec<u32>,
-pub birthday: u32,
-pub birthday_basis: String,
-pub scanner_version: String,
-pub enum StoreError
-  variant NotInitialized
-  variant AlreadyInitialized
-  variant Invariant(String)
-  variant Backend(String)
+pub const SCANNER_VERSION: &str = concat!( "sync-core/", env!("CARGO_PKG_VERSION"), "+bdk_sp@bb373e566fa2" );
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] pub struct StoreMeta
+    pub chain: ChainIdentity,
+    pub wallet_id: String,
+    pub backend_id: String,
+    pub labels: Vec<u32>,
+    pub birthday: u32,
+    pub birthday_basis: String,
+    pub scanner_version: String,
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] #[non_exhaustive] pub enum StoreError
+    #[error("the store has not been initialized")]
+    NotInitialized,
+    #[error("the store is already initialized")]
+    AlreadyInitialized,
+    #[error("store invariant violated: {0}")]
+    Invariant(String),
+    #[error("storage backend error: {0}")]
+    Backend(String),
 pub trait SyncStore
-pub fn check_append(meta: Option<&StoreMeta>, checkpoint: Option<BlockRef>, blocks: &[BlockRef], detections: &[DetectedOutput], already_stored: &dyn Fn(OutPoint) -> bool, block_hash_stored: &dyn Fn(BlockHash) -> bool, ) -> Result<(), StoreError>
-pub const MAX_STORABLE_SATS: u64 = i64::MAX as u64
+    fn meta(&self) -> Result<Option<StoreMeta>, StoreError>;
+    fn initialize(&mut self, meta: &StoreMeta) -> Result<(), StoreError>;
+    fn checkpoint(&self) -> Result<Option<BlockRef>, StoreError>;
+    fn block_at(&self, height: u32) -> Result<Option<BlockRef>, StoreError>;
+    fn append(
+        &mut self,
+        blocks: &[BlockRef],
+        detections: &[DetectedOutput],
+    ) -> Result<(), StoreError>;
+    fn rollback_to(&mut self, height: u32) -> Result<Vec<DetectedOutput>, StoreError>;
+    fn detections(&self) -> Result<Vec<DetectedOutput>, StoreError>;
+    fn block_count(&self) -> Result<u64, StoreError>;
+pub fn check_append( meta: Option<&StoreMeta>, checkpoint: Option<BlockRef>, blocks: &[BlockRef], detections: &[DetectedOutput], already_stored: &dyn Fn(OutPoint) -> bool, block_hash_stored: &dyn Fn(BlockHash) -> bool, ) -> Result<(), StoreError>
+pub const MAX_STORABLE_SATS: u64 = i64::MAX as u64;
 pub fn sort_detections(detections: &mut [DetectedOutput])
-pub struct MemoryStore
-pub fn new() -> Self
+#[derive(Debug, Clone, Default)] pub struct MemoryStore
+    <private field>
+    <private field>
+    <private field>
+impl MemoryStore
+    pub fn new() -> Self
+impl SyncStore for MemoryStore
 
 ## sync.rs
-pub struct SyncOptions
-pub chunk_size: u32,
-pub target_height: Option<u32>,
-pub max_blocks: Option<u64>,
-pub fn with_chunk_size(mut self, chunk_size: u32) -> Self
-pub fn with_target_height(mut self, target_height: Option<u32>) -> Self
-pub fn with_max_blocks(mut self, max_blocks: Option<u64>) -> Self
-pub enum SyncError
-  variant Store(#[from] StoreError)
-  variant Scan(#[from] ScanError)
-  variant BindingMismatch
-  variant SourceBehindCheckpoint
-  variant TargetAboveTip
-  variant ChainMovedDuringSync
-  variant InvalidChunkSize
-  variant Interrupted
-pub struct ReorgReport
-pub abandoned_checkpoint: BlockRef,
-pub fork_height: u32,
-pub blocks_rolled_back: u64,
-pub detections_removed: Vec<DetectedOutput>,
-pub struct SyncReport
-pub chain: ChainIdentity,
-pub backend_id: String,
-pub evidence_kind: EvidenceKind,
-pub wallet_id: String,
-pub labels_scanned: Vec<u32>,
-pub birthday: u32,
-pub resumed_from: Option<BlockRef>,
-pub reorg: Option<ReorgReport>,
-pub blocks_scanned: u64,
-pub txs_seen: u64,
-pub txs_scanned: u64,
-pub txs_skipped: BTreeMap<&'static str, u64>,
-pub new_detections: Vec<DetectedOutput>,
-pub checkpoint: Option<BlockRef>,
-pub source_tip: BlockRef,
-pub caught_up: bool,
-pub stopped_because: StopReason,
-pub enum StopReason
-  variant CaughtUp
-  variant TargetReached
-  variant MaxBlocksReached
-  variant BirthdayAboveTip
-  variant TipChanged
-  variant Error
-pub fn new_store_meta(source: &dyn ScanSource, scanner: &ReceiveScanner, wallet_id: &str, birthday: u32, birthday_basis: &str, ) -> StoreMeta
-pub fn sync(source: &dyn ScanSource, scanner: &ReceiveScanner, wallet_id: &str, store: &mut dyn SyncStore, options: &SyncOptions, ) -> Result<SyncReport, SyncError>
-pub fn sync_with_progress(source: &dyn ScanSource, scanner: &ReceiveScanner, wallet_id: &str, store: &mut dyn SyncStore, options: &SyncOptions, on_commit: &mut dyn FnMut(BlockRef), ) -> Result<SyncReport, SyncError>
+#[derive(Debug, Clone, PartialEq, Eq)] #[non_exhaustive] pub struct SyncOptions
+    pub chunk_size: u32,
+    pub target_height: Option<u32>,
+    pub max_blocks: Option<u64>,
+impl SyncOptions
+    pub fn with_chunk_size(mut self, chunk_size: u32) -> Self
+    pub fn with_target_height(mut self, target_height: Option<u32>) -> Self
+    pub fn with_max_blocks(mut self, max_blocks: Option<u64>) -> Self
+impl Default for SyncOptions
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] #[non_exhaustive] pub enum SyncError
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Scan(#[from] ScanError),
+    #[error("the store is bound to a different {field}: stored `{stored}`, given `{given}`{hint}")]
+    BindingMismatch {
+        field: &'static str,
+        stored: String,
+        given: String,
+        hint: &'static str,
+    },
+    #[error(
+        "source `{backend_id}` is behind the stored checkpoint (source tip {source_tip}, \
+         checkpoint {checkpoint}) and shows no competing chain; refusing to discard scanned \
+         blocks. If the chain was reorganized, sync again once the source has caught up"
+    )]
+    SourceBehindCheckpoint {
+        backend_id: String,
+        source_tip: u32,
+        checkpoint: u32,
+    },
+    #[error("target height {target} is above the source's tip {tip}")]
+    TargetAboveTip { target: u32, tip: u32 },
+    #[error(
+        "the chain changed while syncing: block {height} does not build on the stored \
+         checkpoint; run sync again"
+    )]
+    ChainMovedDuringSync { height: u32 },
+    #[error("chunk size must be at least 1")]
+    InvalidChunkSize,
+    #[error("sync interrupted after changing the store: {cause}")]
+    Interrupted {
+        cause: Box<SyncError>,
+        partial: Box<SyncReport>,
+    },
+impl From<SourceError> for SyncError
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)] #[non_exhaustive] pub struct ReorgReport
+    pub abandoned_checkpoint: BlockRef,
+    pub fork_height: u32,
+    pub blocks_rolled_back: u64,
+    pub detections_removed: Vec<DetectedOutput>,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)] #[non_exhaustive] pub struct SyncReport
+    pub chain: ChainIdentity,
+    pub backend_id: String,
+    pub evidence_kind: EvidenceKind,
+    pub wallet_id: String,
+    pub labels_scanned: Vec<u32>,
+    pub birthday: u32,
+    pub resumed_from: Option<BlockRef>,
+    pub reorg: Option<ReorgReport>,
+    pub blocks_scanned: u64,
+    pub txs_seen: u64,
+    pub txs_scanned: u64,
+    pub txs_skipped: BTreeMap<&'static str, u64>,
+    pub new_detections: Vec<DetectedOutput>,
+    pub checkpoint: Option<BlockRef>,
+    pub source_tip: BlockRef,
+    pub caught_up: bool,
+    pub stopped_because: StopReason,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)] #[serde(rename_all = "snake_case")] #[non_exhaustive] pub enum StopReason
+    CaughtUp,
+    TargetReached,
+    MaxBlocksReached,
+    BirthdayAboveTip,
+    TipChanged,
+    Error,
+pub fn new_store_meta( source: &dyn ScanSource, scanner: &ReceiveScanner, wallet_id: &str, birthday: u32, birthday_basis: &str, ) -> StoreMeta
+pub fn sync( source: &dyn ScanSource, scanner: &ReceiveScanner, wallet_id: &str, store: &mut dyn SyncStore, options: &SyncOptions, ) -> Result<SyncReport, SyncError>
+pub fn sync_with_progress( source: &dyn ScanSource, scanner: &ReceiveScanner, wallet_id: &str, store: &mut dyn SyncStore, options: &SyncOptions, on_commit: &mut dyn FnMut(BlockRef), ) -> Result<SyncReport, SyncError>
 
 ## verify.rs
-pub enum Side
-  variant Candidate
-  variant Reference
-pub enum Explanation
-  variant BlockHashDiffers
-  variant ReferenceNotEligible
-  variant ReferenceTransactionMissing
-  variant ReferenceScannedNoMatch
-  variant CandidateOmittedTransaction
-  variant CandidateTweakDiffers
-  variant CandidateOmittedOutput
-  variant CandidateOutputDiffers
-  variant DetailsDiffer
-  variant Unexplained
-pub struct Difference
-pub height: u32,
-pub txid: Txid,
-pub vout: u32,
-pub only_in: Option<Side>,
-pub candidate: Option<DetectedOutput>,
-pub reference: Option<DetectedOutput>,
-pub explanation: Explanation,
-pub struct VerificationReport
-pub chain: ChainIdentity,
-pub candidate_backend: String,
-pub reference_backend: String,
-pub first_height: u32,
-pub last_height: u32,
-pub labels_scanned: Vec<u32>,
-pub agreed: u64,
-pub candidate_only: u64,
-pub reference_only: u64,
-pub differences: Vec<Difference>,
-pub block_hash_mismatches: Vec<u32>,
-pub identical: bool,
-pub unexplained: u64,
-pub fn cross_check(candidate: &dyn ScanSource, reference: &dyn ScanSource, scanner: &ReceiveScanner, expected_chain: ChainIdentity, from: u32, to: u32, ) -> Result<VerificationReport, ScanError>
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)] #[serde(rename_all = "snake_case")] pub enum Side
+    Candidate,
+    Reference,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)] #[serde(tag = "kind", rename_all = "snake_case")] #[non_exhaustive] pub enum Explanation
+    BlockHashDiffers,
+    ReferenceNotEligible { reason: &'static str },
+    ReferenceTransactionMissing,
+    ReferenceScannedNoMatch,
+    CandidateOmittedTransaction,
+    CandidateTweakDiffers,
+    CandidateOmittedOutput,
+    CandidateOutputDiffers,
+    DetailsDiffer,
+    Unexplained { note: String },
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)] #[non_exhaustive] pub struct Difference
+    pub height: u32,
+    pub txid: Txid,
+    pub vout: u32,
+    pub only_in: Option<Side>,
+    pub candidate: Option<DetectedOutput>,
+    pub reference: Option<DetectedOutput>,
+    pub explanation: Explanation,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)] #[non_exhaustive] pub struct VerificationReport
+    pub chain: ChainIdentity,
+    pub candidate_backend: String,
+    pub reference_backend: String,
+    pub first_height: u32,
+    pub last_height: u32,
+    pub labels_scanned: Vec<u32>,
+    pub agreed: u64,
+    pub candidate_only: u64,
+    pub reference_only: u64,
+    pub differences: Vec<Difference>,
+    pub block_hash_mismatches: Vec<u32>,
+    pub identical: bool,
+    pub unexplained: u64,
+pub fn cross_check( candidate: &dyn ScanSource, reference: &dyn ScanSource, scanner: &ReceiveScanner, expected_chain: ChainIdentity, from: u32, to: u32, ) -> Result<VerificationReport, ScanError>
 

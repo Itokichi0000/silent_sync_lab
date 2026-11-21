@@ -24,6 +24,11 @@ mod http;
 #[cfg(feature = "local-index")]
 pub mod local_index;
 
+#[cfg(feature = "core-rest")]
+pub use bitcoin_core::CoreRestSource;
+#[cfg(feature = "blindbit-http")]
+pub use blindbit::BlindbitHttpSource;
+
 #[cfg(any(feature = "core-rest", feature = "fixture"))]
 use crate::bitcoin::script::{self, Instruction};
 use crate::{

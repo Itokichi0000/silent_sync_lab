@@ -1,0 +1,10 @@
+[package]
+name = "probe-low-level"
+description = "Checks silent-sync with the `low-level` feature: per-transaction API yes, output tweaks no."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+silent-sync = { path = "../../crates/silent-sync", features = ["low-level"] }

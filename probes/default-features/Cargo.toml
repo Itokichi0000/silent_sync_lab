@@ -1,0 +1,10 @@
+[package]
+name = "probe-default-features"
+description = "Checks silent-sync as an embedder gets it: default features only."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+silent-sync = { path = "../../crates/silent-sync" }
