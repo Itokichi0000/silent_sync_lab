@@ -1,7 +1,7 @@
 //! Persistent sync state, as an abstraction.
 //!
-//! `sync-core` defines *what* must be stored and which invariants every store
-//! has to enforce; it does not depend on a database. `lab-storage` implements
+//! `silent-sync` defines *what* must be stored and which invariants every store
+//! has to enforce; it does not depend on a database. `silent-sync-sqlite` implements
 //! [`SyncStore`] on SQLite, and [`MemoryStore`] here is the reference
 //! implementation used in tests.
 //!
@@ -20,6 +20,10 @@ use std::collections::BTreeSet;
 
 /// Identifies the scanning logic that produced the stored detections. A store
 /// written by a different version must be rescanned rather than extended.
+///
+/// The `sync-core/` prefix is this crate's former name. It is an identifier,
+/// not a crate name, and is kept so that stores written before the rename
+/// remain valid.
 pub const SCANNER_VERSION: &str = concat!(
     "sync-core/",
     env!("CARGO_PKG_VERSION"),

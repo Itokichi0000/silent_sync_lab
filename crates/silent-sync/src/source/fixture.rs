@@ -25,7 +25,7 @@ use crate::{
         consensus::encode::deserialize_hex, Amount, Block, BlockHash, ScriptBuf, TxOut, Txid,
     },
     models::{BlockRef, EvidenceKind},
-    network::{ChainIdentity, LabNetwork},
+    network::{ChainIdentity, Network},
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::Path};
@@ -41,7 +41,7 @@ const FIXTURE_BACKEND_ID: &str = "fixture";
 pub struct FixtureFile {
     pub format: String,
     pub description: String,
-    pub network: LabNetwork,
+    pub network: Network,
     pub genesis_hash: BlockHash,
     pub blocks: Vec<FixtureBlock>,
     /// Outputs the fixture author *created for* the documented receiver, as
@@ -171,7 +171,7 @@ impl FixtureSource {
 
 fn decode_block(
     fb: &FixtureBlock,
-    network: LabNetwork,
+    network: Network,
     parent_hash: BlockHash,
     seen_txids: &mut BTreeSet<Txid>,
 ) -> Result<(BlockRef, Vec<TxWithPrevouts>), SourceError> {

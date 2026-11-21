@@ -1,5 +1,8 @@
 # PROGRESS
 
+> **名称変更（2026-11-21、DECISIONS D-039）**: クレート `sync-core` → `silent-sync`、`lab-storage` → `silent-sync-sqlite`、型 `LabNetwork` → `Network`、`LabAddress` → `SilentPaymentAddress`。
+> 以下の Phase 0〜5 の記録は当時の名前のまま残している（`crates/sync-core/…` は現在の `crates/silent-sync/…`）。
+
 最終更新: 2026-11-21
 
 | Phase | 内容 | 状態 |

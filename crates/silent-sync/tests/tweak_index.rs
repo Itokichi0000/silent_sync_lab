@@ -14,11 +14,11 @@ use lab_testkit::{
     regtest_wallet,
     test_source::{Tamper, TestSource},
 };
-use sync_core::{
+use silent_sync::{
     bitcoin::{hashes::Hash, Txid},
     engine::{scan_range, ScanError},
     models::{DetectedOutput, EvidenceKind},
-    network::{ChainIdentity, LabNetwork},
+    network::{ChainIdentity, Network},
     protocol::{ProtocolError, ReceiveScanner},
     source::{
         fixture::FixtureSource,
@@ -33,7 +33,7 @@ use sync_core::{
 const TIP: u32 = 8;
 
 fn regtest() -> ChainIdentity {
-    ChainIdentity::for_network(LabNetwork::Regtest)
+    ChainIdentity::for_network(Network::Regtest)
 }
 
 fn scanner_with(labels: &[u32]) -> ReceiveScanner {
@@ -321,7 +321,7 @@ fn omissions_and_alterations_by_an_index_are_silent_until_cross_checked() {
 fn an_index_can_fabricate_a_payment_and_only_a_cross_check_shows_it() {
     let blocks = full_blocks();
     let scanner = scanner();
-    let receiver = fixture_gen::lab_receiver_keys().address(LabNetwork::Regtest);
+    let receiver = fixture_gen::lab_receiver_keys().address(Network::Regtest);
     let fake_txid = Txid::from_byte_array([0x42; 32]);
     let fabricated =
         regtest_wallet::fabricated_index_entry(fake_txid, receiver, &[(0, 21_000_000)]);
@@ -411,7 +411,7 @@ fn cross_check_refuses_mismatched_chains_and_reports_block_hash_differences() {
         .iter()
         .all(|d| d.height > 5 && d.explanation == Explanation::BlockHashDiffers));
 
-    let signet = ChainIdentity::for_network(LabNetwork::Signet);
+    let signet = ChainIdentity::for_network(Network::Signet);
     assert!(matches!(
         cross_check(&index(IndexPolicy::Bip352), &main, &scanner, signet, 1, TIP),
         Err(ScanError::ChainMismatch { .. })
@@ -461,7 +461,7 @@ fn impossible_index_claims_are_refused() {
             other => panic!("expected a refusal mentioning `{needle}`, got {other:?}"),
         }
     };
-    let max_sats = sync_core::bitcoin::Amount::MAX_MONEY.to_sat();
+    let max_sats = silent_sync::bitcoin::Amount::MAX_MONEY.to_sat();
 
     // An entry without outputs: an index lists a transaction for its outputs.
     refused(&|txs| txs[0].outputs.clear(), "lists no outputs");
@@ -478,7 +478,7 @@ fn impossible_index_claims_are_refused() {
     refused(
         &|txs| {
             let filler = txs[0].outputs[1].clone();
-            let limit = sync_core::engine::MAX_INDEXED_OUTPUTS_PER_BLOCK as u32;
+            let limit = silent_sync::engine::MAX_INDEXED_OUTPUTS_PER_BLOCK as u32;
             txs[0].outputs.extend((0..limit).map(|n| IndexedOutput {
                 vout: 10 + n,
                 ..filler.clone()
@@ -493,7 +493,7 @@ fn impossible_index_claims_are_refused() {
             let txs = indexed(b, i);
             txs[0].outputs[1].value_sats = max_sats;
             let filler = txs[0].outputs[1].clone();
-            let room = sync_core::engine::MAX_INDEXED_OUTPUTS_PER_BLOCK - txs[0].outputs.len();
+            let room = silent_sync::engine::MAX_INDEXED_OUTPUTS_PER_BLOCK - txs[0].outputs.len();
             txs[0]
                 .outputs
                 .extend((0..room as u32).map(|n| IndexedOutput {
@@ -544,9 +544,9 @@ fn the_local_index_lists_only_taproot_outputs() {
             if let (2, Evidence::FullBlock(txs)) = (block.block.height, &mut block.evidence) {
                 let mut script = vec![0x00, 0x20];
                 script.extend([0x77; 32]);
-                txs[1].tx.output.push(sync_core::bitcoin::TxOut {
-                    value: sync_core::bitcoin::Amount::from_sat(1_234),
-                    script_pubkey: sync_core::bitcoin::ScriptBuf::from_bytes(script),
+                txs[1].tx.output.push(silent_sync::bitcoin::TxOut {
+                    value: silent_sync::bitcoin::Amount::from_sat(1_234),
+                    script_pubkey: silent_sync::bitcoin::ScriptBuf::from_bytes(script),
                 });
             }
         }
@@ -572,7 +572,7 @@ fn the_local_index_lists_only_taproot_outputs() {
 /// order the matching (by `k`) finds them in.
 #[test]
 fn detections_of_one_transaction_are_ordered_by_output_index() {
-    let receiver = fixture_gen::lab_receiver_keys().address(LabNetwork::Regtest);
+    let receiver = fixture_gen::lab_receiver_keys().address(Network::Regtest);
     let txid = Txid::from_byte_array([0x43; 32]);
     // k = 0 sits at output 5, k = 1 at output 2.
     let entry = regtest_wallet::fabricated_index_entry(txid, receiver, &[(5, 500), (2, 200)]);
@@ -628,7 +628,7 @@ fn a_store_is_bound_to_the_index_policy() {
     assert!(
         matches!(
             result,
-            Err(sync_core::sync::SyncError::BindingMismatch {
+            Err(silent_sync::sync::SyncError::BindingMismatch {
                 field: "backend",
                 ..
             })

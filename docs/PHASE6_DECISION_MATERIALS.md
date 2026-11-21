@@ -11,7 +11,7 @@ EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
 | 成果 | 状態 | 根拠 |
 |---|---|---|
 | BIP352 受信検出（上流 `bdk_sp` を呼ぶ。独自の暗号なし） | 公式ベクトル 29 件を通過。上流の逸脱 2 点を補正 | `tests/bip352_vectors.rs`、RESEARCH §3.3、D-005 / D-006 |
-| 同期コア `sync-core`（CLI・表示・DB に依存しない） | 公開項目 約 110。フルブロック型と tweak インデックス型の 2 種の証拠を別の型で扱う | `crates/sync-core`（約 4,800 行 + テスト約 4,600 行） |
+| 同期コア `silent-sync`（CLI・表示・DB に依存しない） | 公開項目 約 110。フルブロック型と tweak インデックス型の 2 種の証拠を別の型で扱う | `crates/silent-sync`（約 4,800 行 + テスト約 4,600 行） |
 | バックエンド 4 種 | fixture / Bitcoin Core REST / BlindBit Oracle v2 HTTP / ローカル計算のインデックス | Gate 2・4 |
 | 永続化・再開・reorg | ストア抽象 + SQLite。中断・強制終了・reorg・ソース遅延を扱う | Gate 3、D-024〜D-027、D-034 |
 | バックエンド間の突き合わせ（`verify`） | 差分を tx 単位で説明 | D-033、実ノード + 実 Oracle で確認 |
@@ -28,7 +28,7 @@ EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
 | 3 | 比較対象のバックエンドから同じ検出結果 | 済。差異は 1 種類（SegWit v2 の扱い）で、理由を説明できる |
 | 4 | コールド同期 / 中断再開 / 完全再スキャンを測定し再現可能な結果 | 済（ループバック・最大 1000 ブロックの範囲で） |
 | 5 | データ欠落を混ぜた場合の影響と、検出できる・できないの報告 | 済 |
-| 6 | 同期コアを CLI 固有の表示から分離 | 済（依存方向は `lab-cli` → `sync-core` のみ） |
+| 6 | 同期コアを CLI 固有の表示から分離 | 済（依存方向は `lab-cli` → `silent-sync` のみ） |
 
 ## 2. 測定と実装から分かった事実
 

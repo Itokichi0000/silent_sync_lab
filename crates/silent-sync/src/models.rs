@@ -6,7 +6,7 @@
 
 use crate::{
     bitcoin::{BlockHash, Txid},
-    network::LabNetwork,
+    network::Network,
 };
 use serde::{Deserialize, Serialize};
 
@@ -45,7 +45,7 @@ pub struct MatchProvenance {
 /// tracked (design spec §2, §6).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DetectedOutput {
-    pub network: LabNetwork,
+    pub network: Network,
     pub block: BlockRef,
     pub txid: Txid,
     pub vout: u32,

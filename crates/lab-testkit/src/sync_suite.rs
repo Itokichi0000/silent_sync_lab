@@ -4,17 +4,17 @@
 //!
 //! Covers design-spec cases T07 (interrupt and resume), T08 (restore from a
 //! birthday vs. full rescan) and T09 (reorganization), plus the fail-closed
-//! rules of `sync_core::sync`.
+//! rules of `silent_sync::sync`.
 
 use crate::{
     fixture_gen::{self, FORK_HEIGHT, LABEL_NOT_BACKED_UP, LABEL_USED},
     test_source::TestSource,
 };
-use sync_core::{
+use silent_sync::{
     bitcoin::{hashes::Hash as _, OutPoint, Txid},
     engine::{scan_range, ScanError},
     models::{BlockRef, DetectedOutput},
-    network::{ChainIdentity, LabNetwork},
+    network::{ChainIdentity, Network},
     protocol::ReceiveScanner,
     source::{ScanSource, SourceError},
     store::{StoreError, SyncStore, SCANNER_VERSION},
@@ -61,11 +61,11 @@ fn run(source: &dyn ScanSource, store: &mut dyn SyncStore, opts: &SyncOptions) -
 /// What a stateless scan of `from..=to` on `chain` finds: the reference every
 /// stored result is compared against.
 fn reference(chain: &dyn ScanSource, from: u32, to: u32) -> Vec<DetectedOutput> {
-    let regtest = ChainIdentity::for_network(LabNetwork::Regtest);
+    let regtest = ChainIdentity::for_network(Network::Regtest);
     let mut found = scan_range(chain, &scanner(), regtest, from, to)
         .expect("reference scan")
         .detected_received_outputs;
-    sync_core::store::sort_detections(&mut found);
+    silent_sync::store::sort_detections(&mut found);
     found
 }
 
@@ -437,7 +437,7 @@ pub fn the_reason_a_sync_stopped_is_reported(new_store: StoreFactory<'_>) {
 /// chunks add up to those of one stateless scan.
 pub fn progress_and_counters_cover_every_chunk(new_store: StoreFactory<'_>) {
     let source = TestSource::new();
-    let regtest = ChainIdentity::for_network(LabNetwork::Regtest);
+    let regtest = ChainIdentity::for_network(Network::Regtest);
     let whole = scan_range(source.main_chain(), &scanner(), regtest, 1, MAIN_TIP).expect("scan");
     assert!(
         whole.txs_skipped.len() >= 2 && whole.txs_skipped.values().sum::<u64>() > 2,
@@ -862,7 +862,7 @@ pub fn a_store_only_syncs_what_it_is_bound_to(new_store: StoreFactory<'_>) {
     // Another chain.
     source
         .chain_override
-        .set(Some(ChainIdentity::for_network(LabNetwork::Signet)));
+        .set(Some(ChainIdentity::for_network(Network::Signet)));
     mismatch(
         sync(&source, &scanner(), &wallet_id(), store.as_mut(), &opts),
         "chain",
@@ -1019,7 +1019,7 @@ pub fn stores_reject_inconsistent_appends(new_store: StoreFactory<'_>) {
     huge[0].value_sats = u64::MAX;
     invariant(store.append(&[block(3)], &huge), "does not fit the store");
     let mut at_limit = at(3);
-    at_limit[0].value_sats = sync_core::store::MAX_STORABLE_SATS + 1;
+    at_limit[0].value_sats = silent_sync::store::MAX_STORABLE_SATS + 1;
     invariant(
         store.append(&[block(3)], &at_limit),
         "does not fit the store",
@@ -1041,7 +1041,7 @@ pub fn stores_reject_inconsistent_appends(new_store: StoreFactory<'_>) {
 
     // A detection that claims another network.
     let mut foreign = at(3);
-    foreign[0].network = LabNetwork::Signet;
+    foreign[0].network = Network::Signet;
     invariant(
         store.append(&[block(3)], &foreign),
         "detection on signet in a regtest store",
@@ -1080,7 +1080,7 @@ pub fn stores_reject_inconsistent_appends(new_store: StoreFactory<'_>) {
     invariant(store.append(&[block(3)], &[]), "must be the birthday 2");
     // The largest representable value is accepted and read back unchanged.
     let mut largest = at(2);
-    largest[0].value_sats = sync_core::store::MAX_STORABLE_SATS;
+    largest[0].value_sats = silent_sync::store::MAX_STORABLE_SATS;
     store.append(&[block(2)], &largest).expect("append");
     assert_eq!(store.detections().expect("d"), largest);
 }

@@ -42,15 +42,15 @@
 
 | crate | バージョン | ライセンス | 使用箇所 |
 |---|---|---|---|
-| `serde` | 1.0.229 | MIT OR Apache-2.0 | `sync-core`（モデルと fixture 形式） |
-| `serde_json` | 1.0.154 | MIT OR Apache-2.0 | `sync-core`, `lab-cli` |
-| `thiserror` | 2.0.21 | MIT OR Apache-2.0 | `sync-core`（エラー型） |
+| `serde` | 1.0.229 | MIT OR Apache-2.0 | `silent-sync`（モデルと fixture 形式） |
+| `serde_json` | 1.0.154 | MIT OR Apache-2.0 | `silent-sync`, `lab-cli` |
+| `thiserror` | 2.0.21 | MIT OR Apache-2.0 | `silent-sync`（エラー型） |
 | `clap` | 4.6.9 | MIT OR Apache-2.0 | `lab-cli` のみ |
-| `minreq` | 2.14.1（`default-features = false`: TLS・プロキシ・JSON なし） | ISC | `sync-core` の feature `core-rest` / `blindbit-http`（ループバックの HTTP GET のみ。DECISIONS D-020） |
-| `rusqlite` | 0.37.0（feature `bundled`: SQLite を同梱ビルド） | MIT | `lab-storage` のみ（DECISIONS D-024） |
+| `minreq` | 2.14.1（`default-features = false`: TLS・プロキシ・JSON なし） | ISC | `silent-sync` の feature `core-rest` / `blindbit-http`（ループバックの HTTP GET のみ。DECISIONS D-020） |
+| `rusqlite` | 0.37.0（feature `bundled`: SQLite を同梱ビルド） | MIT | `silent-sync-sqlite` のみ（DECISIONS D-024） |
 | `libsqlite3-sys` | 0.35.0（同梱する SQLite 本体はパブリックドメイン） | MIT | `rusqlite` 経由 |
 
-- `sync-core` は既定の feature では HTTP クライアントにもデータベースにも依存しない（`minreq` は optional、SQLite は別クレート）。
+- `silent-sync` は既定の feature では HTTP クライアントにもデータベースにも依存しない（`minreq` は optional、SQLite は別クレート）。
 - `lab-cli` は `build.rs` を持つ（依存なし）。ビルドに使ったコンパイラのバージョンとターゲットを、ベンチマーク結果に記録するために埋め込むだけ。
 
 ## 推移的依存（すべて）

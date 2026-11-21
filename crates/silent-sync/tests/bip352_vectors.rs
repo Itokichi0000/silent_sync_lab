@@ -1,4 +1,4 @@
-//! T01 — BIP352 official receiving test vectors, run through `sync-core`'s
+//! T01 — BIP352 official receiving test vectors, run through `silent-sync`'s
 //! `ReceiveScanner` (which delegates all cryptography to upstream `bdk_sp`).
 //!
 //! The vector file is the canonical one from bitcoin/bips, pinned by SHA-256
@@ -9,8 +9,7 @@
 #![allow(clippy::unwrap_used)] // test code: a panic is the failure report
 
 use serde::Deserialize;
-use std::collections::BTreeSet;
-use sync_core::{
+use silent_sync::{
     bitcoin::{
         absolute::LockTime,
         consensus::deserialize,
@@ -19,14 +18,17 @@ use sync_core::{
         key::Secp256k1,
         secp256k1::{Message, PublicKey, Scalar, SecretKey},
         transaction::Version,
-        Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
+        Amount, Network as BitcoinNetwork, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
+        Txid, Witness,
     },
-    network::LabNetwork,
+    network::Network,
     protocol::{
-        LabAddress, ProtocolError, ReceiveScanner, ReceiverKeys, SkipReason, TxScanOutcome, K_MAX,
+        ProtocolError, ReceiveScanner, ReceiverKeys, SilentPaymentAddress, SkipReason,
+        TxScanOutcome, K_MAX,
     },
     source::{IndexedOutput, IndexedTx},
 };
+use std::collections::BTreeSet;
 
 const VECTORS_JSON: &str =
     include_str!("../../../fixtures/bip352/send_and_receive_test_vectors.json");
@@ -160,14 +162,14 @@ fn receiver(given: &Given) -> (ReceiverKeys, SecretKey) {
     (keys, spend_sk)
 }
 
-/// Addresses in the vectors use the mainnet prefix. `sync-core` cannot encode
+/// Addresses in the vectors use the mainnet prefix. `silent-sync` cannot encode
 /// for mainnet, so the keys it derived are re-encoded here with upstream's
 /// encoder purely to compare strings.
-fn mainnet_string(address: &LabAddress) -> String {
+fn mainnet_string(address: &SilentPaymentAddress) -> String {
     bdk_sp::encoding::SilentPaymentCode::new_v0(
         address.scan_public_key(),
         address.spend_public_key(),
-        Network::Bitcoin,
+        BitcoinNetwork::Bitcoin,
     )
     .to_string()
 }
@@ -180,10 +182,10 @@ fn check_receiving(comment: &str, case: &Receiving) {
 
     // Address derivation, including labelled addresses.
     let mut addresses = BTreeSet::new();
-    addresses.insert(mainnet_string(&keys.address(LabNetwork::Regtest)));
+    addresses.insert(mainnet_string(&keys.address(Network::Regtest)));
     for &m in &case.given.labels {
         addresses.insert(mainnet_string(
-            &keys.labelled_address(LabNetwork::Regtest, m).unwrap(),
+            &keys.labelled_address(Network::Regtest, m).unwrap(),
         ));
     }
     let expected_addresses: BTreeSet<String> = case.expected.addresses.iter().cloned().collect();
@@ -422,7 +424,7 @@ fn k_max_vector() {
         let code = bdk_sp::encoding::SilentPaymentCode::new_v0(
             scan_sk.public_key(&secp),
             spend_pk,
-            Network::Regtest,
+            BitcoinNetwork::Regtest,
         );
         let label = bdk_sp::encoding::SilentPaymentCode::get_label(scan_sk, 0);
         let label_point = code
@@ -484,7 +486,7 @@ fn upstream_label_lookup(
     let code = bdk_sp::encoding::SilentPaymentCode::new_v0(
         scan_sk.public_key(&secp),
         spend_pk,
-        Network::Regtest,
+        BitcoinNetwork::Regtest,
     );
     labels
         .iter()

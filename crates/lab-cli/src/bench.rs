@@ -12,23 +12,23 @@
 //! path or a URL, so it goes to stderr and never into the file. The one
 //! free-form field is the notes the user passes on the command line.
 
-use lab_storage::SqliteStore;
 use serde::{Deserialize, Serialize};
+use silent_sync::{
+    bitcoin::OutPoint,
+    engine::{scan_range, ScanError},
+    models::DetectedOutput,
+    network::{ChainIdentity, Network},
+    protocol::ReceiveScanner,
+    source::{ScanSource, SourceError, SourceStats},
+    store::{StoreError, SyncStore, SCANNER_VERSION},
+    sync::{new_store_meta, sync, SyncError, SyncOptions},
+};
+use silent_sync_sqlite::SqliteStore;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
     path::{Path, PathBuf},
     time::Instant,
-};
-use sync_core::{
-    bitcoin::OutPoint,
-    engine::{scan_range, ScanError},
-    models::DetectedOutput,
-    network::{ChainIdentity, LabNetwork},
-    protocol::ReceiveScanner,
-    source::{ScanSource, SourceError, SourceStats},
-    store::{StoreError, SyncStore, SCANNER_VERSION},
-    sync::{new_store_meta, sync, SyncError, SyncOptions},
 };
 
 pub const FORMAT: &str = "silent-sync-lab/benchmark-v1";
@@ -109,7 +109,7 @@ pub struct BenchRecord {
     /// before a source was opened).
     pub backend_id: String,
     pub mode: Mode,
-    pub network: LabNetwork,
+    pub network: Network,
     pub evidence_kind: String,
     pub from_height: u32,
     pub to_height: u32,
@@ -242,7 +242,7 @@ impl Default for CpuClock {
 pub type OpenSource<'a> = &'a dyn Fn() -> Result<Box<dyn ScanSource>, String>;
 
 pub struct BenchPlan<'a> {
-    pub network: LabNetwork,
+    pub network: Network,
     /// (name used on the command line, how to open it)
     pub backends: Vec<(String, OpenSource<'a>)>,
     pub modes: Vec<Mode>,
@@ -425,7 +425,7 @@ fn opened(open: OpenSource<'_>) -> Result<Box<dyn ScanSource>, RunError> {
 
 struct Runner<'a> {
     cpu: &'a CpuClock,
-    network: LabNetwork,
+    network: Network,
     scanner: &'a ReceiveScanner,
     wallet_id: &'a str,
     from: u32,
@@ -1245,7 +1245,7 @@ mod tests {
             backend: backend.to_string(),
             backend_id: backend.to_string(),
             mode,
-            network: LabNetwork::Regtest,
+            network: Network::Regtest,
             evidence_kind: "full_block_with_prevouts".to_string(),
             from_height: 1,
             to_height: 10,
@@ -1373,8 +1373,8 @@ mod tests {
     #[test]
     fn a_restore_that_differs_from_the_deleted_store_is_a_failed_run() {
         use lab_testkit::fixture_gen;
+        use silent_sync::source::fixture::FixtureSource;
         use std::cell::Cell;
-        use sync_core::source::fixture::FixtureSource;
 
         let keys = fixture_gen::lab_receiver_keys();
         let scanner = ReceiveScanner::new(&keys, &[fixture_gen::LABEL_USED]).expect("scanner");
@@ -1392,7 +1392,7 @@ mod tests {
         };
         fn plan<'a>(modes: Vec<Mode>, open: OpenSource<'a>) -> BenchPlan<'a> {
             BenchPlan {
-                network: LabNetwork::Regtest,
+                network: Network::Regtest,
                 backends: vec![("fixture".to_string(), open)],
                 modes,
                 from: 1,

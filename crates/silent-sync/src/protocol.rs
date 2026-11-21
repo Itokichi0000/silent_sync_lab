@@ -22,9 +22,9 @@ use crate::{
         script::Instruction,
         secp256k1::{self, PublicKey, Scalar, SecretKey},
         transaction::Version,
-        Amount, Network, OutPoint, Script, ScriptBuf, Transaction, TxIn, TxOut,
+        Amount, Network as BitcoinNetwork, OutPoint, Script, ScriptBuf, Transaction, TxIn, TxOut,
     },
-    network::LabNetwork,
+    network::Network,
     source::IndexedTx,
 };
 use bdk_sp::{
@@ -97,8 +97,8 @@ impl ReceiverKeys {
     }
 
     /// The unlabelled silent payment address for `network`.
-    pub fn address(&self, network: LabNetwork) -> LabAddress {
-        LabAddress {
+    pub fn address(&self, network: Network) -> SilentPaymentAddress {
+        SilentPaymentAddress {
             network,
             scan: self.scan_public_key(),
             spend: self.spend_pk,
@@ -108,22 +108,22 @@ impl ReceiverKeys {
     /// The labelled silent payment address for label integer `m`.
     pub fn labelled_address(
         &self,
-        network: LabNetwork,
+        network: Network,
         m: u32,
-    ) -> Result<LabAddress, ProtocolError> {
+    ) -> Result<SilentPaymentAddress, ProtocolError> {
         let label = SilentPaymentCode::get_label(self.scan_sk, m);
         let labelled = self
             .code(network.to_bitcoin())
             .add_label(label)
             .map_err(|e| ProtocolError::Label(e.to_string()))?;
-        Ok(LabAddress {
+        Ok(SilentPaymentAddress {
             network,
             scan: labelled.scan,
             spend: labelled.spend,
         })
     }
 
-    fn code(&self, network: Network) -> SilentPaymentCode {
+    fn code(&self, network: BitcoinNetwork) -> SilentPaymentCode {
         SilentPaymentCode::new_v0(self.scan_public_key(), self.spend_pk, network)
     }
 }
@@ -141,17 +141,17 @@ impl fmt::Debug for ReceiverKeys {
 ///
 /// The upstream address type has a public, mutable `network` field, so handing
 /// it out would let a caller re-encode it for mainnet. This type keeps the
-/// network private and can only be created for a [`LabNetwork`]; its `Display`
+/// network private and can only be created for a [`Network`]; its `Display`
 /// output therefore always carries a test-network prefix.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct LabAddress {
-    network: LabNetwork,
+pub struct SilentPaymentAddress {
+    network: Network,
     scan: PublicKey,
     spend: PublicKey,
 }
 
-impl LabAddress {
-    pub fn network(&self) -> LabNetwork {
+impl SilentPaymentAddress {
+    pub fn network(&self) -> Network {
         self.network
     }
 
@@ -165,15 +165,15 @@ impl LabAddress {
     }
 }
 
-impl fmt::Display for LabAddress {
+impl fmt::Display for SilentPaymentAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         SilentPaymentCode::new_v0(self.scan, self.spend, self.network.to_bitcoin()).fmt(f)
     }
 }
 
-impl fmt::Debug for LabAddress {
+impl fmt::Debug for SilentPaymentAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "LabAddress({self})")
+        write!(f, "SilentPaymentAddress({self})")
     }
 }
 
@@ -324,7 +324,7 @@ impl ReceiveScanner {
     fn build(keys: &ReceiverKeys, labels: BTreeSet<u32>) -> Result<Self, ProtocolError> {
         let secp = Secp256k1::new();
         // The network only affects the textual encoding, never the keys.
-        let code = keys.code(Network::Regtest);
+        let code = keys.code(BitcoinNetwork::Regtest);
         let neg_spend = code.spend.negate(&secp);
 
         let mut lookup = BTreeMap::<PublicKey, (Scalar, u32)>::new();

@@ -1,7 +1,7 @@
 //! Store wrappers for tests: fault injection that does not belong in a
 //! production store.
 
-use sync_core::{
+use silent_sync::{
     models::{BlockRef, DetectedOutput},
     store::{StoreError, StoreMeta, SyncStore},
 };

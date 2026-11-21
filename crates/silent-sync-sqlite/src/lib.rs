@@ -23,12 +23,12 @@
 //! protects the file against someone who can write to it.
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
-use std::{path::Path, time::Duration};
-use sync_core::{
+use silent_sync::{
     bitcoin::{BlockHash, OutPoint, Txid},
     models::{BlockRef, DetectedOutput, EvidenceKind, MatchProvenance},
     store::{check_append, sort_detections, StoreError, StoreMeta, SyncStore},
 };
+use std::{path::Path, time::Duration};
 
 /// Bumped whenever the table layout changes. Older files are refused.
 pub const SCHEMA_VERSION: u32 = 1;

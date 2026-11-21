@@ -10,14 +10,14 @@ use lab_testkit::{
     fake_http::{encode_spent_outputs, fixture_blocks, FakeCoreRest, FakeHttp},
     fixture_gen::{self, LABEL_USED},
 };
-use sync_core::{
+use silent_sync::{
     bitcoin::{
         blockdata::constants::genesis_block,
         consensus::encode::{deserialize, serialize},
-        Block, Network, TxOut, Witness,
+        Block, Network as BitcoinNetwork, TxOut, Witness,
     },
     engine::{scan_range, ScanError, ScanReport},
-    network::{ChainIdentity, LabNetwork, NetworkError},
+    network::{ChainIdentity, Network, NetworkError},
     protocol::ReceiveScanner,
     source::{
         bitcoin_core::CoreRestSource,
@@ -34,7 +34,7 @@ fn fixture() -> FixtureFile {
 }
 
 fn regtest() -> ChainIdentity {
-    ChainIdentity::for_network(LabNetwork::Regtest)
+    ChainIdentity::for_network(Network::Regtest)
 }
 
 fn scanner() -> ReceiveScanner {
@@ -61,7 +61,7 @@ fn assert_refused(result: Result<usize, String>, needle: &str) {
     }
 }
 
-fn outputs(r: &ScanReport) -> Vec<(sync_core::models::BlockRef, String, u32, u64, Option<u32>)> {
+fn outputs(r: &ScanReport) -> Vec<(silent_sync::models::BlockRef, String, u32, u64, Option<u32>)> {
     r.detected_received_outputs
         .iter()
         .map(|d| (d.block, d.txid.to_string(), d.vout, d.value_sats, d.label))
@@ -137,7 +137,7 @@ fn mainnet_and_foreign_chains_are_refused_by_name() {
 
     // Says "regtest" but reports the mainnet genesis block as its block 0.
     node.set_chain_info("regtest", TIP, best);
-    let mainnet_genesis = genesis_block(Network::Bitcoin).block_hash();
+    let mainnet_genesis = genesis_block(BitcoinNetwork::Bitcoin).block_hash();
     node.set(
         "/rest/blockhashbyheight/0.hex",
         format!("{mainnet_genesis}\n").into_bytes(),
@@ -175,14 +175,14 @@ fn blocks_not_rooted_at_the_network_genesis_are_refused() {
     // The fixture chain re-sealed on top of the *mainnet* genesis hash: every
     // block is internally valid and the chain links from block 1 upward.
     let mut blocks = fixture_blocks(&fixture());
-    let mut parent = genesis_block(Network::Bitcoin).block_hash();
+    let mut parent = genesis_block(BitcoinNetwork::Bitcoin).block_hash();
     for (block, _) in &mut blocks {
         block.header.prev_blockhash = parent;
         fixture_gen::seal(block);
         parent = block.block_hash();
     }
     // The fake still answers "regtest" and the regtest genesis hash for height 0.
-    let node = FakeCoreRest::serve_blocks(LabNetwork::Regtest, &blocks);
+    let node = FakeCoreRest::serve_blocks(Network::Regtest, &blocks);
     assert!(
         CoreRestSource::connect(&node.url()).is_ok(),
         "the claims alone look fine"
@@ -222,7 +222,7 @@ fn blocks_not_rooted_at_the_network_genesis_are_refused() {
     // A header without valid proof of work.
     let node = fresh();
     let mut headers = node.get(&node.headers_path(0));
-    let mut header: sync_core::bitcoin::block::Header =
+    let mut header: silent_sync::bitcoin::block::Header =
         deserialize(&headers[80 * 8..80 * 9]).unwrap();
     while header.validate_pow(header.target()).is_ok() {
         header.nonce += 1;
@@ -351,8 +351,8 @@ fn inconsistent_spent_output_responses_are_refused() {
     assert_refused(scan(&node), "block 3: transaction");
     let node = fresh();
     let some_output = TxOut {
-        value: sync_core::bitcoin::Amount::from_sat(1),
-        script_pubkey: sync_core::bitcoin::ScriptBuf::new(),
+        value: silent_sync::bitcoin::Amount::from_sat(1),
+        script_pubkey: silent_sync::bitcoin::ScriptBuf::new(),
     };
     node.set(
         &node.spent_path(1),
@@ -376,7 +376,7 @@ fn lying_about_spent_outputs_from_outside_the_range_goes_unnoticed() {
         for tx in prevouts.iter_mut() {
             for prevout in tx.iter_mut() {
                 // A P2WSH script: makes every input "not eligible".
-                prevout.script_pubkey = sync_core::bitcoin::ScriptBuf::from_hex(
+                prevout.script_pubkey = silent_sync::bitcoin::ScriptBuf::from_hex(
                     "0020000000000000000000000000000000000000000000000000000000000000dead",
                 )
                 .unwrap();
@@ -451,7 +451,7 @@ fn ranges_outside_the_node_s_chain_are_refused() {
     ));
     assert_eq!(
         source.block_ref(0).unwrap().hash,
-        LabNetwork::Regtest.genesis_hash()
+        Network::Regtest.genesis_hash()
     );
 }
 
@@ -471,7 +471,7 @@ fn the_header_anchor_follows_a_reorg_on_the_node() {
         on_main.fetch_range(6, 8).unwrap()
     );
 
-    node.replace_chain(LabNetwork::Regtest, &fixture_blocks(&fork));
+    node.replace_chain(Network::Regtest, &fixture_blocks(&fork));
     assert_eq!(source.tip().unwrap(), on_fork.tip().unwrap());
     for height in 1..=9 {
         assert_eq!(
@@ -485,7 +485,7 @@ fn the_header_anchor_follows_a_reorg_on_the_node() {
     );
 
     // And back to the shorter branch.
-    node.replace_chain(LabNetwork::Regtest, &fixture_blocks(&main));
+    node.replace_chain(Network::Regtest, &fixture_blocks(&main));
     assert_eq!(source.tip().unwrap(), on_main.tip().unwrap());
     assert_eq!(source.block_ref(7).unwrap(), on_main.block_ref(7).unwrap());
     assert!(matches!(

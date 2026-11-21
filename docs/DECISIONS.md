@@ -1,5 +1,7 @@
 # DECISIONS — 設計上の決定と未決事項
 
+> **名称変更（2026-11-21、D-039）**: `sync-core` → `silent-sync`、`lab-storage` → `silent-sync-sqlite`、`LabNetwork` → `Network`、`LabAddress` → `SilentPaymentAddress`。D-038 までの記述は当時の名前のまま。
+
 各決定には根拠と、見直す条件を書く。`承認` は人間（リポジトリ所有者）の明示的な回答があったもの。
 
 ## 決定済み

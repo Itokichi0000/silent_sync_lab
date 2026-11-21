@@ -282,7 +282,7 @@ fn core_backend_without_a_node_fails_closed() {
 /// the fixture: same result as scanning the fixture file.
 #[test]
 fn core_backend_through_the_cli_matches_the_fixture_scan() {
-    let fixture: sync_core::source::fixture::FixtureFile =
+    let fixture: silent_sync::source::fixture::FixtureFile =
         serde_json::from_str(&std::fs::read_to_string(FIXTURE).unwrap()).unwrap();
     let node = lab_testkit::fake_http::FakeCoreRest::serve(&fixture);
     let url = node.url();

@@ -15,7 +15,7 @@
 //! Note: the vector file is embedded in the binary as a whole, so the binary
 //! contains those public test keys as text.
 
-use sync_core::{
+use silent_sync::{
     bitcoin::{
         key::Secp256k1,
         secp256k1::{PublicKey, SecretKey},
@@ -66,7 +66,7 @@ pub fn lab_receiver_keys() -> Result<ReceiverKeys, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sync_core::network::LabNetwork;
+    use silent_sync::network::Network;
 
     /// The address derived from the two values read above must be the one the
     /// vector file itself states (modulo the network prefix, which the lab
@@ -84,7 +84,7 @@ mod tests {
             let data = address.strip_prefix(hrp).expect("prefix").to_string();
             data[..data.len() - 6].to_string()
         };
-        let ours = keys.address(LabNetwork::Signet).to_string();
+        let ours = keys.address(Network::Signet).to_string();
         assert_eq!(payload(&ours, "tsp1"), payload(expected, "sp1"));
     }
 }

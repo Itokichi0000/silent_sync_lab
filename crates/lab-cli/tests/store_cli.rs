@@ -594,7 +594,7 @@ fn the_reason_for_stopping_is_shown() {
 fn a_store_file_without_a_binding_is_explained() {
     let temp = Temp::new("unbound");
     let db = temp.db();
-    drop(lab_storage::SqliteStore::create(Path::new(&db)).unwrap());
+    drop(silent_sync_sqlite::SqliteStore::create(Path::new(&db)).unwrap());
     for args in [
         vec!["status", "--db", db.as_str()],
         vec!["received", "list", "--db", db.as_str()],

@@ -11,7 +11,7 @@
 //!
 //! From the two, a verdict is derived: refused (fail-closed), no effect,
 //! silent alone but shown by a cross-check, or not detected by either. The
-//! verdicts are asserted in `crates/sync-core/tests/fault_matrix.rs` and
+//! verdicts are asserted in `crates/silent-sync/tests/fault_matrix.rs` and
 //! rendered into `docs/FAULT_INJECTION.md`.
 //!
 //! The honest baseline is the basic fixture (8 blocks, 7 outputs for a wallet
@@ -22,14 +22,13 @@ use crate::{
     fixture_gen::{self, LABEL_USED},
     test_source::Tamper,
 };
-use std::collections::BTreeSet;
-use sync_core::{
+use silent_sync::{
     bitcoin::{
         consensus::encode::{deserialize, serialize},
         Block, ScriptBuf, Witness,
     },
     engine::{scan_range, ScanError},
-    network::{ChainIdentity, LabNetwork},
+    network::{ChainIdentity, Network},
     protocol::ReceiveScanner,
     source::{
         bitcoin_core::CoreRestSource,
@@ -40,6 +39,7 @@ use sync_core::{
     },
     verify::{cross_check, Explanation},
 };
+use std::collections::BTreeSet;
 
 const TIP: u32 = 8;
 
@@ -132,7 +132,7 @@ pub struct Row {
 }
 
 fn regtest() -> ChainIdentity {
-    ChainIdentity::for_network(LabNetwork::Regtest)
+    ChainIdentity::for_network(Network::Regtest)
 }
 
 fn scanner() -> ReceiveScanner {
@@ -764,7 +764,7 @@ pub fn run() -> Vec<Row> {
                         if block.block.height != PAYMENT_HEIGHT {
                             continue;
                         }
-                        if let sync_core::source::Evidence::TweakIndex(entries) =
+                        if let silent_sync::source::Evidence::TweakIndex(entries) =
                             &mut block.evidence
                         {
                             if !asked_before.replace(true) {

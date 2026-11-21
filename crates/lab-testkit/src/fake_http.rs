@@ -9,6 +9,15 @@
 //! replaced, removed or given another status by the test. The server speaks
 //! just enough HTTP/1.1 for one GET per connection and records every request.
 
+use silent_sync::{
+    bitcoin::{
+        blockdata::constants::genesis_block,
+        consensus::encode::{deserialize_hex, serialize, VarInt},
+        Amount, Block, BlockHash, ScriptBuf, TxOut,
+    },
+    network::Network,
+    source::{fixture::FixtureFile, Evidence, IndexedTx},
+};
 use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader, Write},
@@ -18,15 +27,6 @@ use std::{
         Arc, Mutex,
     },
     thread::JoinHandle,
-};
-use sync_core::{
-    bitcoin::{
-        blockdata::constants::genesis_block,
-        consensus::encode::{deserialize_hex, serialize, VarInt},
-        Amount, Block, BlockHash, ScriptBuf, TxOut,
-    },
-    network::LabNetwork,
-    source::{fixture::FixtureFile, Evidence, IndexedTx},
 };
 
 #[derive(Clone)]
@@ -243,7 +243,7 @@ impl FakeCoreRest {
 
     /// Serves arbitrary blocks as heights 1.. on top of `network`'s genesis
     /// block — whether or not they actually build on it.
-    pub fn serve_blocks(network: LabNetwork, blocks: &[(Block, Vec<Vec<TxOut>>)]) -> Self {
+    pub fn serve_blocks(network: Network, blocks: &[(Block, Vec<Vec<TxOut>>)]) -> Self {
         let mut node = Self {
             http: FakeHttp::new(),
             hashes: Vec::new(),
@@ -254,7 +254,7 @@ impl FakeCoreRest {
 
     /// Makes the same server serve a different chain from now on, as a node
     /// does after a reorganization.
-    pub fn replace_chain(&mut self, network: LabNetwork, blocks: &[(Block, Vec<Vec<TxOut>>)]) {
+    pub fn replace_chain(&mut self, network: Network, blocks: &[(Block, Vec<Vec<TxOut>>)]) {
         self.http.clear();
         let genesis = genesis_block(network.to_bitcoin());
         let mut headers = vec![genesis.header];
@@ -373,7 +373,7 @@ impl FakeOracle {
     /// Serves a tweak index for the given blocks (heights must start at 1 and
     /// be contiguous), the way the real oracle was observed to: heights it
     /// does not have are answered with HTTP 200, an empty hash and `null`.
-    pub fn serve(network: &str, blocks: &[sync_core::source::BlockEvidence]) -> Self {
+    pub fn serve(network: &str, blocks: &[silent_sync::source::BlockEvidence]) -> Self {
         let http = FakeHttp::new();
         let tip = blocks.last().map_or(0, |b| b.block.height);
         for block in blocks {

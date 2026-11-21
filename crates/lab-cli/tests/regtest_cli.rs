@@ -261,7 +261,7 @@ fn persistent_sync_follows_a_real_reorg() {
     let raw: Vec<String> = scenario
         .last_two_payments
         .iter()
-        .map(sync_core::bitcoin::consensus::encode::serialize_hex)
+        .map(silent_sync::bitcoin::consensus::encode::serialize_hex)
         .collect();
     node.generate_block_with(faucet.miner_address(), &raw);
     let again = sync_json();

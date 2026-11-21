@@ -41,7 +41,7 @@ use crate::{
         Block, BlockHash, TxOut,
     },
     models::{BlockRef, EvidenceKind},
-    network::{ChainIdentity, LabNetwork, NetworkError},
+    network::{ChainIdentity, Network, NetworkError},
 };
 use std::{collections::BTreeSet, sync::Mutex};
 
@@ -247,10 +247,10 @@ fn chain_info(http: &LoopbackHttp) -> Result<ChainInfo, SourceError> {
 }
 
 /// Maps Bitcoin Core's chain names. `main` is refused explicitly.
-fn network_from_core_chain(chain: &str) -> Result<LabNetwork, SourceError> {
+fn network_from_core_chain(chain: &str) -> Result<Network, SourceError> {
     match chain {
-        "regtest" => Ok(LabNetwork::Regtest),
-        "signet" => Ok(LabNetwork::Signet),
+        "regtest" => Ok(Network::Regtest),
+        "signet" => Ok(Network::Signet),
         "main" => Err(NetworkError::MainnetRefused.into()),
         other => Err(NetworkError::Unsupported(super::http::printable(other)).into()),
     }
@@ -426,11 +426,11 @@ mod tests {
     fn mainnet_and_unknown_chains_are_refused() {
         assert_eq!(
             network_from_core_chain("regtest").ok(),
-            Some(LabNetwork::Regtest)
+            Some(Network::Regtest)
         );
         assert_eq!(
             network_from_core_chain("signet").ok(),
-            Some(LabNetwork::Signet)
+            Some(Network::Signet)
         );
         assert_eq!(
             network_from_core_chain("main"),

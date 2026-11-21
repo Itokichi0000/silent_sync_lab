@@ -8,7 +8,7 @@ use lab_testkit::{
     fault_matrix::{self, Alone, ReplayingOracle, Verdict},
     fixture_gen::{self, LABEL_USED},
 };
-use sync_core::{
+use silent_sync::{
     protocol::ReceiveScanner,
     store::{MemoryStore, StoreError, SyncStore},
     sync::{new_store_meta, sync, SyncError, SyncOptions},

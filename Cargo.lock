@@ -279,21 +279,11 @@ name = "lab-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
- "lab-storage",
  "lab-testkit",
  "serde",
  "serde_json",
- "sync-core",
-]
-
-[[package]]
-name = "lab-storage"
-version = "0.1.0"
-dependencies = [
- "lab-testkit",
- "rusqlite",
- "serde_json",
- "sync-core",
+ "silent-sync",
+ "silent-sync-sqlite",
 ]
 
 [[package]]
@@ -302,7 +292,7 @@ version = "0.1.0"
 dependencies = [
  "bdk_sp",
  "serde_json",
- "sync-core",
+ "silent-sync",
 ]
 
 [[package]]
@@ -442,6 +432,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "silent-sync"
+version = "0.1.0"
+dependencies = [
+ "bdk_sp",
+ "lab-testkit",
+ "minreq",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "silent-sync-sqlite"
+version = "0.1.0"
+dependencies = [
+ "lab-testkit",
+ "rusqlite",
+ "serde_json",
+ "silent-sync",
+]
+
+[[package]]
 name = "smallvec"
 version = "1.16.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -462,18 +474,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "sync-core"
-version = "0.1.0"
-dependencies = [
- "bdk_sp",
- "lab-testkit",
- "minreq",
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]

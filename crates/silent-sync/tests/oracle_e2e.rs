@@ -6,7 +6,7 @@
 //! ```sh
 //! export BITCOIND_EXE="$(scripts/fetch_bitcoind.sh /somewhere)"
 //! export BLINDBIT_ORACLE_EXE="$(scripts/build_blindbit_oracle.sh /somewhere-else)"
-//! cargo test -p sync-core --test oracle_e2e -- --ignored
+//! cargo test -p silent-sync --test oracle_e2e -- --ignored
 //! ```
 #![allow(clippy::unwrap_used)] // test code: a panic is the failure report
 
@@ -16,9 +16,9 @@ use lab_testkit::{
     regtest_node::Node,
     regtest_wallet::{expected_for_labels, standard_scenario, Faucet},
 };
-use sync_core::{
+use silent_sync::{
     engine::scan_range,
-    network::{ChainIdentity, LabNetwork},
+    network::{ChainIdentity, Network},
     protocol::ReceiveScanner,
     source::{bitcoin_core::CoreRestSource, blindbit::BlindbitHttpSource, ScanSource, SourceError},
     store::{MemoryStore, SyncStore},
@@ -29,7 +29,7 @@ use sync_core::{
 #[test]
 #[ignore = "needs BITCOIND_EXE and BLINDBIT_ORACLE_EXE"]
 fn real_oracle_matches_core_except_for_the_segwit_version_rule() {
-    let regtest = ChainIdentity::for_network(LabNetwork::Regtest);
+    let regtest = ChainIdentity::for_network(Network::Regtest);
     let node = Node::regtest();
     let mut faucet = Faucet::new(&node);
     let scenario = standard_scenario(&mut faucet);
@@ -152,7 +152,7 @@ fn real_oracle_matches_core_except_for_the_segwit_version_rule() {
             assert!(
                 matches!(
                     e,
-                    sync_core::sync::SyncError::Scan(sync_core::engine::ScanError::Source(
+                    silent_sync::sync::SyncError::Scan(silent_sync::engine::ScanError::Source(
                         SourceError::RangeUnavailable { .. } | SourceError::InvalidData(_)
                     ))
                 ),

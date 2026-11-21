@@ -1,11 +1,11 @@
 //! Gate 3 — the persistent sync against the in-memory reference store.
-//! The same suite runs against SQLite in `lab-storage`.
+//! The same suite runs against SQLite in `silent-sync-sqlite`.
 #![allow(clippy::unwrap_used)] // test code: a panic is the failure report
 
 use lab_testkit::{
     fixture_gen, sync_store_suite, test_source::TestSource, test_store::FailingAppends,
 };
-use sync_core::{
+use silent_sync::{
     models::{BlockRef, DetectedOutput},
     protocol::ReceiveScanner,
     source::ScanSource,

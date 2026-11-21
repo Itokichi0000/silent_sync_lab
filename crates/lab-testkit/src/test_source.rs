@@ -4,12 +4,12 @@
 //! blocks of one chain while claiming the tip of the other (race).
 
 use crate::fixture_gen;
-use std::cell::Cell;
-use sync_core::{
+use silent_sync::{
     models::BlockRef,
     network::ChainIdentity,
     source::{fixture::FixtureSource, ScanBatch, ScanSource, SourceCapabilities, SourceError},
 };
+use std::cell::Cell;
 
 pub struct TestSource {
     main: FixtureSource,

@@ -1,4 +1,4 @@
-//! TEST-ONLY helpers. Nothing here may be used by `sync-core` or by the
+//! TEST-ONLY helpers. Nothing here may be used by `silent-sync` or by the
 //! `silent-sync` binary: this crate is where upstream's *sending* functions
 //! and transaction signing live, so that the lab itself stays receive-only.
 //!

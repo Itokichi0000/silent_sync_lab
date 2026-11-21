@@ -6,12 +6,12 @@ use lab_testkit::{
     fake_http::{FakeCoreRest, FakeOracle},
     fixture_gen,
 };
-use std::process::Command;
-use sync_core::source::{
+use silent_sync::source::{
     fixture::FixtureSource,
     local_index::{IndexPolicy, LocalTweakIndex},
     ScanSource,
 };
+use std::process::Command;
 
 const BIN: &str = env!("CARGO_BIN_EXE_silent-sync");
 const FIXTURE: &str = concat!(

@@ -1,8 +1,8 @@
-//! Gate 1 — fixture-backed detection through the whole `sync-core` path
+//! Gate 1 — fixture-backed detection through the whole `silent-sync` path
 //! (fixture adapter → engine → scanner wrapper → upstream scanner).
 //!
 //! Covers design-spec cases T02–T05 at fixture scale, wrong-key behaviour,
-//! the BIP352 eligibility rules `sync-core` adds on top of upstream, and the
+//! the BIP352 eligibility rules `silent-sync` adds on top of upstream, and the
 //! fail-closed behaviour of the adapter and the engine.
 #![allow(clippy::unwrap_used)] // test code: a panic is the failure report
 
@@ -10,8 +10,7 @@ use bdk_sp::receive::scan::Scanner;
 use lab_testkit::fixture_gen::{
     self, LABEL_NOT_BACKED_UP, LABEL_USED, LAB_RECEIVER, OTHER_RECEIVER,
 };
-use std::collections::BTreeMap;
-use sync_core::{
+use silent_sync::{
     bitcoin::{
         absolute::LockTime,
         consensus::encode::{deserialize_hex, serialize_hex},
@@ -23,13 +22,14 @@ use sync_core::{
     },
     engine::{scan_range, ScanError, ScanReport},
     models::{BlockRef, EvidenceKind},
-    network::{ChainIdentity, LabNetwork},
+    network::{ChainIdentity, Network},
     protocol::{ProtocolError, ReceiveScanner, ReceiverKeys, SkipReason, TxScanOutcome},
     source::{
         fixture::{FixtureExpectedDetection, FixtureFile, FixtureSource},
         Evidence, ScanBatch, ScanSource, SourceCapabilities, SourceError,
     },
 };
+use std::collections::BTreeMap;
 
 const FIXTURE_JSON: &str = include_str!("../../../fixtures/local/regtest_basic_v1.json");
 const TIP: u32 = 8;
@@ -39,7 +39,7 @@ fn source() -> FixtureSource {
 }
 
 fn regtest() -> ChainIdentity {
-    ChainIdentity::for_network(LabNetwork::Regtest)
+    ChainIdentity::for_network(Network::Regtest)
 }
 
 fn scan_all(scanner: &ReceiveScanner) -> ScanReport {
@@ -136,7 +136,7 @@ fn detects_exactly_the_outputs_created_for_the_receiver() {
     .collect();
     assert_eq!(report.txs_skipped, skipped);
     for d in &report.detected_received_outputs {
-        assert_eq!(d.network, LabNetwork::Regtest);
+        assert_eq!(d.network, Network::Regtest);
         assert_eq!(d.provenance.backend_id, "fixture");
         assert_eq!(
             d.provenance.evidence_kind,
@@ -246,7 +246,7 @@ fn fixture_txs(height: u32) -> Vec<(Transaction, Vec<TxOut>)> {
 }
 
 /// D-006: upstream alone would report an output in a transaction that spends
-/// a SegWit v2 output; BIP352 forbids scanning it and `sync-core` enforces that.
+/// a SegWit v2 output; BIP352 forbids scanning it and `silent-sync` enforces that.
 #[test]
 fn segwit_v2_spending_transaction_is_skipped_although_upstream_would_match() {
     let txs = fixture_txs(6);
@@ -287,7 +287,7 @@ fn eligibility_reasons_for_the_non_scannable_fixture_transactions() {
 }
 
 /// D-007: upstream zips inputs with prevouts and would silently ignore a
-/// missing prevout; `sync-core` refuses instead.
+/// missing prevout; `silent-sync` refuses instead.
 #[test]
 fn missing_prevouts_are_an_error_not_a_silent_miss() {
     let txs = fixture_txs(3);
@@ -399,7 +399,7 @@ fn fixture_adapter_refuses_mainnet() {
 
     // Claiming signet for regtest data fails on the genesis hash too.
     let mut file = fixture_file();
-    file.network = LabNetwork::Signet;
+    file.network = Network::Signet;
     assert!(load_err(file).contains("genesis hash mismatch"));
 }
 
@@ -641,7 +641,7 @@ fn engine_propagates_transaction_errors_and_refuses_other_chains() {
     let scanner = ReceiveScanner::new(&fixture_gen::lab_receiver_keys(), &[]).unwrap();
 
     // The wallet is configured for signet, the source serves regtest.
-    let signet = ChainIdentity::for_network(LabNetwork::Signet);
+    let signet = ChainIdentity::for_network(Network::Signet);
     assert!(matches!(
         scan_range(&source(), &scanner, signet, 1, TIP),
         Err(ScanError::ChainMismatch { .. })
@@ -708,8 +708,8 @@ fn reports_and_debug_output_contain_no_key_material() {
         format!("{outcome:?}"),
         format!(
             "{} {:?}",
-            keys.address(LabNetwork::Regtest),
-            keys.address(LabNetwork::Signet)
+            keys.address(Network::Regtest),
+            keys.address(Network::Signet)
         ),
     ];
     for text in &outputs {
@@ -723,7 +723,7 @@ fn reports_and_debug_output_contain_no_key_material() {
     assert_eq!(outputs[4].matches("ScanMatch {").count(), 3);
     assert!(!outputs[4].contains("tweak"));
     // Addresses are public, and can only be rendered for a lab network.
-    assert!(outputs[5].starts_with("sprt1") && outputs[5].contains("LabAddress(tsp1"));
+    assert!(outputs[5].starts_with("sprt1") && outputs[5].contains("SilentPaymentAddress(tsp1"));
 }
 
 // ---------------------------------------------------------------------------
@@ -1010,7 +1010,7 @@ fn fixture_adapter_checks_coinbase_position_and_duplicates() {
 #[test]
 fn fixture_adapter_requires_block_one_to_build_on_the_network_genesis() {
     let mut file = fixture_file();
-    let mut parent = LabNetwork::Signet.genesis_hash();
+    let mut parent = Network::Signet.genesis_hash();
     for index in 0..file.blocks.len() {
         edit_block(&mut file, index, |b| {
             b.header.prev_blockhash = parent;
@@ -1031,7 +1031,10 @@ fn fixture_adapter_requires_block_one_to_build_on_the_network_genesis() {
 // Engine: structural block checks independent of the source
 // ---------------------------------------------------------------------------
 
-fn full_block(batch: &mut ScanBatch, index: usize) -> &mut Vec<sync_core::source::TxWithPrevouts> {
+fn full_block(
+    batch: &mut ScanBatch,
+    index: usize,
+) -> &mut Vec<silent_sync::source::TxWithPrevouts> {
     let Evidence::FullBlock(txs) = &mut batch.blocks[index].evidence else {
         panic!("fixture always yields full blocks");
     };
@@ -1207,7 +1210,7 @@ fn fixture_adapter_cross_checks_prevouts_created_in_the_file() {
         let mut file = fixture_file();
         file.blocks[TIP_INDEX]
             .prevouts
-            .push(vec![sync_core::source::fixture::FixturePrevout {
+            .push(vec![silent_sync::source::fixture::FixturePrevout {
                 value_sats,
                 script_pubkey_hex: script.to_hex_string(),
             }]);
@@ -1238,7 +1241,7 @@ fn fixture_adapter_cross_checks_prevouts_created_in_the_file() {
 /// `scan_range` works in chunks; the result must not depend on it.
 #[test]
 fn stateless_scan_is_chunked_and_still_all_or_nothing() {
-    use sync_core::engine::SCAN_CHUNK_BLOCKS;
+    use silent_sync::engine::SCAN_CHUNK_BLOCKS;
     // Count fetches through a wrapper and check linkage across chunk borders
     // with a source that serves the fork from the second chunk on.
     struct Counting<'a>(&'a FixtureSource, std::cell::Cell<u32>);

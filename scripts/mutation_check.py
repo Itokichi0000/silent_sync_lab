@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mutation check for the validation code in sync-core.
+"""Mutation check for the validation code in silent-sync.
 
 Each entry disables exactly one check. For every entry the script applies the
 change to a *scratch copy* of the repository, runs the fast test suite and
@@ -14,7 +14,7 @@ Usage (never run it against the working tree itself):
     python3 scripts/mutation_check.py /tmp/ssl-mut/repo "sync:,bench:"   # only these groups
 
 The slow K_max tests are skipped (`--skip k_max`); the K_max correction is
-covered by `crates/sync-core/tests/bip352_vectors.rs` instead. Exit status is
+covered by `crates/silent-sync/tests/bip352_vectors.rs` instead. Exit status is
 non-zero if anything survived. The patterns are tied to the current source
 text: when a pattern no longer matches, the entry is reported as SETUP-ERROR
 and must be updated together with the code.
@@ -36,18 +36,18 @@ env = dict(
     CARGO_TARGET_DIR=os.path.join(os.path.dirname(root), "mut-target"),
     RUST_BACKTRACE="0",
 )
-B = "crates/sync-core/src/source/block_check.rs"
-C = "crates/sync-core/src/source/bitcoin_core.rs"
-H = "crates/sync-core/src/source/http.rs"
-O = "crates/sync-core/src/source/blindbit.rs"
-L = "crates/sync-core/src/source/local_index.rs"
-V = "crates/sync-core/src/verify.rs"
-E = "crates/sync-core/src/engine.rs"
-P = "crates/sync-core/src/protocol.rs"
-N = "crates/sync-core/src/network.rs"
-S = "crates/sync-core/src/sync.rs"
-T = "crates/sync-core/src/store.rs"
-Q = "crates/lab-storage/src/lib.rs"
+B = "crates/silent-sync/src/source/block_check.rs"
+C = "crates/silent-sync/src/source/bitcoin_core.rs"
+H = "crates/silent-sync/src/source/http.rs"
+O = "crates/silent-sync/src/source/blindbit.rs"
+L = "crates/silent-sync/src/source/local_index.rs"
+V = "crates/silent-sync/src/verify.rs"
+E = "crates/silent-sync/src/engine.rs"
+P = "crates/silent-sync/src/protocol.rs"
+N = "crates/silent-sync/src/network.rs"
+S = "crates/silent-sync/src/sync.rs"
+T = "crates/silent-sync/src/store.rs"
+Q = "crates/silent-sync-sqlite/src/lib.rs"
 M = "crates/lab-cli/src/main.rs"
 K = "crates/lab-cli/src/bench.rs"
 muts = [
@@ -85,7 +85,7 @@ muts = [
     ("http: non-200 success statuses accepted", H, "            (200, body) => Ok(body),", "            (status, body) if status < 400 => Ok(body),"),
     ("http: response size unbounded", H, "if body.len() as u64 > self.max_body_bytes {", "if false {"),
     # --- Bitcoin Core REST backend ---
-    ("core: mainnet chain name accepted", C, '"main" => Err(NetworkError::MainnetRefused.into()),', '"main" => Ok(LabNetwork::Regtest),'),
+    ("core: mainnet chain name accepted", C, '"main" => Err(NetworkError::MainnetRefused.into()),', '"main" => Ok(Network::Regtest),'),
     ("core: node's block 0 not compared with genesis", C, "ChainIdentity::verified(network, genesis)?;", "let _ = genesis;"),
     ("core: header chain links unchecked", C, "if header.prev_blockhash != parent {", "if false {"),
     ("core: header proof of work unchecked", C, "let hash = check_proof_of_work(header, network)", "let hash = Ok::<_, String>(header.block_hash())"),
@@ -100,7 +100,7 @@ muts = [
     ("core: tip not bound to the header chain", C, "if tip.hash != info.bestblockhash {", "if false {"),
     ("core: block not checked against requested hash", C, "hash: Some(hash),", "hash: None,"),
     # --- BlindBit Oracle backend ---
-    ("oracle: mainnet name accepted", O, '"main" | "mainnet" => Err(NetworkError::MainnetRefused.into()),', '"main" | "mainnet" => Ok(LabNetwork::Regtest),'),
+    ("oracle: mainnet name accepted", O, '"main" | "mainnet" => Err(NetworkError::MainnetRefused.into()),', '"main" | "mainnet" => Ok(Network::Regtest),'),
     ("oracle: network not compared with header source", O, "if network != source.headers.chain().network() {", "if false {"),
     ("oracle: tweaks_only accepted", O, "if info.tweaks_only {", "if false {"),
     ("oracle: block hash not compared with header source", O, "if hash != expected.hash {", "if false {"),
@@ -125,9 +125,9 @@ muts = [
     ("engine: hash link unchecked", E, "if block.prev_hash != prev.hash {", "if false {"),
     ("engine: chain mismatch unchecked", E, "if chain != expected_chain {", "if false {"),
     # --- network identity ---
-    ("signet mapped to testnet", N, "LabNetwork::Signet => Network::Signet,", "LabNetwork::Signet => Network::Testnet,"),
+    ("signet mapped to testnet", N, "Network::Signet => BitcoinNetwork::Signet,", "Network::Signet => BitcoinNetwork::Testnet,"),
     ("chain identity deserialize unverified", N, "Self::verified(raw.network, raw.genesis_hash)", "Ok(Self { network: raw.network, genesis_hash: raw.genesis_hash })"),
-    ("mainnet name accepted as regtest", N, '"regtest" => Ok(LabNetwork::Regtest),', '"regtest" | "mainnet" => Ok(LabNetwork::Regtest),'),
+    ("mainnet name accepted as regtest", N, '"regtest" => Ok(Network::Regtest),', '"regtest" | "mainnet" => Ok(Network::Regtest),'),
     # --- tweak-index evidence: bounds in the engine, local index, cross-check ---
     ("index: entry without outputs accepted", E, "if entry.outputs.is_empty() {", "if false {"),
     ("index: impossible amount accepted", E, ".find(|o| o.value_sats > max_value)", ".find(|_| false)"),

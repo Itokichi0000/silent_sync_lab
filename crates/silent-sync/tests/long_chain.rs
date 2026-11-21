@@ -6,9 +6,9 @@ use lab_testkit::{
     fixture_gen::{self, LongChain, LABEL_USED},
     test_source::Tamper,
 };
-use sync_core::{
+use silent_sync::{
     engine::{scan_range, ScanError, SCAN_CHUNK_BLOCKS},
-    network::{ChainIdentity, LabNetwork},
+    network::{ChainIdentity, Network},
     protocol::ReceiveScanner,
     source::{
         fixture::FixtureSource,
@@ -23,7 +23,7 @@ use sync_core::{
 const BLOCKS: u32 = 250;
 
 fn regtest() -> ChainIdentity {
-    ChainIdentity::for_network(LabNetwork::Regtest)
+    ChainIdentity::for_network(Network::Regtest)
 }
 
 fn scanner() -> ReceiveScanner {
@@ -217,8 +217,8 @@ fn sync_and_tweak_index_agree_with_the_full_scan_on_a_long_chain() {
         );
         let mut stored = store.detections().unwrap();
         let mut want = reference.detected_received_outputs.clone();
-        sync_core::store::sort_detections(&mut stored);
-        sync_core::store::sort_detections(&mut want);
+        silent_sync::store::sort_detections(&mut stored);
+        silent_sync::store::sort_detections(&mut want);
         assert_eq!(stored, want, "chunk size {chunk}");
     }
 
@@ -260,7 +260,7 @@ fn cross_check_applies_the_range_rules_to_both_sides() {
             batch.blocks.pop();
         })
     };
-    let border = |result: Result<sync_core::verify::VerificationReport, ScanError>,
+    let border = |result: Result<silent_sync::verify::VerificationReport, ScanError>,
                   backend: &str,
                   needle: &str| match result {
         Err(ScanError::InconsistentBatch { backend_id, reason }) => {
@@ -273,7 +273,7 @@ fn cross_check_applies_the_range_rules_to_both_sides() {
         other => panic!("expected `{needle}`, got {other:?}"),
     };
     /// Gives a tampering source a name, to tell the two sides apart.
-    fn named<F: Fn(&mut sync_core::source::ScanBatch)>(
+    fn named<F: Fn(&mut silent_sync::source::ScanBatch)>(
         mut source: Tamper<FixtureSource, F>,
         name: &str,
     ) -> Tamper<FixtureSource, F> {
@@ -351,13 +351,13 @@ fn cross_check_applies_the_range_rules_to_both_sides() {
         LocalTweakIndex::new(honest(), IndexPolicy::Bip352),
         |batch| {
             let entry = batch.blocks.iter().find_map(|b| match &b.evidence {
-                sync_core::source::Evidence::TweakIndex(txs) if b.block.height == 3 => {
+                silent_sync::source::Evidence::TweakIndex(txs) if b.block.height == 3 => {
                     txs.first().cloned()
                 }
                 _ => None,
             });
             for block in &mut batch.blocks {
-                if let (7, sync_core::source::Evidence::TweakIndex(txs), Some(entry)) =
+                if let (7, silent_sync::source::Evidence::TweakIndex(txs), Some(entry)) =
                     (block.block.height, &mut block.evidence, &entry)
                 {
                     txs.push(entry.clone());

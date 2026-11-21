@@ -6,7 +6,7 @@ EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
 「検出できる不正」と「検出できない不正」を分けて示すことが目的で、後者を隠さない。
 
 - 表は `cargo run -p lab-testkit --bin fault_report` の出力そのもの。テスト
-  `crates/sync-core/tests/fault_matrix.rs` が、各行の判定と、この文書の表が生成結果と一致することを検査する
+  `crates/silent-sync/tests/fault_matrix.rs` が、各行の判定と、この文書の表が生成結果と一致することを検査する
   （コードの挙動が変わると、このファイルを更新しない限りテストが失敗する）。
 - 対象チェーンは決定的 fixture（8 ブロック、ラベル 1 を知るウォレットに 7 出力）。
 - 注入箇所: 偽の Bitcoin Core REST サーバの応答、偽の BlindBit Oracle の応答（ヘッダは正直な偽ノードから取る）、
@@ -113,5 +113,5 @@ EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
 - 「範囲より前の prevout の嘘」（F05）は、参照側のノードが同じ嘘をつく場合は検出できない。表の F05 が「突き合わせで分かる」になっているのは、参照が正直な別ソースだからである。
 - ここで注入したのは 35 種類の不正だけで、網羅ではない。特に、時間的な攻撃（応答を遅らせて古い先端を見せ続ける等）、リソース枯渇、
   複数の不正の組み合わせは扱っていない。
-- 対象は 8 ブロックの fixture。規模に依存する不具合（チャンク境界など）は `crates/sync-core/tests/long_chain.rs` で別に検査している。
+- 対象は 8 ブロックの fixture。規模に依存する不具合（チャンク境界など）は `crates/silent-sync/tests/long_chain.rs` で別に検査している。
 - リモートのサーバに対するプライバシー上の露出（IP アドレス、接続時刻、要求範囲）は故障注入の対象外。`docs/THREAT_MODEL.md` を参照。

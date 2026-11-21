@@ -1,4 +1,4 @@
-//! # sync-core
+//! # silent-sync
 //!
 //! **EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.** Unaudited research code.
 //!

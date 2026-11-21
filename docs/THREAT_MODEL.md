@@ -19,7 +19,7 @@ EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS. 未監査の実験コードで�
 
 | 相手 | 何を受け取るか | 信頼していること | 信頼していないこと |
 |---|---|---|---|
-| 上流ライブラリ `bdk_sp`（rev 固定）と暗号スタック | BIP352 の計算 | 計算の正しさ（公式ベクトル 29 件で確認。逸脱 2 点は `sync-core` で補正: RESEARCH U-1, U-2） | panic しないこと（`catch_unwind` で封じ込め） |
+| 上流ライブラリ `bdk_sp`（rev 固定）と暗号スタック | BIP352 の計算 | 計算の正しさ（公式ベクトル 29 件で確認。逸脱 2 点は `silent-sync` で補正: RESEARCH U-1, U-2） | panic しないこと（`catch_unwind` で封じ込め） |
 | 自分の Bitcoin Core（REST） | ブロック、spent outputs、ヘッダ | **spent outputs が正しいこと**（何にもコミットされておらず検査できない。FAULT_INJECTION F05）。先端を隠していないこと（F06） | ブロックの中身（ヘッダ鎖・PoW・merkle root・witness commitment を検査）、チェーンの申告（genesis から連結を検査） |
 | tweak インデックスサーバ（BlindBit Oracle） | tx ごとの tweak と Taproot 出力 | 何も（ブロックの同一性は自分のノードのヘッダで確認する） | 完全性・正しさ。**省略・改変・捏造を単独では検出できない**（I01〜I06） |
 | ローカルのストア（SQLite ファイル） | チェックポイント、検出結果 | 自分が書いた内容がそのまま残っていること（開くときに連続性・連結・バインディングを検査） | 整合性の暗号的保護は無い。ファイルを書き換えられる攻撃者には無力 |

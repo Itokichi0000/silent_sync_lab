@@ -4,7 +4,7 @@
 //! TEST-DATA GENERATION ONLY. Signing happens here, with `rust-bitcoin`'s
 //! sighash and `secp256k1` signing functions, and silent payment outputs are
 //! derived with upstream `bdk_sp` sending functions. None of this is reachable
-//! from `sync-core` or the CLI.
+//! from `silent-sync` or the CLI.
 //!
 //! Sender keys are derived from fixed public strings; they only ever control
 //! regtest coins on a node that is deleted after the test.
@@ -18,7 +18,7 @@ use bdk_sp::{
     send::{create_silentpayment_partial_secret, create_silentpayment_scriptpubkeys},
     LexMin,
 };
-use sync_core::{
+use silent_sync::{
     bitcoin::{
         absolute::LockTime,
         consensus::encode::{deserialize_hex, serialize_hex},
@@ -31,11 +31,11 @@ use sync_core::{
         sighash::{EcdsaSighashType, Prevouts, SighashCache, TapSighashType},
         taproot,
         transaction::Version,
-        Address, Amount, Denomination, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
-        TxOut, Witness, WitnessProgram, WitnessVersion,
+        Address, Amount, Denomination, Network as BitcoinNetwork, OutPoint, ScriptBuf, Sequence,
+        Transaction, TxIn, TxOut, Witness, WitnessProgram, WitnessVersion,
     },
-    network::LabNetwork,
-    protocol::LabAddress,
+    network::Network,
+    protocol::SilentPaymentAddress,
     source::fixture::FixtureExpectedDetection,
 };
 
@@ -110,17 +110,20 @@ fn shared_secret_key(input: &Funded) -> Option<SecretKey> {
 }
 
 /// Upstream's address type for a lab address (needed by the sending functions).
-pub fn upstream_code(address: LabAddress) -> SilentPaymentCode {
+pub fn upstream_code(address: SilentPaymentAddress) -> SilentPaymentCode {
     SilentPaymentCode::new_v0(
         address.scan_public_key(),
         address.spend_public_key(),
-        Network::Regtest,
+        BitcoinNetwork::Regtest,
     )
 }
 
 /// Silent payment output scripts for `recipients`, in order, as a BIP352
 /// sender spending `inputs` derives them.
-pub fn silent_payment_scripts(inputs: &[Funded], recipients: &[LabAddress]) -> Vec<ScriptBuf> {
+pub fn silent_payment_scripts(
+    inputs: &[Funded],
+    recipients: &[SilentPaymentAddress],
+) -> Vec<ScriptBuf> {
     let mut lex_min = LexMin::default();
     let mut spks_with_keys = Vec::new();
     for input in inputs {
@@ -139,7 +142,7 @@ pub fn silent_payment_scripts(inputs: &[Funded], recipients: &[LabAddress]) -> V
         .map(|code| {
             let key = by_code.get_mut(code).expect("recipient").remove(0);
             ScriptBuf::new_p2tr_tweaked(
-                sync_core::bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(key),
+                silent_sync::bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(key),
             )
         })
         .collect()
@@ -256,7 +259,7 @@ impl<'a> Faucet<'a> {
             self.next_key += 1;
             let key = sender_key(index);
             let script = script_for(kind, &key, index);
-            let address = Address::from_script(&script, Network::Regtest).expect("address");
+            let address = Address::from_script(&script, BitcoinNetwork::Regtest).expect("address");
             let txid = self
                 .node
                 .cli(&["sendtoaddress", &address.to_string(), &amount]);
@@ -303,7 +306,8 @@ impl<'a> Faucet<'a> {
                 self.next_key += 1;
                 let key = sender_key(index);
                 let script = script_for(kind, &key, index);
-                let address = Address::from_script(&script, Network::Regtest).expect("address");
+                let address =
+                    Address::from_script(&script, BitcoinNetwork::Regtest).expect("address");
                 outputs.insert(address.to_string(), serde_json::json!(amount));
                 pending.push((kind, key, script));
             }
@@ -362,7 +366,7 @@ pub struct Scenario {
     pub expected: Vec<FixtureExpectedDetection>,
     /// Txid of the transaction that spends a SegWit v2 output and carries an
     /// output a non-compliant receiver would attribute to the lab receiver.
-    pub segwit_v2_txid: sync_core::bitcoin::Txid,
+    pub segwit_v2_txid: silent_sync::bitcoin::Txid,
     /// The change-label-only payment (second-to-last block) and the 1 sat
     /// payment (last block), kept so reorg tests can confirm them again.
     pub last_two_payments: [Transaction; 2],
@@ -389,7 +393,7 @@ fn unrelated_p2tr(i: u32) -> ScriptBuf {
 /// 6. a 1 sat payment.
 pub fn standard_scenario(faucet: &mut Faucet<'_>) -> Scenario {
     use InputKind::*;
-    let network = LabNetwork::Regtest;
+    let network = Network::Regtest;
     let receiver = fixture_gen::lab_receiver_keys();
     let other = fixture_gen::other_receiver_keys();
     let plain = receiver.address(network);
@@ -557,10 +561,10 @@ pub fn standard_scenario(faucet: &mut Faucet<'_>) -> Scenario {
 ///
 /// For tests of what a lying index can do to a client that trusts it.
 pub fn fabricated_index_entry(
-    txid: sync_core::bitcoin::Txid,
-    receiver: LabAddress,
+    txid: silent_sync::bitcoin::Txid,
+    receiver: SilentPaymentAddress,
     outputs: &[(u32, u64)],
-) -> sync_core::source::IndexedTx {
+) -> silent_sync::source::IndexedTx {
     let secp = Secp256k1::new();
     let secret = SecretKey::from_slice(&[0x11; 32]).expect("valid key");
     let p2wpkh =
@@ -574,7 +578,7 @@ pub fn fabricated_index_entry(
     let keys = create_silentpayment_scriptpubkeys(partial, &codes)
         .remove(&code)
         .expect("keys for the receiver");
-    sync_core::source::IndexedTx {
+    silent_sync::source::IndexedTx {
         txid,
         // The public tweak data that goes with it: partial_secret · G.
         tweak: partial.public_key(&secp),
@@ -582,7 +586,7 @@ pub fn fabricated_index_entry(
             .iter()
             .zip(keys)
             .map(
-                |(&(vout, value_sats), key)| sync_core::source::IndexedOutput {
+                |(&(vout, value_sats), key)| silent_sync::source::IndexedOutput {
                     vout,
                     value_sats,
                     output_key: key.serialize(),
@@ -615,7 +619,7 @@ pub struct LongScenario {
 pub fn long_scenario(faucet: &mut Faucet<'_>, blocks: u32, payment_every: u32) -> LongScenario {
     use InputKind::*;
     assert!(blocks >= 1 && payment_every >= 1);
-    let network = LabNetwork::Regtest;
+    let network = Network::Regtest;
     let receiver = fixture_gen::lab_receiver_keys();
     let other = fixture_gen::other_receiver_keys().address(network);
     let plain = receiver.address(network);
@@ -673,7 +677,7 @@ pub fn long_scenario(faucet: &mut Faucet<'_>, blocks: u32, payment_every: u32) -
 pub fn expected_for_labels(
     expected: &[FixtureExpectedDetection],
     labels: &[u32],
-) -> Vec<(u32, sync_core::bitcoin::Txid, u32, u64, Option<u32>)> {
+) -> Vec<(u32, silent_sync::bitcoin::Txid, u32, u64, Option<u32>)> {
     use std::collections::BTreeMap;
     let mut by_tx: BTreeMap<_, Vec<&FixtureExpectedDetection>> = BTreeMap::new();
     for e in expected {

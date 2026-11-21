@@ -34,10 +34,10 @@ jobs:
         run: |
           for features in "" core-rest blindbit-http fixture local-index low-level secret-output-tweaks; do
             echo "::group::features: ${features:-none}"
-            cargo clippy -p sync-core --lib --locked --features "$features" -- -D warnings
+            cargo clippy -p silent-sync --lib --locked --features "$features" -- -D warnings
             echo "::endgroup::"
           done
-          cargo clippy -p sync-core --lib --locked --all-features -- -D warnings
+          cargo clippy -p silent-sync --lib --locked --all-features -- -D warnings
       # Fast unit + integration tests only. Tests that need Bitcoin Core are
       # `#[ignore]`d here and run in the regtest-e2e job below.
       - name: Test

@@ -3,15 +3,15 @@
 //! schema checks, file permissions and atomic rollback of a failed commit.
 #![allow(clippy::unwrap_used)] // test code: a panic is the failure report
 
-use lab_storage::SqliteStore;
 use lab_testkit::{fixture_gen, sync_store_suite, sync_suite::block_refs, test_source::TestSource};
-use std::path::PathBuf;
-use sync_core::{
+use silent_sync::{
     protocol::ReceiveScanner,
     source::ScanSource,
     store::{StoreError, SyncStore},
     sync::{new_store_meta, sync, SyncOptions},
 };
+use silent_sync_sqlite::SqliteStore;
+use std::path::PathBuf;
 
 fn sqlite_store() -> Box<dyn SyncStore> {
     Box::new(SqliteStore::in_memory().unwrap())
@@ -473,11 +473,11 @@ fn no_key_material_is_written_to_the_database() {
     let mut secrets = vec![scan_sk.display_secret().to_string()];
     for height in 1..=8 {
         let batch = source.fetch_range(height, height).unwrap();
-        let sync_core::source::Evidence::FullBlock(txs) = &batch.blocks[0].evidence else {
+        let silent_sync::source::Evidence::FullBlock(txs) = &batch.blocks[0].evidence else {
             panic!("fixture yields full blocks");
         };
         for entry in txs {
-            if let Ok(sync_core::protocol::TxScanOutcome::Scanned { matches }) =
+            if let Ok(silent_sync::protocol::TxScanOutcome::Scanned { matches }) =
                 all_labels.scan_tx(&entry.tx, &entry.prevouts)
             {
                 secrets.extend(

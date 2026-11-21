@@ -1,6 +1,6 @@
 [package]
-name = "lab-storage"
-description = "SQLite implementation of sync-core's SyncStore. Holds detected outputs and checkpoints; never key material."
+name = "silent-sync-sqlite"
+description = "SQLite implementation of silent-sync's SyncStore. Holds detected outputs and checkpoints; never key material."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-sync-core = { path = "../sync-core" }
+silent-sync = { path = "../silent-sync" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde_json = { workspace = true }
 

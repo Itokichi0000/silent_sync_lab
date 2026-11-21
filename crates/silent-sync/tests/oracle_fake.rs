@@ -8,10 +8,10 @@ use lab_testkit::{
     fake_http::{oracle_full_block_json, FakeCoreRest, FakeOracle},
     fixture_gen::{self, LABEL_USED},
 };
-use sync_core::{
+use silent_sync::{
     engine::scan_range,
     models::EvidenceKind,
-    network::{ChainIdentity, LabNetwork, NetworkError},
+    network::{ChainIdentity, Network, NetworkError},
     protocol::ReceiveScanner,
     source::{
         bitcoin_core::CoreRestSource,
@@ -26,7 +26,7 @@ use sync_core::{
 const TIP: u32 = 8;
 
 fn regtest() -> ChainIdentity {
-    ChainIdentity::for_network(LabNetwork::Regtest)
+    ChainIdentity::for_network(Network::Regtest)
 }
 
 fn scanner() -> ReceiveScanner {
@@ -34,7 +34,10 @@ fn scanner() -> ReceiveScanner {
 }
 
 /// What an oracle with the observed behaviour would index for the fixture.
-fn index_blocks(fixture: &sync_core::source::fixture::FixtureFile, to: u32) -> Vec<BlockEvidence> {
+fn index_blocks(
+    fixture: &silent_sync::source::fixture::FixtureFile,
+    to: u32,
+) -> Vec<BlockEvidence> {
     LocalTweakIndex::new(
         FixtureSource::from_file(fixture.clone()).unwrap(),
         IndexPolicy::IgnoreSegwitVersionRule,

@@ -28,8 +28,8 @@ Bitcoin [BIP352 (Silent Payments)](https://github.com/bitcoin/bips/blob/master/b
 ## 構成
 
 ```
-crates/sync-core/     同期コア（ライブラリ）。BIP352 の暗号処理は上流 bdk_sp に委譲。CLI・DB に依存しない
-crates/lab-storage/   同期状態の SQLite 実装
+crates/silent-sync/     同期コア（ライブラリ）。BIP352 の暗号処理は上流 bdk_sp に委譲。CLI・DB に依存しない
+crates/silent-sync-sqlite/   同期状態の SQLite 実装
 crates/lab-cli/       薄い CLI（バイナリ名: silent-sync）
 crates/lab-testkit/   テスト専用: fixture 生成、regtest ノード操作、署名付きテスト tx、偽サーバ、故障注入
 fixtures/             公式テストベクトルと決定的なローカル fixture
@@ -118,7 +118,7 @@ cargo test --workspace --locked -- --ignored
 ## 上流実装との関係
 
 暗号処理はすべて [`bdk-sp`](https://github.com/bitcoindevkit/bdk-sp)（commit `bb373e5`）を呼び出します。
-調査の過程で BIP352 正本との差異を確認しており、`sync-core` 側で BIP 準拠になるよう補っています
+調査の過程で BIP352 正本との差異を確認しており、`silent-sync` 側で BIP 準拠になるよう補っています
 （[`docs/RESEARCH.md`](docs/RESEARCH.md) §3.3、[`docs/DECISIONS.md`](docs/DECISIONS.md) D-005〜D-008、D-030）。これらは人間によるレビューの対象です。
 
 ## ドキュメント

@@ -5,7 +5,7 @@
 //! by default. Run them with:
 //!
 //! ```sh
-//! BITCOIND_EXE=/path/to/bitcoind cargo test -p sync-core --test regtest_e2e -- --ignored
+//! BITCOIND_EXE=/path/to/bitcoind cargo test -p silent-sync --test regtest_e2e -- --ignored
 //! ```
 //!
 //! When run without `BITCOIND_EXE` they fail; they never pass vacuously.
@@ -16,19 +16,19 @@ use lab_testkit::{
     regtest_node::{Node, NodeChain},
     regtest_wallet::{expected_for_labels, long_scenario, standard_scenario, Faucet},
 };
-use sync_core::{
+use silent_sync::{
     engine::{scan_range, ScanError, ScanReport},
     models::EvidenceKind,
-    network::{ChainIdentity, LabNetwork, NetworkError},
+    network::{ChainIdentity, Network, NetworkError},
     protocol::ReceiveScanner,
     source::{bitcoin_core::CoreRestSource, ScanSource, SourceError},
 };
 
 fn regtest() -> ChainIdentity {
-    ChainIdentity::for_network(LabNetwork::Regtest)
+    ChainIdentity::for_network(Network::Regtest)
 }
 
-fn detected(report: &ScanReport) -> Vec<(u32, sync_core::bitcoin::Txid, u32, u64, Option<u32>)> {
+fn detected(report: &ScanReport) -> Vec<(u32, silent_sync::bitcoin::Txid, u32, u64, Option<u32>)> {
     report
         .detected_received_outputs
         .iter()
@@ -92,10 +92,7 @@ fn regtest_send_mine_detect() {
     let whole = scan(&[LABEL_USED], 1);
     assert_eq!(detected(&whole), want);
     assert_eq!(whole.blocks_scanned, u64::from(scenario.tip_height));
-    assert_eq!(
-        whole.first_block.prev_hash,
-        LabNetwork::Regtest.genesis_hash()
-    );
+    assert_eq!(whole.first_block.prev_hash, Network::Regtest.genesis_hash());
 
     // Labels decide what a restored wallet sees, exactly as on the fixture.
     assert_eq!(scan(&[], first).detected_received_outputs.len(), 5);
@@ -139,7 +136,7 @@ fn regtest_send_mine_detect() {
         scan_range(
             &source,
             &scanner,
-            ChainIdentity::for_network(LabNetwork::Signet),
+            ChainIdentity::for_network(Network::Signet),
             first,
             scenario.tip_height
         ),

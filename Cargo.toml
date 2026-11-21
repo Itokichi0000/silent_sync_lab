@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/sync-core",
-    "crates/lab-storage",
+    "crates/silent-sync",
+    "crates/silent-sync-sqlite",
     "crates/lab-cli",
     "crates/lab-testkit",
 ]

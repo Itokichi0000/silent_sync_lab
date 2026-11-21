@@ -1,5 +1,5 @@
 [package]
-name = "sync-core"
+name = "silent-sync"
 description = "Experimental BIP352 (Silent Payments) receive-side sync core. NOT FOR MAINNET OR REAL FUNDS."
 version.workspace = true
 edition.workspace = true

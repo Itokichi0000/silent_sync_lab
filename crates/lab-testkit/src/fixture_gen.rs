@@ -2,7 +2,7 @@
 //!
 //! TEST-DATA GENERATION ONLY. This is the one place in the repository that
 //! uses upstream's *sending* functions; it lives in the test-only crate
-//! `lab-testkit`, never in `sync-core` or the CLI.
+//! `lab-testkit`, never in `silent-sync` or the CLI.
 //!
 //! Key material:
 //! * receiver keys are the public BIP352 test-vector keys, read from the
@@ -20,8 +20,7 @@ use bdk_sp::{
     send::{create_silentpayment_partial_secret, create_silentpayment_scriptpubkeys},
     LexMin,
 };
-use std::collections::HashMap;
-use sync_core::{
+use silent_sync::{
     bitcoin::{
         absolute::LockTime,
         block::{Header, Version as BlockVersion},
@@ -32,16 +31,17 @@ use sync_core::{
         script::Builder,
         secp256k1::{PublicKey, SecretKey},
         transaction::Version,
-        Amount, Block, BlockHash, CompactTarget, Network, OutPoint, ScriptBuf, Sequence,
-        Transaction, TxIn, TxMerkleNode, TxOut, Txid, Witness, WitnessProgram, WitnessVersion,
-        XOnlyPublicKey,
+        Amount, Block, BlockHash, CompactTarget, Network as BitcoinNetwork, OutPoint, ScriptBuf,
+        Sequence, Transaction, TxIn, TxMerkleNode, TxOut, Txid, Witness, WitnessProgram,
+        WitnessVersion, XOnlyPublicKey,
     },
-    network::LabNetwork,
-    protocol::{LabAddress, ReceiverKeys},
+    network::Network,
+    protocol::{ReceiverKeys, SilentPaymentAddress},
     source::fixture::{
         FixtureBlock, FixtureExpectedDetection, FixtureFile, FixturePrevout, FIXTURE_FORMAT,
     },
 };
+use std::collections::HashMap;
 
 pub const VECTORS_JSON: &str =
     include_str!("../../../fixtures/bip352/send_and_receive_test_vectors.json");
@@ -329,12 +329,16 @@ pub fn generate_fork() -> FixtureFile {
 pub const FORK_HEIGHT: u32 = 5;
 
 fn build(fork: bool) -> FixtureFile {
-    let network = LabNetwork::Regtest;
+    let network = Network::Regtest;
     let receiver = lab_receiver_keys();
     let other = other_receiver_keys();
     // Upstream's address type, needed by upstream's sending functions.
-    let code = |a: LabAddress| {
-        SilentPaymentCode::new_v0(a.scan_public_key(), a.spend_public_key(), Network::Regtest)
+    let code = |a: SilentPaymentAddress| {
+        SilentPaymentCode::new_v0(
+            a.scan_public_key(),
+            a.spend_public_key(),
+            BitcoinNetwork::Regtest,
+        )
     };
     let plain = code(receiver.address(network));
     let label_used = code(receiver.labelled_address(network, LABEL_USED).unwrap());
@@ -621,11 +625,15 @@ impl LongChain {
 /// consensus-valid. Nothing here is stored in the repository.
 pub fn generate_long(shape: &LongChain) -> FixtureFile {
     assert!(shape.blocks >= 1 && shape.payment_every >= 1);
-    let network = LabNetwork::Regtest;
+    let network = Network::Regtest;
     let receiver = lab_receiver_keys();
     let other = other_receiver_keys();
-    let code = |a: LabAddress| {
-        SilentPaymentCode::new_v0(a.scan_public_key(), a.spend_public_key(), Network::Regtest)
+    let code = |a: SilentPaymentAddress| {
+        SilentPaymentCode::new_v0(
+            a.scan_public_key(),
+            a.spend_public_key(),
+            BitcoinNetwork::Regtest,
+        )
     };
     let plain = code(receiver.address(network));
     let label_used = code(receiver.labelled_address(network, LABEL_USED).unwrap());

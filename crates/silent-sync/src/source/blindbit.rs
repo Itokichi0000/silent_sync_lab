@@ -33,7 +33,7 @@ use super::{
 use crate::{
     bitcoin::{hex::FromHex, secp256k1::PublicKey, BlockHash, Txid},
     models::{BlockRef, EvidenceKind},
-    network::{ChainIdentity, LabNetwork, NetworkError},
+    network::{ChainIdentity, Network, NetworkError},
 };
 use serde::Deserialize;
 
@@ -81,10 +81,10 @@ struct FullBlockUtxo {
     pubkey: String,
 }
 
-fn network_from_oracle(name: &str) -> Result<LabNetwork, SourceError> {
+fn network_from_oracle(name: &str) -> Result<Network, SourceError> {
     match name {
-        "regtest" => Ok(LabNetwork::Regtest),
-        "signet" => Ok(LabNetwork::Signet),
+        "regtest" => Ok(Network::Regtest),
+        "signet" => Ok(Network::Signet),
         "main" | "mainnet" => Err(NetworkError::MainnetRefused.into()),
         other => Err(NetworkError::Unsupported(printable(other)).into()),
     }
@@ -262,11 +262,8 @@ mod tests {
 
     #[test]
     fn oracle_network_names() {
-        assert_eq!(
-            network_from_oracle("regtest").ok(),
-            Some(LabNetwork::Regtest)
-        );
-        assert_eq!(network_from_oracle("signet").ok(), Some(LabNetwork::Signet));
+        assert_eq!(network_from_oracle("regtest").ok(), Some(Network::Regtest));
+        assert_eq!(network_from_oracle("signet").ok(), Some(Network::Signet));
         for name in ["main", "mainnet"] {
             assert_eq!(
                 network_from_oracle(name),

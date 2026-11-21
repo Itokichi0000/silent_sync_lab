@@ -1,26 +1,18 @@
-//! `silent-sync` — thin experimental CLI over `sync-core`.
+//! `silent-sync` — thin experimental CLI over `silent-sync`.
 //!
 //! EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
 //!
-//! This binary only parses arguments, calls `sync-core` / `lab-storage` and
+//! This binary only parses arguments, calls `silent-sync` / `silent-sync-sqlite` and
 //! prints. It has no send, sign or balance functionality.
 
 mod bench;
 mod lab_keys;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use lab_storage::SqliteStore;
-use std::{
-    fmt::Write as _,
-    io::{self, Write as _},
-    path::{Path, PathBuf},
-    process::ExitCode,
-    time::Duration,
-};
-use sync_core::{
+use silent_sync::{
     engine::{scan_range, ScanReport},
     models::{DetectedOutput, EvidenceKind},
-    network::{ChainIdentity, LabNetwork},
+    network::{ChainIdentity, Network},
     protocol::ReceiveScanner,
     source::{
         bitcoin_core::CoreRestSource,
@@ -32,6 +24,14 @@ use sync_core::{
     store::{StoreMeta, SyncStore},
     sync::{new_store_meta, sync_with_progress, StopReason, SyncError, SyncOptions, SyncReport},
     verify::{cross_check, VerificationReport},
+};
+use silent_sync_sqlite::SqliteStore;
+use std::{
+    fmt::Write as _,
+    io::{self, Write as _},
+    path::{Path, PathBuf},
+    process::ExitCode,
+    time::Duration,
 };
 
 /// Shown before anything else, on every invocation.
@@ -54,7 +54,7 @@ const DEFAULT_ORACLE_URL: &str = "http://127.0.0.1:8000";
 struct Cli {
     /// Network to operate on: `regtest` or `signet`. Mainnet is refused.
     #[arg(long, global = true, default_value = "regtest", value_parser = parse_network)]
-    network: LabNetwork,
+    network: Network,
 
     #[command(subcommand)]
     command: Command,
@@ -349,8 +349,8 @@ enum Backend {
     LocalIndex,
 }
 
-fn parse_network(value: &str) -> Result<LabNetwork, String> {
-    value.parse::<LabNetwork>().map_err(|e| e.to_string())
+fn parse_network(value: &str) -> Result<Network, String> {
+    value.parse::<Network>().map_err(|e| e.to_string())
 }
 
 struct Failure {
@@ -433,19 +433,19 @@ fn run(cli: Cli) -> Result<(), Failure> {
     }
 }
 
-fn default_core_rest_url(network: LabNetwork) -> &'static str {
+fn default_core_rest_url(network: Network) -> &'static str {
     match network {
-        LabNetwork::Regtest => "http://127.0.0.1:18443",
-        LabNetwork::Signet => "http://127.0.0.1:38332",
+        Network::Regtest => "http://127.0.0.1:18443",
+        Network::Signet => "http://127.0.0.1:38332",
     }
 }
 
-fn open_source(network: LabNetwork, args: &SourceArgs) -> Result<Box<dyn ScanSource>, Failure> {
+fn open_source(network: Network, args: &SourceArgs) -> Result<Box<dyn ScanSource>, Failure> {
     open_source_with(network, args, true)
 }
 
 fn open_source_with(
-    network: LabNetwork,
+    network: Network,
     args: &SourceArgs,
     announce: bool,
 ) -> Result<Box<dyn ScanSource>, Failure> {
@@ -524,7 +524,7 @@ fn open_source_with(
 }
 
 fn doctor(
-    network: LabNetwork,
+    network: Network,
     core_rest_url: Option<&str>,
     oracle_url: Option<&str>,
 ) -> Result<(), Failure> {
@@ -601,7 +601,7 @@ fn doctor(
     }
 }
 
-fn address_show(network: LabNetwork, label: Option<u32>) -> Result<(), Failure> {
+fn address_show(network: Network, label: Option<u32>) -> Result<(), Failure> {
     let keys = lab_keys::lab_receiver_keys().map_err(Failure::error)?;
     let code = match label {
         None => keys.address(network),
@@ -609,7 +609,7 @@ fn address_show(network: LabNetwork, label: Option<u32>) -> Result<(), Failure> 
     };
     emit(&format!("{code}\n"))?;
     eprintln!("receiver: {}", lab_keys::DESCRIPTION);
-    if network == LabNetwork::Regtest {
+    if network == Network::Regtest {
         eprintln!(
             "note: the `sprt` prefix is an upstream bdk-sp convention for regtest; BIP352 \
              itself only defines `sp` (mainnet) and `tsp` (test networks)."
@@ -626,7 +626,7 @@ fn address_show(network: LabNetwork, label: Option<u32>) -> Result<(), Failure> 
     Ok(())
 }
 
-fn scan(network: LabNetwork, args: ScanArgs) -> Result<(), Failure> {
+fn scan(network: Network, args: ScanArgs) -> Result<(), Failure> {
     let source = open_source(network, &args.source)?;
     let keys = lab_keys::lab_receiver_keys().map_err(Failure::error)?;
     let scanner = ReceiveScanner::new(&keys, &args.labels).map_err(fail)?;
@@ -658,7 +658,7 @@ fn scan(network: LabNetwork, args: ScanArgs) -> Result<(), Failure> {
     }
 }
 
-fn verify(network: LabNetwork, args: VerifyArgs) -> Result<(), Failure> {
+fn verify(network: Network, args: VerifyArgs) -> Result<(), Failure> {
     let candidate = open_source(network, &args.candidate)?;
     let reference_args = SourceArgs {
         backend: match args.reference {
@@ -795,7 +795,7 @@ fn write_new_file(path: &Path, text: &str) -> Result<(), Failure> {
 /// Opens a fresh connection to one backend; the error is its message.
 type Opener = Box<dyn Fn() -> Result<Box<dyn ScanSource>, String>>;
 
-fn bench_command(network: LabNetwork, args: BenchArgs) -> Result<(), Failure> {
+fn bench_command(network: Network, args: BenchArgs) -> Result<(), Failure> {
     if args.repeat == 0 {
         return Err(Failure::error("`--repeat` must be at least 1"));
     }
@@ -1019,7 +1019,7 @@ fn export_command(args: &ExportArgs) -> Result<(), Failure> {
 }
 
 fn lab_init(
-    network: LabNetwork,
+    network: Network,
     db: &Path,
     source_args: &SourceArgs,
     birthday: u32,
@@ -1068,7 +1068,7 @@ fn lab_init(
 }
 
 /// Opens the store and checks it against `--network`.
-fn open_store(network: LabNetwork, db: &Path) -> Result<(SqliteStore, StoreMeta), Failure> {
+fn open_store(network: Network, db: &Path) -> Result<(SqliteStore, StoreMeta), Failure> {
     let store = SqliteStore::open(db).map_err(fail)?;
     let meta = store.meta().map_err(fail)?.ok_or_else(|| {
         Failure::error(format!(
@@ -1087,7 +1087,7 @@ fn open_store(network: LabNetwork, db: &Path) -> Result<(SqliteStore, StoreMeta)
     Ok((store, meta))
 }
 
-fn sync_command(network: LabNetwork, args: SyncArgs) -> Result<(), Failure> {
+fn sync_command(network: Network, args: SyncArgs) -> Result<(), Failure> {
     let (mut store, meta) = open_store(network, &args.db.db)?;
     let source = open_source(network, &args.source)?;
     let keys = lab_keys::lab_receiver_keys().map_err(Failure::error)?;
@@ -1106,7 +1106,7 @@ fn sync_command(network: LabNetwork, args: SyncArgs) -> Result<(), Failure> {
         max_blocks: args.max_blocks,
     };
     let delay = Duration::from_millis(args.chunk_delay_ms);
-    let mut on_commit = |checkpoint: sync_core::models::BlockRef| {
+    let mut on_commit = |checkpoint: silent_sync::models::BlockRef| {
         eprintln!("committed up to height {}", checkpoint.height);
         if !delay.is_zero() {
             std::thread::sleep(delay);
@@ -1148,12 +1148,12 @@ fn sync_command(network: LabNetwork, args: SyncArgs) -> Result<(), Failure> {
 struct StatusJson<'a> {
     store: String,
     binding: &'a StoreMeta,
-    checkpoint: Option<sync_core::models::BlockRef>,
+    checkpoint: Option<silent_sync::models::BlockRef>,
     blocks_stored: u64,
     detected_received_outputs: u64,
 }
 
-fn status(network: LabNetwork, db: &Path, json: bool) -> Result<(), Failure> {
+fn status(network: Network, db: &Path, json: bool) -> Result<(), Failure> {
     let (store, meta) = open_store(network, db)?;
     let checkpoint = store.checkpoint().map_err(fail)?;
     let blocks = store.block_count().map_err(fail)?;
@@ -1171,7 +1171,7 @@ fn status(network: LabNetwork, db: &Path, json: bool) -> Result<(), Failure> {
     }
 }
 
-fn received_list(network: LabNetwork, db: &Path, json: bool) -> Result<(), Failure> {
+fn received_list(network: Network, db: &Path, json: bool) -> Result<(), Failure> {
     let (store, _) = open_store(network, db)?;
     let detections = store.detections().map_err(fail)?;
     if json {
@@ -1225,7 +1225,7 @@ fn render_detections(out: &mut String, detections: &[DetectedOutput]) {
 fn render_meta(
     db: &Path,
     meta: &StoreMeta,
-    checkpoint: Option<sync_core::models::BlockRef>,
+    checkpoint: Option<silent_sync::models::BlockRef>,
     blocks: u64,
     detected: u64,
 ) -> String {

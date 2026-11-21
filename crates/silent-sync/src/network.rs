@@ -1,17 +1,17 @@
 //! Network identity. Mainnet is not representable in this crate's types.
 
-use crate::bitcoin::{blockdata::constants::genesis_block, BlockHash, Network};
+use crate::bitcoin::{blockdata::constants::genesis_block, BlockHash, Network as BitcoinNetwork};
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 
 /// The only networks the lab may operate on.
 ///
-/// There is deliberately no mainnet variant: code that holds a `LabNetwork`
+/// There is deliberately no mainnet variant: code that holds a `Network`
 /// cannot be pointed at mainnet, and every parser rejects mainnet names with a
 /// dedicated error (design spec §5.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub enum LabNetwork {
+pub enum Network {
     Regtest,
     Signet,
 }
@@ -27,34 +27,34 @@ pub enum NetworkError {
     Unsupported(String),
     #[error("genesis hash mismatch for {network}: expected {expected}, got {actual}")]
     GenesisMismatch {
-        network: LabNetwork,
+        network: Network,
         expected: BlockHash,
         actual: BlockHash,
     },
 }
 
-impl LabNetwork {
+impl Network {
     pub const fn as_str(self) -> &'static str {
         match self {
-            LabNetwork::Regtest => "regtest",
-            LabNetwork::Signet => "signet",
+            Network::Regtest => "regtest",
+            Network::Signet => "signet",
         }
     }
 
-    /// The corresponding `bitcoin::Network`. Never returns `Network::Bitcoin`.
-    pub const fn to_bitcoin(self) -> Network {
+    /// The corresponding `bitcoin::Network`. Never returns `bitcoin::Network::Bitcoin`.
+    pub const fn to_bitcoin(self) -> BitcoinNetwork {
         match self {
-            LabNetwork::Regtest => Network::Regtest,
-            LabNetwork::Signet => Network::Signet,
+            Network::Regtest => BitcoinNetwork::Regtest,
+            Network::Signet => BitcoinNetwork::Signet,
         }
     }
 
     /// Fallible conversion from `bitcoin::Network`; mainnet is refused.
-    pub fn try_from_bitcoin(network: Network) -> Result<Self, NetworkError> {
+    pub fn try_from_bitcoin(network: BitcoinNetwork) -> Result<Self, NetworkError> {
         match network {
-            Network::Regtest => Ok(LabNetwork::Regtest),
-            Network::Signet => Ok(LabNetwork::Signet),
-            Network::Bitcoin => Err(NetworkError::MainnetRefused),
+            BitcoinNetwork::Regtest => Ok(Network::Regtest),
+            BitcoinNetwork::Signet => Ok(Network::Signet),
+            BitcoinNetwork::Bitcoin => Err(NetworkError::MainnetRefused),
             other => Err(NetworkError::Unsupported(other.to_string())),
         }
     }
@@ -68,19 +68,19 @@ impl LabNetwork {
     }
 }
 
-impl fmt::Display for LabNetwork {
+impl fmt::Display for Network {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-impl FromStr for LabNetwork {
+impl FromStr for Network {
     type Err = NetworkError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "regtest" => Ok(LabNetwork::Regtest),
-            "signet" => Ok(LabNetwork::Signet),
+            "regtest" => Ok(Network::Regtest),
+            "signet" => Ok(Network::Signet),
             "mainnet" | "main" | "bitcoin" | "livenet" | "prod" | "production" => {
                 Err(NetworkError::MainnetRefused)
             }
@@ -89,7 +89,7 @@ impl FromStr for LabNetwork {
     }
 }
 
-impl TryFrom<String> for LabNetwork {
+impl TryFrom<String> for Network {
     type Error = NetworkError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
@@ -97,8 +97,8 @@ impl TryFrom<String> for LabNetwork {
     }
 }
 
-impl From<LabNetwork> for String {
-    fn from(value: LabNetwork) -> Self {
+impl From<Network> for String {
+    fn from(value: Network) -> Self {
         value.as_str().to_string()
     }
 }
@@ -113,14 +113,14 @@ impl From<LabNetwork> for String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "RawChainIdentity", into = "RawChainIdentity")]
 pub struct ChainIdentity {
-    network: LabNetwork,
+    network: Network,
     genesis_hash: BlockHash,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawChainIdentity {
-    network: LabNetwork,
+    network: Network,
     genesis_hash: BlockHash,
 }
 
@@ -142,7 +142,7 @@ impl From<ChainIdentity> for RawChainIdentity {
 }
 
 impl ChainIdentity {
-    pub fn network(&self) -> LabNetwork {
+    pub fn network(&self) -> Network {
         self.network
     }
 
@@ -151,7 +151,7 @@ impl ChainIdentity {
     }
 
     /// The canonical identity of `network`.
-    pub fn for_network(network: LabNetwork) -> Self {
+    pub fn for_network(network: Network) -> Self {
         Self {
             network,
             genesis_hash: network.genesis_hash(),
@@ -161,7 +161,7 @@ impl ChainIdentity {
     /// Builds an identity from externally supplied data, verifying that the
     /// genesis hash is the one expected for the claimed network. This also
     /// rejects a mainnet chain mislabelled as a test network.
-    pub fn verified(network: LabNetwork, genesis_hash: BlockHash) -> Result<Self, NetworkError> {
+    pub fn verified(network: Network, genesis_hash: BlockHash) -> Result<Self, NetworkError> {
         let expected = network.genesis_hash();
         if genesis_hash != expected {
             return Err(NetworkError::GenesisMismatch {
@@ -192,7 +192,7 @@ mod tests {
             "livenet",
         ] {
             assert_eq!(
-                name.parse::<LabNetwork>(),
+                name.parse::<Network>(),
                 Err(NetworkError::MainnetRefused),
                 "{name}"
             );
@@ -201,16 +201,16 @@ mod tests {
 
     #[test]
     fn mainnet_is_refused_by_the_deserializer() {
-        let err = serde_json::from_str::<LabNetwork>("\"mainnet\"")
+        let err = serde_json::from_str::<Network>("\"mainnet\"")
             .expect_err("mainnet must not deserialize");
         assert!(err.to_string().contains("mainnet is refused"), "{err}");
-        assert!(serde_json::from_str::<LabNetwork>("\"bitcoin\"").is_err());
+        assert!(serde_json::from_str::<Network>("\"bitcoin\"").is_err());
     }
 
     #[test]
     fn mainnet_bitcoin_network_is_refused() {
         assert_eq!(
-            LabNetwork::try_from_bitcoin(Network::Bitcoin),
+            Network::try_from_bitcoin(BitcoinNetwork::Bitcoin),
             Err(NetworkError::MainnetRefused)
         );
     }
@@ -219,26 +219,23 @@ mod tests {
     fn other_networks_are_unsupported() {
         for name in ["testnet", "testnet4", "", "regtest2"] {
             assert!(matches!(
-                name.parse::<LabNetwork>(),
+                name.parse::<Network>(),
                 Err(NetworkError::Unsupported(_))
             ));
         }
         assert!(matches!(
-            LabNetwork::try_from_bitcoin(Network::Testnet),
+            Network::try_from_bitcoin(BitcoinNetwork::Testnet),
             Err(NetworkError::Unsupported(_))
         ));
     }
 
     #[test]
     fn supported_networks_round_trip() {
-        for network in [LabNetwork::Regtest, LabNetwork::Signet] {
-            assert_eq!(network.as_str().parse::<LabNetwork>(), Ok(network));
-            assert_ne!(network.to_bitcoin(), Network::Bitcoin);
+        for network in [Network::Regtest, Network::Signet] {
+            assert_eq!(network.as_str().parse::<Network>(), Ok(network));
+            assert_ne!(network.to_bitcoin(), BitcoinNetwork::Bitcoin);
             let json = serde_json::to_string(&network).expect("serialize");
-            assert_eq!(
-                serde_json::from_str::<LabNetwork>(&json).ok(),
-                Some(network)
-            );
+            assert_eq!(serde_json::from_str::<Network>(&json).ok(), Some(network));
         }
     }
 
@@ -246,26 +243,26 @@ mod tests {
     /// would otherwise go unnoticed.
     #[test]
     fn networks_map_to_their_well_known_genesis_blocks() {
-        assert_eq!(LabNetwork::Regtest.to_bitcoin(), Network::Regtest);
-        assert_eq!(LabNetwork::Signet.to_bitcoin(), Network::Signet);
+        assert_eq!(Network::Regtest.to_bitcoin(), BitcoinNetwork::Regtest);
+        assert_eq!(Network::Signet.to_bitcoin(), BitcoinNetwork::Signet);
         assert_eq!(
-            LabNetwork::Regtest.genesis_hash().to_string(),
+            Network::Regtest.genesis_hash().to_string(),
             "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
         );
         assert_eq!(
-            LabNetwork::Signet.genesis_hash().to_string(),
+            Network::Signet.genesis_hash().to_string(),
             "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6"
         );
-        let regtest = ChainIdentity::for_network(LabNetwork::Regtest);
-        assert_eq!(regtest.network(), LabNetwork::Regtest);
-        assert_eq!(regtest.genesis_hash(), LabNetwork::Regtest.genesis_hash());
-        assert_ne!(regtest, ChainIdentity::for_network(LabNetwork::Signet));
+        let regtest = ChainIdentity::for_network(Network::Regtest);
+        assert_eq!(regtest.network(), Network::Regtest);
+        assert_eq!(regtest.genesis_hash(), Network::Regtest.genesis_hash());
+        assert_ne!(regtest, ChainIdentity::for_network(Network::Signet));
     }
 
     #[test]
     fn chain_identity_cannot_be_deserialized_with_a_foreign_genesis() {
         let mainnet = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f";
-        let signet = LabNetwork::Signet.genesis_hash();
+        let signet = Network::Signet.genesis_hash();
         for json in [
             format!(r#"{{"network":"regtest","genesis_hash":"{mainnet}"}}"#),
             format!(r#"{{"network":"signet","genesis_hash":"{mainnet}"}}"#),
@@ -277,7 +274,7 @@ mod tests {
                 "{json}"
             );
         }
-        let good = ChainIdentity::for_network(LabNetwork::Signet);
+        let good = ChainIdentity::for_network(Network::Signet);
         let json = serde_json::to_string(&good).expect("serialize");
         assert_eq!(
             json,
@@ -291,17 +288,14 @@ mod tests {
 
     #[test]
     fn mainnet_genesis_is_rejected_even_when_labelled_regtest() {
-        let mainnet_genesis = genesis_block(Network::Bitcoin).block_hash();
-        for network in [LabNetwork::Regtest, LabNetwork::Signet] {
+        let mainnet_genesis = genesis_block(BitcoinNetwork::Bitcoin).block_hash();
+        for network in [Network::Regtest, Network::Signet] {
             assert!(matches!(
                 ChainIdentity::verified(network, mainnet_genesis),
                 Err(NetworkError::GenesisMismatch { .. })
             ));
             assert_ne!(network.genesis_hash(), mainnet_genesis);
         }
-        assert!(
-            ChainIdentity::verified(LabNetwork::Regtest, LabNetwork::Regtest.genesis_hash())
-                .is_ok()
-        );
+        assert!(ChainIdentity::verified(Network::Regtest, Network::Regtest.genesis_hash()).is_ok());
     }
 }

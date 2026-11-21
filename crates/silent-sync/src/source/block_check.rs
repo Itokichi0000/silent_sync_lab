@@ -9,13 +9,13 @@ use super::{coinbase_height, TxWithPrevouts};
 use crate::{
     bitcoin::{block::Header, hashes::Hash, Block, BlockHash, Target, TxOut, Txid},
     models::BlockRef,
-    network::LabNetwork,
+    network::Network,
 };
 use std::collections::BTreeSet;
 
 /// Where a block is expected to sit.
 pub(crate) struct BlockExpectation {
-    pub network: LabNetwork,
+    pub network: Network,
     pub height: u32,
     /// Hash the block's `prev_blockhash` must equal, when known.
     pub parent: Option<BlockHash>,
@@ -109,10 +109,7 @@ pub(crate) fn check_full_block(
 /// that, a file could choose an arbitrarily easy or wrapped-around target.)
 ///
 /// This still says nothing about the block being part of the most-work chain.
-pub(crate) fn check_proof_of_work(
-    header: &Header,
-    network: LabNetwork,
-) -> Result<BlockHash, String> {
+pub(crate) fn check_proof_of_work(header: &Header, network: Network) -> Result<BlockHash, String> {
     let bits = header.bits;
     let target = header.target();
     if target.to_compact_lossy() != bits {
@@ -122,8 +119,8 @@ pub(crate) fn check_proof_of_work(
         ));
     }
     let limit = match network {
-        LabNetwork::Regtest => Target::MAX_ATTAINABLE_REGTEST,
-        LabNetwork::Signet => Target::MAX_ATTAINABLE_SIGNET,
+        Network::Regtest => Target::MAX_ATTAINABLE_REGTEST,
+        Network::Signet => Target::MAX_ATTAINABLE_SIGNET,
     };
     if target > limit {
         return Err(format!(
