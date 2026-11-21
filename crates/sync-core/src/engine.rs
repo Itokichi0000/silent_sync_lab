@@ -156,7 +156,7 @@ pub const SCAN_CHUNK_BLOCKS: u32 = 100;
 
 /// Counters accumulated while scanning blocks.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ScanCounters {
+pub(crate) struct ScanCounters {
     pub blocks: u64,
     pub txs_seen: u64,
     pub txs_scanned: u64,

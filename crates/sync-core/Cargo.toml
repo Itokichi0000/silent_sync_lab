@@ -13,6 +13,20 @@ publish.workspace = true
 core-rest = ["dep:minreq"]
 # BlindBit Oracle v2 backend over its HTTP JSON interface (tweak index).
 blindbit-http = ["dep:minreq"]
+# Offline fixture files as a source. For experiments and tests: the format
+# carries previous outputs that nothing can verify.
+fixture = []
+# A tweak index computed locally from full blocks, for cross-checks and for
+# reproducing how an index that deviates from BIP352 behaves.
+local-index = []
+# Per-transaction entry points of the scanner. Building blocks for callers
+# with their own way of fetching data; `scan_range` and `sync` are the
+# supported entry points.
+low-level = []
+# NOT part of the SDK: lets conformance tests read the per-output tweak (a
+# secret) to compare it with the BIP352 vectors. Without it, scan matches do
+# not carry the tweak at all.
+secret-output-tweaks = ["low-level"]
 
 [dependencies]
 bdk_sp = { workspace = true }

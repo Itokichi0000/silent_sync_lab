@@ -28,6 +28,16 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The library must build cleanly on its own with every feature set an
+      # embedder can choose (the workspace build above enables them all).
+      - name: Clippy (library alone, each feature set)
+        run: |
+          for features in "" core-rest blindbit-http fixture local-index low-level secret-output-tweaks; do
+            echo "::group::features: ${features:-none}"
+            cargo clippy -p sync-core --lib --locked --features "$features" -- -D warnings
+            echo "::endgroup::"
+          done
+          cargo clippy -p sync-core --lib --locked --all-features -- -D warnings
       # Fast unit + integration tests only. Tests that need Bitcoin Core are
       # `#[ignore]`d here and run in the regtest-e2e job below.
       - name: Test

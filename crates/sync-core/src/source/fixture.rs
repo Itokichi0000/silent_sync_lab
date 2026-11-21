@@ -33,7 +33,7 @@ use std::{collections::BTreeSet, path::Path};
 /// Format tag of the fixture files this adapter understands.
 pub const FIXTURE_FORMAT: &str = "silent-sync-lab/fixture-chain/v1";
 
-pub const FIXTURE_BACKEND_ID: &str = "fixture";
+const FIXTURE_BACKEND_ID: &str = "fixture";
 
 /// On-disk fixture document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

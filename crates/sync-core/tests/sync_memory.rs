@@ -2,7 +2,9 @@
 //! The same suite runs against SQLite in `lab-storage`.
 #![allow(clippy::unwrap_used)] // test code: a panic is the failure report
 
-use lab_testkit::{fixture_gen, sync_store_suite, test_source::TestSource};
+use lab_testkit::{
+    fixture_gen, sync_store_suite, test_source::TestSource, test_store::FailingAppends,
+};
 use sync_core::{
     models::{BlockRef, DetectedOutput},
     protocol::ReceiveScanner,
@@ -30,7 +32,7 @@ fn failed_commit_loses_only_the_uncommitted_chunk() {
         ..SyncOptions::default()
     };
     for good_commits in 0..3u32 {
-        let mut store = MemoryStore::new();
+        let mut store = FailingAppends::new(MemoryStore::new());
         store
             .initialize(&new_store_meta(
                 &source,

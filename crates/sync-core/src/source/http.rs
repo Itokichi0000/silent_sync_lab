@@ -85,6 +85,7 @@ impl LoopbackHttp {
 
     /// Like [`get`](Self::get), but tells "the server answered: not found"
     /// (HTTP 404, `Ok(None)`) apart from every failure to get an answer.
+    #[cfg(feature = "core-rest")]
     pub(crate) fn get_if_found(&self, path: &str) -> Result<Option<Vec<u8>>, SourceError> {
         match self.request(path)? {
             (200, body) => Ok(Some(body)),

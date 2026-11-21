@@ -43,6 +43,22 @@ pub use bdk_sp::receive::K_MAX;
 /// BIP352 change label integer. It is always scanned for (BIP352 "Scanning").
 pub const CHANGE_LABEL: u32 = 0;
 
+/// Declares a method that is public with the `low-level` feature and
+/// crate-internal without it. The per-transaction entry points are building
+/// blocks: the supported way in is [`scan_range`](crate::engine::scan_range)
+/// or [`sync`](crate::sync::sync), which add the checks a single transaction
+/// cannot carry (block structure, completeness of a range, duplicates).
+macro_rules! low_level {
+    ($(#[$meta:meta])* fn $($rest:tt)*) => {
+        #[cfg(feature = "low-level")]
+        $(#[$meta])*
+        pub fn $($rest)*
+        #[cfg(not(feature = "low-level"))]
+        $(#[$meta])*
+        pub(crate) fn $($rest)*
+    };
+}
+
 /// Receive-side key material: scan private key and spend *public* key.
 ///
 /// The spend private key is never needed for detection and is not accepted.
@@ -164,8 +180,10 @@ impl fmt::Debug for LabAddress {
 /// One output that matched the receiver keys.
 ///
 /// The upstream match type is serializable including the per-output tweak.
-/// This type is deliberately not `Serialize`, redacts the tweak in `Debug` and
-/// only releases it through an explicitly named method.
+/// This type is deliberately not `Serialize` and, unless the
+/// `secret-output-tweaks` feature is enabled, **does not hold the tweak at
+/// all**: the scan result that leaves this crate says which output matched,
+/// not how to spend it (DECISIONS D-039).
 #[derive(Clone, PartialEq, Eq)]
 pub struct ScanMatch {
     pub outpoint: OutPoint,
@@ -173,16 +191,20 @@ pub struct ScanMatch {
     pub amount: Amount,
     /// BIP352 label integer, `None` for the unlabelled address.
     pub label: Option<u32>,
+    #[cfg(feature = "secret-output-tweaks")]
     tweak: SecretKey,
 }
 
+#[cfg(feature = "secret-output-tweaks")]
 impl ScanMatch {
     /// The output tweak `t_k` (plus the label tweak for labelled outputs).
     ///
     /// **Sensitive**: together with the spend private key it yields the
     /// output's private key, and on its own it links the output to the
-    /// receiver. Nothing in this lab stores, logs or exports it; it exists so
-    /// conformance tests can compare against the BIP352 vectors.
+    /// receiver. Nothing in this crate stores, logs or exports it. It exists
+    /// only with the `secret-output-tweaks` feature, so that conformance
+    /// tests can compare against the BIP352 vectors; it is not part of the
+    /// SDK's API.
     pub fn sensitive_output_tweak(&self) -> SecretKey {
         self.tweak
     }
@@ -195,6 +217,7 @@ impl From<SpOut> for ScanMatch {
             script_pubkey: spout.script_pubkey,
             amount: spout.amount,
             label: spout.label,
+            #[cfg(feature = "secret-output-tweaks")]
             tweak: spout.tweak,
         }
     }
@@ -207,8 +230,7 @@ impl fmt::Debug for ScanMatch {
             .field("script_pubkey", &self.script_pubkey)
             .field("amount", &self.amount)
             .field("label", &self.label)
-            .field("tweak", &"<redacted>")
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -290,6 +312,7 @@ impl ReceiveScanner {
     }
 
     /// Scanner that checks for exactly `labels` and nothing else — in
+    #[cfg(feature = "low-level")]
     /// particular **not** for the change label unless it is listed.
     ///
     /// This exists for conformance testing against the BIP352 vectors, which
@@ -330,9 +353,10 @@ impl ReceiveScanner {
         self.labels.iter().copied()
     }
 
+    low_level! {
     /// Decides whether BIP352 requires `tx` to be scanned, without using any
     /// private key. `prevouts[i]` must be the output spent by `tx.input[i]`.
-    pub fn eligibility(
+    fn eligibility(
         tx: &Transaction,
         prevouts: &[TxOut],
     ) -> Result<Result<(), SkipReason>, ProtocolError> {
@@ -377,10 +401,12 @@ impl ReceiveScanner {
         }
         Ok(Ok(()))
     }
+    }
 
+    low_level! {
     /// Scans one transaction. `prevouts[i]` must be the output spent by
     /// `tx.input[i]`.
-    pub fn scan_tx(
+    fn scan_tx(
         &self,
         tx: &Transaction,
         prevouts: &[TxOut],
@@ -405,6 +431,7 @@ impl ReceiveScanner {
             Err(SpReceiveError::ScanLimitExceeded(_)) => self.scan_tx_capped_at_k_max(tx, prevouts),
             Err(other) => Err(ProtocolError::Upstream(other.to_string())),
         }
+    }
     }
 
     /// BIP352 says "If k == K_max, stop scanning": a transaction with more
@@ -456,6 +483,7 @@ impl ReceiveScanner {
         }
     }
 
+    low_level! {
     /// Scans a transaction as described by a tweak index: public tweak data
     /// plus taproot outputs, no inputs.
     ///
@@ -468,7 +496,7 @@ impl ReceiveScanner {
     /// so whether the transaction should be scanned at all — and whether the
     /// tweak is right, or the transaction even exists — is taken on the
     /// index's word.
-    pub fn scan_indexed_tx(&self, indexed: &IndexedTx) -> Result<Vec<ScanMatch>, ProtocolError> {
+    fn scan_indexed_tx(&self, indexed: &IndexedTx) -> Result<Vec<ScanMatch>, ProtocolError> {
         let mut seen = BTreeSet::new();
         if let Some(dup) = indexed.outputs.iter().find(|o| !seen.insert(o.vout)) {
             return Err(ProtocolError::Upstream(format!(
@@ -544,12 +572,15 @@ impl ReceiveScanner {
             })
             .collect()
     }
+    }
 
+    #[cfg(any(feature = "local-index", feature = "low-level"))]
+    low_level! {
     /// BIP352 public tweak data as an index that does **not** apply the
     /// "spends SegWit version > 1" rule would compute it. Exists to model such
     /// indexes (see `source::local_index`); wallets must use
     /// [`Self::public_tweak_data`].
-    pub fn public_tweak_data_ignoring_segwit_version_rule(
+    fn public_tweak_data_ignoring_segwit_version_rule(
         tx: &Transaction,
         prevouts: &[TxOut],
     ) -> Result<Result<PublicKey, SkipReason>, ProtocolError> {
@@ -568,11 +599,14 @@ impl ReceiveScanner {
         }
         Self::tweak_data_of_eligible(tx, prevouts)
     }
+    }
 
+    low_level! {
     /// BIP352 public tweak data (`input_hash·A`) of an eligible transaction.
+    ///
     /// Uses no private key. The inner `Err` carries the reason when BIP352 says
     /// the transaction must not be scanned.
-    pub fn public_tweak_data(
+    fn public_tweak_data(
         tx: &Transaction,
         prevouts: &[TxOut],
     ) -> Result<Result<PublicKey, SkipReason>, ProtocolError> {
@@ -580,6 +614,7 @@ impl ReceiveScanner {
             return Ok(Err(reason));
         }
         Self::tweak_data_of_eligible(tx, prevouts)
+    }
     }
 
     fn tweak_data_of_eligible(

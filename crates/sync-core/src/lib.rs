@@ -25,7 +25,3 @@ pub mod verify;
 /// Re-export of the exact `bitcoin` crate version used by the upstream scanner,
 /// so downstream crates cannot accidentally mix incompatible versions.
 pub use bdk_sp::bitcoin;
-
-/// Banner every user-facing frontend must show (design spec §5.10, §11).
-pub const EXPERIMENTAL_BANNER: &str =
-    "EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS (unaudited research code)";

@@ -37,7 +37,7 @@ use crate::{
 };
 use serde::Deserialize;
 
-pub const BLINDBIT_BACKEND_ID: &str = "blindbit_oracle_v2_http";
+const BLINDBIT_BACKEND_ID: &str = "blindbit_oracle_v2_http";
 
 /// A BlindBit Oracle v2 instance plus the header source that anchors it.
 pub struct BlindbitHttpSource<H> {

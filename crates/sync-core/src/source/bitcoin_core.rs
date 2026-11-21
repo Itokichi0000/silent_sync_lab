@@ -45,7 +45,7 @@ use crate::{
 };
 use std::{collections::BTreeSet, sync::Mutex};
 
-pub const CORE_REST_BACKEND_ID: &str = "bitcoin_core_rest";
+const CORE_REST_BACKEND_ID: &str = "bitcoin_core_rest";
 
 /// Upper bound on transactions per block accepted from `spenttxouts`.
 const MAX_TXS_PER_BLOCK: u64 = 1_000_000;

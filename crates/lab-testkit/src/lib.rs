@@ -19,3 +19,4 @@ pub mod regtest_node;
 pub mod regtest_wallet;
 pub mod sync_suite;
 pub mod test_source;
+pub mod test_store;

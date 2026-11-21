@@ -32,9 +32,11 @@ use sync_core::{
     store::{StoreMeta, SyncStore},
     sync::{new_store_meta, sync_with_progress, StopReason, SyncError, SyncOptions, SyncReport},
     verify::{cross_check, VerificationReport},
-    EXPERIMENTAL_BANNER,
 };
 
+/// Shown before anything else, on every invocation.
+const EXPERIMENTAL_BANNER: &str =
+    "EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS (unaudited research code)";
 const DEFAULT_DB: &str = "silent-sync-lab.sqlite3";
 /// Exit code of `verify` when the two backends do not agree.
 const EXIT_DIFFERENCES: u8 = 4;

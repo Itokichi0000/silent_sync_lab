@@ -719,7 +719,9 @@ fn reports_and_debug_output_contain_no_key_material() {
         }
     }
     assert!(outputs[2].contains("<redacted>") && outputs[3].contains("<redacted>"));
-    assert_eq!(outputs[4].matches("<redacted>").count(), 3);
+    // A match shows which output it is and nothing about the tweak.
+    assert_eq!(outputs[4].matches("ScanMatch {").count(), 3);
+    assert!(!outputs[4].contains("tweak"));
     // Addresses are public, and can only be rendered for a lab network.
     assert!(outputs[5].starts_with("sprt1") && outputs[5].contains("LabAddress(tsp1"));
 }

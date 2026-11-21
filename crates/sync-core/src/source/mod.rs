@@ -15,18 +15,19 @@
 pub mod bitcoin_core;
 #[cfg(feature = "blindbit-http")]
 pub mod blindbit;
+#[cfg(any(feature = "core-rest", feature = "fixture"))]
 mod block_check;
+#[cfg(feature = "fixture")]
 pub mod fixture;
 #[cfg(any(feature = "core-rest", feature = "blindbit-http"))]
 mod http;
+#[cfg(feature = "local-index")]
 pub mod local_index;
 
+#[cfg(any(feature = "core-rest", feature = "fixture"))]
+use crate::bitcoin::script::{self, Instruction};
 use crate::{
-    bitcoin::{
-        script::{self, Instruction},
-        secp256k1::PublicKey,
-        Transaction, TxOut, Txid,
-    },
+    bitcoin::{secp256k1::PublicKey, Transaction, TxOut, Txid},
     models::{BlockRef, EvidenceKind},
     network::{ChainIdentity, NetworkError},
 };
@@ -190,7 +191,8 @@ pub trait ScanSource {
 /// Unlike `bitcoin::Block::bip34_block_height` this also accepts the
 /// `OP_1`..`OP_16` encoding that Bitcoin Core produces for heights 1 to 16,
 /// which every regtest chain starts with.
-pub fn coinbase_height(coinbase: &Transaction) -> Option<u32> {
+#[cfg(any(feature = "core-rest", feature = "fixture"))]
+pub(crate) fn coinbase_height(coinbase: &Transaction) -> Option<u32> {
     let script_sig = &coinbase.input.first()?.script_sig;
     match script_sig.instructions().next()?.ok()? {
         Instruction::PushBytes(bytes) => {

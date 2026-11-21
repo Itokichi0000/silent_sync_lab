@@ -24,11 +24,11 @@ use crate::{
 };
 
 /// Backend id of an index built with [`IndexPolicy::Bip352`].
-pub const LOCAL_INDEX_BACKEND_ID: &str = "local_tweak_index";
+const LOCAL_INDEX_BACKEND_ID: &str = "local_tweak_index";
 /// Backend id of an index built with [`IndexPolicy::IgnoreSegwitVersionRule`].
 /// The two policies detect different outputs, so they are different backends
 /// as far as a store's binding is concerned.
-pub const LOCAL_INDEX_LENIENT_BACKEND_ID: &str = "local_tweak_index_ignoring_segwit_version_rule";
+const LOCAL_INDEX_LENIENT_BACKEND_ID: &str = "local_tweak_index_ignoring_segwit_version_rule";
 
 /// Which transactions the index lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

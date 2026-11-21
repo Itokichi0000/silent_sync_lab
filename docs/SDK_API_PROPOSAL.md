@@ -137,7 +137,7 @@ for output in &report.new_detections { /* txid, vout, 金額, ラベル, 証拠�
 
 | 順 | 内容 | 影響 | 状態 |
 |---|---|---|---|
-| 1 | 層 C の非公開化と feature 分け（`fixture`, `local-index`, `low-level`）、テスト用フックの移動 | 公開範囲のみ。挙動は不変 | 未着手 |
+| 1 | 層 C の非公開化と feature 分け（`fixture`, `local-index`, `low-level`）、テスト用フックの移動 | 公開範囲のみ。挙動は不変 | **済**。提案との差: (1) 出力ごとの tweak は `low-level` でも渡さず、適合テスト専用の feature `secret-output-tweaks` を別に設けた（既定では `ScanMatch` が tweak を保持しない）。(2) `SCAN_CHUNK_BLOCKS` と `MAX_INDEXED_OUTPUTS_PER_BLOCK` は観測できる挙動の上限なので公開のまま |
 | 2 | 名前の変更（クレート `silent-sync` / `silent-sync-sqlite`、型 `Network` / `SilentPaymentAddress`） | 機械的な置換 | 未着手 |
 | 3 | 層 A の再エクスポート、`#[non_exhaustive]`、ドキュメントと使用例 | 追加のみ | 未着手 |
 | 4 | 公開 API 一覧の固定とテスト | 追加のみ | 未着手 |

@@ -206,31 +206,18 @@ pub fn sort_detections(detections: &mut [DetectedOutput]) {
     detections.sort_by_key(|d| (d.block.height, d.txid, d.vout));
 }
 
-/// In-memory [`SyncStore`]. Reference implementation; also lets tests inject
-/// failures through [`MemoryStore::fail_appends_after`].
+/// In-memory [`SyncStore`]: the reference implementation of the trait's
+/// contract. Nothing is persisted; use it for tests and short-lived scans.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryStore {
     meta: Option<StoreMeta>,
     blocks: Vec<BlockRef>,
     detections: Vec<DetectedOutput>,
-    /// When `Some(n)`, the `n + 1`-th and later appends fail without changing
-    /// anything (simulates a crash before commit).
-    appends_before_failure: Option<u32>,
 }
 
 impl MemoryStore {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// The next `n` appends succeed; every later one fails atomically.
-    pub fn fail_appends_after(&mut self, n: u32) {
-        self.appends_before_failure = Some(n);
-    }
-
-    /// Lets appends succeed again.
-    pub fn stop_failing(&mut self) {
-        self.appends_before_failure = None;
     }
 }
 
@@ -277,12 +264,6 @@ impl SyncStore for MemoryStore {
             },
             &|hash| self.blocks.iter().any(|b| b.hash == hash),
         )?;
-        if let Some(remaining) = self.appends_before_failure.as_mut() {
-            if *remaining == 0 {
-                return Err(StoreError::Backend("injected failure".to_string()));
-            }
-            *remaining -= 1;
-        }
         self.blocks.extend_from_slice(blocks);
         self.detections.extend_from_slice(detections);
         sort_detections(&mut self.detections);
