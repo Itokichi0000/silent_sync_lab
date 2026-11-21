@@ -71,14 +71,18 @@ pub struct ReceiverKeys {
 }
 
 impl ReceiverKeys {
+    /// Builds the receiver's keys from the scan *private* key and the spend
+    /// *public* key. The spend private key is never needed for detection.
     pub fn new(scan_sk: SecretKey, spend_pk: PublicKey) -> Self {
         Self { scan_sk, spend_pk }
     }
 
+    /// The scan public key (part of the address).
     pub fn scan_public_key(&self) -> PublicKey {
         self.scan_sk.public_key(&Secp256k1::new())
     }
 
+    /// The spend public key (part of the address).
     pub fn spend_public_key(&self) -> PublicKey {
         self.spend_pk
     }
@@ -151,10 +155,12 @@ pub struct SilentPaymentAddress {
 }
 
 impl SilentPaymentAddress {
+    /// Network the address is encoded for.
     pub fn network(&self) -> Network {
         self.network
     }
 
+    /// The scan public key encoded in the address.
     pub fn scan_public_key(&self) -> PublicKey {
         self.scan
     }
@@ -192,8 +198,11 @@ mod tx_level {
     #[derive(Clone, PartialEq, Eq)]
     #[non_exhaustive]
     pub struct ScanMatch {
+        /// The matching output.
         pub outpoint: OutPoint,
+        /// Its script (a taproot output).
         pub script_pubkey: ScriptBuf,
+        /// Its value.
         pub amount: Amount,
         /// BIP352 label integer, `None` for the unlabelled address.
         pub label: Option<u32>,
@@ -257,6 +266,7 @@ mod tx_level {
     }
 
     impl SkipReason {
+        /// Stable name of the reason, as used in reports.
         pub const fn as_str(self) -> &'static str {
             match self {
                 SkipReason::Coinbase => "coinbase",
@@ -274,7 +284,11 @@ mod tx_level {
         /// BIP352 says this transaction must not be scanned.
         NotEligible(SkipReason),
         /// The transaction was scanned. `matches` may be empty.
-        Scanned { matches: Vec<ScanMatch> },
+        /// The transaction was scanned. `matches` may be empty.
+        Scanned {
+            /// Outputs that belong to the receiver.
+            matches: Vec<ScanMatch>,
+        },
     }
 }
 
@@ -285,25 +299,44 @@ pub use tx_level::{ScanMatch, SkipReason, TxScanOutcome};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
+/// Why a transaction could not be scanned. Unlike a skip, this is an error:
+/// the data is unusable or the upstream scanner failed.
 pub enum ProtocolError {
     #[error("transaction has {inputs} inputs but {prevouts} previous outputs were supplied")]
-    PrevoutCountMismatch { inputs: usize, prevouts: usize },
+    /// The number of previous outputs does not match the number of inputs.
+    PrevoutCountMismatch {
+        /// Number of inputs of the transaction.
+        inputs: usize,
+        /// Number of previous outputs that were supplied.
+        prevouts: usize,
+    },
     #[error(
         "input {input} spends a SegWit output but carries no witness; the data was stripped of \
          witnesses or is not consensus-valid, and scanning it would silently miss payments"
     )]
-    MissingWitness { input: usize },
+    /// An input spends a SegWit output but has no witness.
+    MissingWitness {
+        /// Index of the input without its witness.
+        input: usize,
+    },
     #[error(
         "more than K_max={0} outputs matched even after capping the scan (docs/DECISIONS.md D-005)"
     )]
+    /// More outputs matched than BIP352 allows per recipient group (the limit
+    /// is given).
     KMaxExceeded(u32),
     #[error("K_max fallback found {0} matches instead of exactly K_max; refusing to guess")]
+    /// The capped rescan did not find exactly the allowed number of matches
+    /// (the number found is given).
     KMaxFallbackInconsistent(usize),
     #[error("could not derive label: {0}")]
+    /// A label could not be derived.
     Label(String),
     #[error("upstream scanner error: {0}")]
+    /// The upstream scanner returned an error.
     Upstream(String),
     #[error("upstream scanner panicked on malformed input; transaction treated as an error")]
+    /// The upstream scanner panicked; the panic was contained.
     UpstreamPanic,
 }
 

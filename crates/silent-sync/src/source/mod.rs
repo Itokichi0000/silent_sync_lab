@@ -66,14 +66,18 @@ pub struct SourceCapabilities {
 /// `prevouts[i]` is spent by `tx.input[i]`; it is empty for a coinbase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxWithPrevouts {
+    /// The transaction, with witnesses.
     pub tx: Transaction,
+    /// The outputs its inputs spend, in input order.
     pub prevouts: Vec<TxOut>,
 }
 
 /// A taproot output as listed by a tweak index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexedOutput {
+    /// Index of the output within its transaction.
     pub vout: u32,
+    /// Value in satoshi, as the index states it.
     pub value_sats: u64,
     /// The 32-byte witness program (x-only output key).
     pub output_key: [u8; 32],
@@ -83,8 +87,11 @@ pub struct IndexedOutput {
 /// (`input_hash·A`) and its taproot outputs. Inputs are not available.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexedTx {
+    /// Transaction id, as the index states it.
     pub txid: Txid,
+    /// BIP352 public tweak data (`input_hash·A`) of the transaction.
     pub tweak: PublicKey,
+    /// The taproot outputs the index lists for it.
     pub outputs: Vec<IndexedOutput>,
 }
 
@@ -104,6 +111,7 @@ pub enum Evidence {
 }
 
 impl Evidence {
+    /// The kind of this evidence.
     pub fn kind(&self) -> EvidenceKind {
         match self {
             Evidence::FullBlock(_) => EvidenceKind::FullBlockWithPrevouts,
@@ -113,34 +121,53 @@ impl Evidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// What a source supplies for one block.
 pub struct BlockEvidence {
+    /// The block the evidence is for.
     pub block: BlockRef,
+    /// The evidence itself.
     pub evidence: Evidence,
 }
 
 /// Blocks of a requested range, ascending by height.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ScanBatch {
+    /// One entry per requested height, ascending, without gaps.
     pub blocks: Vec<BlockEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
+/// Why a source could not supply what was asked.
 pub enum SourceError {
     #[error("invalid range {from}..={to}")]
-    InvalidRange { from: u32, to: u32 },
-    #[error("range {from}..={to} is not fully available (source covers {available_from}..={available_to})")]
-    RangeUnavailable {
+    /// The requested range is empty or reversed.
+    InvalidRange {
+        /// First requested height.
         from: u32,
+        /// Last requested height.
         to: u32,
+    },
+    #[error("range {from}..={to} is not fully available (source covers {available_from}..={available_to})")]
+    /// The source does not have all of the requested range.
+    RangeUnavailable {
+        /// First requested height.
+        from: u32,
+        /// Last requested height.
+        to: u32,
+        /// First height the source can serve.
         available_from: u32,
+        /// Last height the source can serve.
         available_to: u32,
     },
     #[error("source data is invalid: {0}")]
+    /// The source returned data that fails validation.
     InvalidData(String),
     #[error("source is unavailable: {0}")]
+    /// The source could not be reached or did not answer usefully.
     Unavailable(String),
     #[error(transparent)]
+    /// The source is on a network that is refused.
     Network(#[from] NetworkError),
 }
 
@@ -160,7 +187,9 @@ pub struct SourceStats {
 pub trait ScanSource {
     /// Stable identifier used in provenance and reports, e.g. `"fixture"`.
     fn backend_id(&self) -> &str;
+    /// What this source verifies and what kind of evidence it yields.
     fn capabilities(&self) -> SourceCapabilities;
+    /// The chain this source serves.
     fn chain(&self) -> ChainIdentity;
     /// Highest block the source can currently serve.
     fn tip(&self) -> Result<BlockRef, SourceError>;

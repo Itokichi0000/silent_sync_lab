@@ -117,6 +117,7 @@
 //!
 //! Version 0.x: the API may change. Report and error types are
 //! `#[non_exhaustive]`, so new fields and variants are not breaking changes.
+#![warn(missing_docs)]
 
 pub mod engine;
 pub mod models;

@@ -116,6 +116,7 @@ impl<H: ScanSource> BlindbitHttpSource<H> {
         Ok(source)
     }
 
+    /// The source that supplies block identity (headers).
     pub fn header_source(&self) -> &H {
         &self.headers
     }

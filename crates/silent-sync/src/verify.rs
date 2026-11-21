@@ -28,7 +28,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Side {
+    /// The source being checked.
     Candidate,
+    /// The source it is checked against.
     Reference,
 }
 
@@ -41,7 +43,10 @@ pub enum Explanation {
     BlockHashDiffers,
     /// Candidate-only: BIP352 says the transaction must not be scanned (the
     /// reference, which sees the inputs, applied the rule; an index did not).
-    ReferenceNotEligible { reason: &'static str },
+    ReferenceNotEligible {
+        /// The BIP352 reason the transaction is not eligible.
+        reason: &'static str,
+    },
     /// Candidate-only: the reference block contains no such transaction.
     ReferenceTransactionMissing,
     /// Candidate-only: the reference has the transaction and scanned it, and
@@ -61,18 +66,29 @@ pub enum Explanation {
     /// Both detected the output but disagree on value or label.
     DetailsDiffer,
     /// None of the above could be established from the evidence at hand.
-    Unexplained { note: String },
+    Unexplained {
+        /// What was looked at without finding the cause.
+        note: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
+/// One output about which the two sources disagree.
 pub struct Difference {
+    /// Height of the block.
     pub height: u32,
+    /// Transaction of the output.
     pub txid: Txid,
+    /// Index of the output.
     pub vout: u32,
+    /// The side that detected it alone; `None` when both did, differently.
     pub only_in: Option<Side>,
+    /// What the candidate detected.
     pub candidate: Option<DetectedOutput>,
+    /// What the reference detected.
     pub reference: Option<DetectedOutput>,
+    /// The most specific cause the evidence allows.
     pub explanation: Explanation,
 }
 
@@ -80,16 +96,25 @@ pub struct Difference {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct VerificationReport {
+    /// Chain that was compared.
     pub chain: ChainIdentity,
+    /// Backend that was checked.
     pub candidate_backend: String,
+    /// Backend it was checked against.
     pub reference_backend: String,
+    /// First height compared.
     pub first_height: u32,
+    /// Last height compared.
     pub last_height: u32,
+    /// Labels that were scanned for.
     pub labels_scanned: Vec<u32>,
     /// Outputs both sources detected identically.
     pub agreed: u64,
+    /// Outputs only the candidate detected.
     pub candidate_only: u64,
+    /// Outputs only the reference detected.
     pub reference_only: u64,
+    /// Every disagreement, ascending by height.
     pub differences: Vec<Difference>,
     /// Heights at which the two sources report different block hashes.
     pub block_hash_mismatches: Vec<u32>,

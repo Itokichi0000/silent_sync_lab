@@ -39,10 +39,15 @@ const FIXTURE_BACKEND_ID: &str = "fixture";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FixtureFile {
+    /// Format identifier; must be [`FIXTURE_FORMAT`].
     pub format: String,
+    /// Free-form description of the chain.
     pub description: String,
+    /// Network the chain belongs to.
     pub network: Network,
+    /// Genesis hash the first block builds on.
     pub genesis_hash: BlockHash,
+    /// The blocks, from height 1, contiguous.
     pub blocks: Vec<FixtureBlock>,
     /// Outputs the fixture author *created for* the documented receiver, as
     /// known from the sending side. Informational for tests; never used by the
@@ -53,7 +58,9 @@ pub struct FixtureFile {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// One block of a fixture.
 pub struct FixtureBlock {
+    /// Height of the block.
     pub height: u32,
     /// Consensus-serialized block, hex.
     pub block_hex: String,
@@ -64,24 +71,35 @@ pub struct FixtureBlock {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// An output spent by a fixture transaction. Nothing commits to it.
 pub struct FixturePrevout {
+    /// Value in satoshi.
     pub value_sats: u64,
+    /// Script, hex encoded.
     pub script_pubkey_hex: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// An output the fixture's sender created for the receiver (sender-side
+/// knowledge, used by tests as the expected result).
 pub struct FixtureExpectedDetection {
+    /// Height of the block that contains it.
     pub height: u32,
+    /// Transaction that creates it.
     pub txid: Txid,
+    /// Output index.
     pub vout: u32,
     /// BIP352 output index `k` the sender used for this output within the
     /// transaction. A receiver finds the output for `k` only after it has
     /// found the ones for `0..k`, so an output behind an unknown label hides
     /// every later one of the same transaction.
     pub k: u32,
+    /// Value in satoshi.
     pub value_sats: u64,
+    /// Label of the address that was paid, if any.
     pub label: Option<u32>,
+    /// What the case is about.
     pub note: String,
 }
 
@@ -98,18 +116,21 @@ fn invalid(msg: impl Into<String>) -> SourceError {
 }
 
 impl FixtureSource {
+    /// Loads and validates a fixture file.
     pub fn from_path(path: &Path) -> Result<Self, SourceError> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| SourceError::Unavailable(format!("{}: {e}", path.display())))?;
         Self::from_json_str(&text)
     }
 
+    /// Parses and validates a fixture from JSON text.
     pub fn from_json_str(json: &str) -> Result<Self, SourceError> {
         let file: FixtureFile =
             serde_json::from_str(json).map_err(|e| invalid(format!("fixture JSON: {e}")))?;
         Self::from_file(file)
     }
 
+    /// Validates an already parsed fixture.
     pub fn from_file(file: FixtureFile) -> Result<Self, SourceError> {
         if file.format != FIXTURE_FORMAT {
             return Err(invalid(format!(

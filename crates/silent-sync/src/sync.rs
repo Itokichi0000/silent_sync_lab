@@ -88,16 +88,24 @@ impl Default for SyncOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
+/// Why a sync call failed.
 pub enum SyncError {
     #[error(transparent)]
+    /// The store failed or refused an operation.
     Store(#[from] StoreError),
     #[error(transparent)]
+    /// Fetching or scanning failed.
     Scan(#[from] ScanError),
     #[error("the store is bound to a different {field}: stored `{stored}`, given `{given}`{hint}")]
+    /// The store is bound to something else than what was given.
     BindingMismatch {
+        /// Which part of the binding differs.
         field: &'static str,
+        /// What the store is bound to.
         stored: String,
+        /// What the call was given.
         given: String,
+        /// What to do about it.
         hint: &'static str,
     },
     #[error(
@@ -105,26 +113,45 @@ pub enum SyncError {
          checkpoint {checkpoint}) and shows no competing chain; refusing to discard scanned \
          blocks. If the chain was reorganized, sync again once the source has caught up"
     )]
+    /// The source's chain ends below the stored checkpoint without
+    /// contradicting it.
     SourceBehindCheckpoint {
+        /// Backend that was asked.
         backend_id: String,
+        /// Height of the source's tip.
         source_tip: u32,
+        /// Height of the stored checkpoint.
         checkpoint: u32,
     },
     #[error("target height {target} is above the source's tip {tip}")]
-    TargetAboveTip { target: u32, tip: u32 },
+    /// The requested target height is above the source's tip.
+    TargetAboveTip {
+        /// Requested target height.
+        target: u32,
+        /// Height of the source's tip.
+        tip: u32,
+    },
     #[error(
         "the chain changed while syncing: block {height} does not build on the stored \
          checkpoint; run sync again"
     )]
-    ChainMovedDuringSync { height: u32 },
+    /// The blocks fetched do not build on the stored checkpoint: the chain
+    /// changed between two steps of the call.
+    ChainMovedDuringSync {
+        /// Height of the first block that does not link.
+        height: u32,
+    },
     #[error("chunk size must be at least 1")]
+    /// `chunk_size` was 0.
     InvalidChunkSize,
     /// The call failed after it had already changed the store. `partial`
     /// reports exactly what was changed (a reorg rollback and/or committed
     /// chunks); the store is consistent and can be synced again.
     #[error("sync interrupted after changing the store: {cause}")]
     Interrupted {
+        /// The error that stopped the call.
         cause: Box<SyncError>,
+        /// What the call had already changed.
         partial: Box<SyncReport>,
     },
 }
@@ -144,6 +171,7 @@ pub struct ReorgReport {
     /// Highest height at which the store and the source still agree
     /// (`birthday - 1` when they share nothing).
     pub fork_height: u32,
+    /// Number of blocks removed from the store.
     pub blocks_rolled_back: u64,
     /// Detections that were in the abandoned blocks. They are re-detected if
     /// the same transactions confirm on the new chain.
@@ -154,20 +182,30 @@ pub struct ReorgReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct SyncReport {
+    /// Chain that was synced.
     pub chain: ChainIdentity,
+    /// Backend the data came from.
     pub backend_id: String,
     /// What kind of evidence the detections rest on (see
     /// [`ScanReport::evidence_kind`](crate::engine::ScanReport)).
     pub evidence_kind: EvidenceKind,
+    /// Public identifier of the receiver.
     pub wallet_id: String,
+    /// Labels that were scanned for.
     pub labels_scanned: Vec<u32>,
+    /// First height the store covers.
     pub birthday: u32,
     /// Checkpoint found in the store when the call started.
     pub resumed_from: Option<BlockRef>,
+    /// The reorganization this call resolved, if any.
     pub reorg: Option<ReorgReport>,
+    /// Blocks scanned and committed by this call.
     pub blocks_scanned: u64,
+    /// Transactions looked at (for a tweak index: entries listed).
     pub txs_seen: u64,
+    /// Transactions that were eligible and scanned.
     pub txs_scanned: u64,
+    /// Transactions BIP352 says not to scan, by reason.
     pub txs_skipped: BTreeMap<&'static str, u64>,
     /// Detections committed by this call (not the whole history).
     pub new_detections: Vec<DetectedOutput>,

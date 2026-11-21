@@ -34,9 +34,11 @@ pub const SCANNER_VERSION: &str = concat!(
 /// source it is given; any difference is an error, never a silent mix.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreMeta {
+    /// Chain the store is for.
     pub chain: ChainIdentity,
     /// Public identifier of the receiver (derived from its public keys).
     pub wallet_id: String,
+    /// Backend whose results the store holds.
     pub backend_id: String,
     /// Label integers scanned for, ascending. Changing them requires a rescan:
     /// blocks already scanned were not checked for the new labels.
@@ -47,19 +49,25 @@ pub struct StoreMeta {
     /// Why `birthday` is believed to be at or below the wallet's first
     /// payment. Recorded because a wrong birthday silently loses payments.
     pub birthday_basis: String,
+    /// [`SCANNER_VERSION`] of the code that wrote the store.
     pub scanner_version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
+/// Why a store operation failed.
 pub enum StoreError {
     #[error("the store has not been initialized")]
+    /// The store has no binding yet.
     NotInitialized,
     #[error("the store is already initialized")]
+    /// The store already has a binding.
     AlreadyInitialized,
     #[error("store invariant violated: {0}")]
+    /// The operation, or what is stored, breaks a rule every store enforces.
     Invariant(String),
     #[error("storage backend error: {0}")]
+    /// The storage layer failed (I/O, database).
     Backend(String),
 }
 
@@ -69,6 +77,7 @@ pub enum StoreError {
 /// [`rollback_to`](SyncStore::rollback_to) atomic: after a crash at any point
 /// the store holds either the state before the call or the state after it.
 pub trait SyncStore {
+    /// The store's binding, or `None` if it has not been initialized.
     fn meta(&self) -> Result<Option<StoreMeta>, StoreError>;
     /// Binds an empty store to `meta`. Fails if it is already initialized.
     fn initialize(&mut self, meta: &StoreMeta) -> Result<(), StoreError>;
@@ -221,6 +230,7 @@ pub struct MemoryStore {
 }
 
 impl MemoryStore {
+    /// An empty, uninitialized store.
     pub fn new() -> Self {
         Self::default()
     }

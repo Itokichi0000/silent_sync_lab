@@ -17,11 +17,17 @@ secret-output-tweaks = ["low-level"]
         actual: ChainIdentity,
     },
     #[error("invalid range {from}..={to}")]
-    InvalidRange { from: u32, to: u32 },
+    InvalidRange {
+        from: u32,
+        to: u32,
+    },
     #[error(transparent)]
     Source(#[from] SourceError),
     #[error("source `{backend_id}` returned an inconsistent batch: {reason}")]
-    InconsistentBatch { backend_id: String, reason: String },
+    InconsistentBatch {
+        backend_id: String,
+        reason: String,
+    },
     #[error("block {height}: transaction {txid}: {source}")]
     Transaction {
         height: u32,
@@ -46,7 +52,7 @@ pub const SCAN_CHUNK_BLOCKS: u32 = 100;
 pub const MAX_INDEXED_OUTPUTS_PER_BLOCK: usize = 4_000_000 / 172;
 
 ## lib.rs
-pub mod engine;
+#![warn(missing_docs)] pub mod engine;
 pub mod models;
 pub mod network;
 pub mod protocol;
@@ -169,17 +175,24 @@ mod tx_level
         pub const fn as_str(self) -> &'static str
     #[derive(Debug, Clone, PartialEq, Eq)] pub enum TxScanOutcome
         NotEligible(SkipReason),
-        Scanned { matches: Vec<ScanMatch> },
+        Scanned {
+            matches: Vec<ScanMatch>,
+        },
 #[cfg(not(feature = "low-level"))] pub(crate) use tx_level::{ScanMatch, SkipReason, TxScanOutcome};
 #[cfg(feature = "low-level")] pub use tx_level::{ScanMatch, SkipReason, TxScanOutcome};
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] #[non_exhaustive] pub enum ProtocolError
     #[error("transaction has {inputs} inputs but {prevouts} previous outputs were supplied")]
-    PrevoutCountMismatch { inputs: usize, prevouts: usize },
+    PrevoutCountMismatch {
+        inputs: usize,
+        prevouts: usize,
+    },
     #[error(
         "input {input} spends a SegWit output but carries no witness; the data was stripped of \
          witnesses or is not consensus-valid, and scanning it would silently miss payments"
     )]
-    MissingWitness { input: usize },
+    MissingWitness {
+        input: usize,
+    },
     #[error(
         "more than K_max={0} outputs matched even after capping the scan (docs/DECISIONS.md D-005)"
     )]
@@ -313,7 +326,10 @@ impl Evidence
     pub blocks: Vec<BlockEvidence>,
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] #[non_exhaustive] pub enum SourceError
     #[error("invalid range {from}..={to}")]
-    InvalidRange { from: u32, to: u32 },
+    InvalidRange {
+        from: u32,
+        to: u32,
+    },
     #[error("range {from}..={to} is not fully available (source covers {available_from}..={available_to})")]
     RangeUnavailable {
         from: u32,
@@ -416,12 +432,17 @@ impl Default for SyncOptions
         checkpoint: u32,
     },
     #[error("target height {target} is above the source's tip {tip}")]
-    TargetAboveTip { target: u32, tip: u32 },
+    TargetAboveTip {
+        target: u32,
+        tip: u32,
+    },
     #[error(
         "the chain changed while syncing: block {height} does not build on the stored \
          checkpoint; run sync again"
     )]
-    ChainMovedDuringSync { height: u32 },
+    ChainMovedDuringSync {
+        height: u32,
+    },
     #[error("chunk size must be at least 1")]
     InvalidChunkSize,
     #[error("sync interrupted after changing the store: {cause}")]
@@ -470,7 +491,9 @@ pub fn sync_with_progress( source: &dyn ScanSource, scanner: &ReceiveScanner, wa
     Reference,
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)] #[serde(tag = "kind", rename_all = "snake_case")] #[non_exhaustive] pub enum Explanation
     BlockHashDiffers,
-    ReferenceNotEligible { reason: &'static str },
+    ReferenceNotEligible {
+        reason: &'static str,
+    },
     ReferenceTransactionMissing,
     ReferenceScannedNoMatch,
     CandidateOmittedTransaction,
@@ -478,7 +501,9 @@ pub fn sync_with_progress( source: &dyn ScanSource, scanner: &ReceiveScanner, wa
     CandidateOmittedOutput,
     CandidateOutputDiffers,
     DetailsDiffer,
-    Unexplained { note: String },
+    Unexplained {
+        note: String,
+    },
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)] #[non_exhaustive] pub struct Difference
     pub height: u32,
     pub txid: Txid,

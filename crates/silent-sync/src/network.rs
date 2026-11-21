@@ -12,29 +12,39 @@ use std::{fmt, str::FromStr};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub enum Network {
+    /// Local regression-test chain.
     Regtest,
+    /// The default public signet.
     Signet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
+/// Why a network was refused.
 pub enum NetworkError {
     #[error(
         "mainnet is refused: this is experimental, unaudited software and must not be used \
          with mainnet or real funds"
     )]
+    /// Mainnet was named. It is refused by design.
     MainnetRefused,
     #[error("unsupported network `{0}`: only `regtest` and `signet` are supported")]
+    /// A network this crate does not support (the name is given).
     Unsupported(String),
     #[error("genesis hash mismatch for {network}: expected {expected}, got {actual}")]
+    /// The chain does not start at the network's genesis block.
     GenesisMismatch {
+        /// Network that was claimed.
         network: Network,
+        /// Genesis hash of that network.
         expected: BlockHash,
+        /// Genesis hash that was found.
         actual: BlockHash,
     },
 }
 
 impl Network {
+    /// The network's name as used in text and JSON (`regtest`, `signet`).
     pub const fn as_str(self) -> &'static str {
         match self {
             Network::Regtest => "regtest",
@@ -143,10 +153,12 @@ impl From<ChainIdentity> for RawChainIdentity {
 }
 
 impl ChainIdentity {
+    /// The network.
     pub fn network(&self) -> Network {
         self.network
     }
 
+    /// Hash of the chain's genesis block.
     pub fn genesis_hash(&self) -> BlockHash {
         self.genesis_hash
     }

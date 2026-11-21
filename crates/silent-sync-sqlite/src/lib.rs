@@ -21,6 +21,7 @@
 //! detections without their block or from another backend, are refused
 //! rather than synced on top of. This detects damage, not tampering: nothing
 //! protects the file against someone who can write to it.
+#![warn(missing_docs)]
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use silent_sync::{
@@ -56,6 +57,8 @@ CREATE TABLE detected_outputs (
 CREATE INDEX detected_outputs_by_height ON detected_outputs(height);
 ";
 
+/// A [`SyncStore`] kept in one SQLite file. See the crate documentation for
+/// what the file holds and how it is protected against damage.
 pub struct SqliteStore {
     conn: Connection,
 }

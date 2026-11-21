@@ -48,10 +48,12 @@ pub struct LocalTweakIndex<S> {
 }
 
 impl<S: ScanSource> LocalTweakIndex<S> {
+    /// Wraps `inner`, which must serve full blocks.
     pub fn new(inner: S, policy: IndexPolicy) -> Self {
         Self { inner, policy }
     }
 
+    /// The wrapped full-block source.
     pub fn inner(&self) -> &S {
         &self.inner
     }

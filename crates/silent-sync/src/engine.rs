@@ -21,26 +21,51 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
+/// Why a scan failed. A failure always covers the whole requested range:
+/// nothing of it is reported as scanned.
 pub enum ScanError {
     #[error(
         "chain mismatch: wallet expects {expected:?} but source `{backend_id}` serves {actual:?}"
     )]
+    /// The source serves another chain than the caller expects.
     ChainMismatch {
+        /// Backend that was asked.
         backend_id: String,
+        /// Chain the caller expects.
         expected: ChainIdentity,
+        /// Chain the source reports.
         actual: ChainIdentity,
     },
     #[error("invalid range {from}..={to}")]
-    InvalidRange { from: u32, to: u32 },
+    /// The requested range is empty or reversed.
+    InvalidRange {
+        /// First requested height.
+        from: u32,
+        /// Last requested height.
+        to: u32,
+    },
     #[error(transparent)]
+    /// The source could not serve the range.
     Source(#[from] SourceError),
     #[error("source `{backend_id}` returned an inconsistent batch: {reason}")]
-    InconsistentBatch { backend_id: String, reason: String },
+    /// What the source returned is not the requested range: blocks missing,
+    /// repeated or not linked, a transaction listed twice, or an index claim
+    /// that no block can satisfy.
+    InconsistentBatch {
+        /// Backend that returned it.
+        backend_id: String,
+        /// What was wrong.
+        reason: String,
+    },
     #[error("block {height}: transaction {txid}: {source}")]
+    /// One transaction could not be scanned; the range fails as a whole.
     Transaction {
+        /// Height of the block that contains it.
         height: u32,
+        /// The transaction.
         txid: Txid,
         #[source]
+        /// What went wrong.
         source: ProtocolError,
     },
 }
@@ -49,18 +74,24 @@ pub enum ScanError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct ScanReport {
+    /// Chain that was scanned.
     pub chain: ChainIdentity,
+    /// Backend the data came from.
     pub backend_id: String,
     /// What kind of evidence the detections rest on. For
     /// [`EvidenceKind::TweakIndex`], transaction ids, output positions and
     /// amounts are the index's claims and were not checked against a block.
     pub evidence_kind: EvidenceKind,
+    /// First block of the range.
     pub first_block: BlockRef,
+    /// Last block of the range.
     pub last_block: BlockRef,
     /// Label integers that were scanned for (always includes the change label
     /// when the scanner was built with [`ReceiveScanner::new`]).
     pub labels_scanned: Vec<u32>,
+    /// Number of blocks scanned.
     pub blocks_scanned: u64,
+    /// Transactions looked at. For a tweak index: the entries the index listed.
     pub txs_seen: u64,
     /// Transactions BIP352 required us to scan.
     pub txs_scanned: u64,

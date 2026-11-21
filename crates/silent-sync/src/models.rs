@@ -14,8 +14,11 @@ use serde::{Deserialize, Serialize};
 /// continuity can be checked wherever a height is used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BlockRef {
+    /// Height of the block.
     pub height: u32,
+    /// Hash of the block.
     pub hash: BlockHash,
+    /// Hash of its parent block.
     pub prev_hash: BlockHash,
 }
 
@@ -36,7 +39,9 @@ pub enum EvidenceKind {
 /// Where a detection came from.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MatchProvenance {
+    /// Backend the detection came from.
     pub backend_id: String,
+    /// Kind of evidence the detection rests on.
     pub evidence_kind: EvidenceKind,
 }
 
@@ -46,14 +51,19 @@ pub struct MatchProvenance {
 /// tracked (design spec §2, §6).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DetectedOutput {
+    /// Network the output is on.
     pub network: Network,
+    /// Block that contains the transaction.
     pub block: BlockRef,
+    /// Transaction that created the output.
     pub txid: Txid,
+    /// Index of the output within the transaction.
     pub vout: u32,
     /// Value as stated by the transaction data the source supplied.
     pub value_sats: u64,
     /// BIP352 label integer `m` if the output was sent to a labelled address
     /// (`0` is the change label).
     pub label: Option<u32>,
+    /// Where the detection came from.
     pub provenance: MatchProvenance,
 }
