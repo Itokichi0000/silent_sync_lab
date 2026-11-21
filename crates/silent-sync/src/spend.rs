@@ -164,11 +164,6 @@ pub fn recover_spendable(
             },
         });
     }
-    if source.capabilities().evidence_kind != EvidenceKind::FullBlockWithPrevouts {
-        return Err(SpendError::NotFullBlocks {
-            backend_id: source.backend_id().to_string(),
-        });
-    }
     if source.chain().network() != detection.network {
         return Err(SpendError::NetworkMismatch {
             detected: detection.network.to_string(),

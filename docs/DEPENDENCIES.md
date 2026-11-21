@@ -53,6 +53,10 @@
 - `silent-sync` は既定の feature では HTTP クライアントにもデータベースにも依存しない（`minreq` は optional、SQLite は別クレート）。
 - `lab-cli` は `build.rs` を持つ（依存なし）。ビルドに使ったコンパイラのバージョンとターゲットを、ベンチマーク結果に記録するために埋め込むだけ。
 
+### ウォレットのクレート（`silent-wallet`、`wallet-cli`）
+
+**外部の依存は増やしていない。** `silent-wallet` は `silent-sync`（feature `spend`、`low-level`）、`bdk_sp`（送信側の関数。ワークスペースと同じ固定 rev）、`serde`、`serde_json`、`thiserror` を使う。`wallet-cli` は加えて `silent-sync-sqlite` と `clap`（`lab-cli` と同じ版）。ノードへの送信に使う JSON-RPC（HTTP）と Basic 認証の base64 は、依存を足さずに `silent-wallet/src/rpc.rs` に書いた（暗号ではない。RFC の例でテスト）。`Cargo.lock` の差分はこの 2 クレートの追加だけ。
+
 ## 推移的依存（すべて）
 
 `anstream 1.0.0`, `anstyle 1.0.14`, `anstyle-parse 1.0.0`, `anstyle-query 1.1.5`, `arrayvec 0.7.8`, `cc 1.11.3`, `clap_builder 4.6.7`, `clap_derive 4.6.9`, `clap_lex 1.1.2`, `colorchoice 1.0.5`, `find-msvc-tools 0.1.15`, `heck 0.5.0`, `is_terminal_polyfill 1.70.2`, `itoa 1.0.19`, `proc-macro2 1.0.107`, `quote 1.0.47`, `serde_core 1.0.229`, `serde_derive 1.0.229`, `shlex 2.0.1`, `syn 3.0.10`, `thiserror-impl 2.0.21`, `utf8parse 0.2.2` — いずれも MIT OR Apache-2.0。

@@ -61,6 +61,7 @@ cargo run -p lab-cli -- scan --backend fixture --fixture fixtures/local/regtest_
 cargo run -p lab-testkit --bin fault_report        # docs/FAULT_INJECTION.md の表を再生成
 UPDATE_API_LISTS=1 cargo test -p silent-sync --test public_api   # 公開 API を変えたら docs/api/ を更新
 cargo clippy -p silent-sync --lib --locked --features <feature> -- -D warnings   # ライブラリ単体・feature ごと（CI と同じ）
+cargo test -p silent-wallet -p wallet-cli --locked                # ウォレット（オフライン）。実ノードでの送金は下の --ignored
 
 # 実ノードを使う E2E（通常の cargo test では ignored。バイナリが無いと失敗する）
 export BITCOIND_EXE="$(VERIFY_SIGNATURES=1 scripts/fetch_bitcoind.sh /path/outside/repo/core)"
@@ -89,4 +90,7 @@ cargo test --workspace --locked -- --ignored
 | 3 | 永続化・再開・復元 | 完了（Gate 3 通過） |
 | 4 | 第二バックエンド | 完了（Gate 4 通過） |
 | 5 | ベンチマーク・故障注入 | 完了（Gate 5 通過） |
-| 6 | 進路決定 | 所有者が決定: SDK を先に完成させ、その後ウォレット（`docs/PROGRESS.md` の「SDK 化 Result」）。ウォレット段階に入るには、上の規約の変更と設計案の承認が先 |
+| 6 | 進路決定 | 所有者が決定: SDK を先に完成させ、その後ウォレット（`docs/PROGRESS.md` の「SDK 化 Result」） |
+| W1〜W3 | ウォレット: 使用済みの追跡、鍵と tweak の受け渡し、regtest での送金 | 実装済み（`docs/PROGRESS.md` の「ウォレット段階 Result」） |
+| W4 | signet | BLOCKED（この環境から signet のピアに届かない）。UNVERIFIED |
+| W5 | UI | 未着手。形は所有者と決める |

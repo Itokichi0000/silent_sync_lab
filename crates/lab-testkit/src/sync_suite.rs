@@ -2646,6 +2646,46 @@ pub fn spends_are_audited_and_must_survive_a_rescan(new_store: StoreFactory<'_>)
             .identical
     );
 
+    // Both say the output was spent, by different transactions.
+    let mut other_spender = expected.clone();
+    other_spender[0].spending_txid = Txid::from_byte_array([6; 32]);
+    let mut disagreeing = new_store();
+    init(disagreeing.as_mut(), &plain, 1);
+    disagreeing
+        .append(
+            &block_refs(1, MAIN_TIP),
+            &reference(plain.main_chain(), 1, MAIN_TIP),
+            &other_spender,
+        )
+        .expect("append");
+    let report = audit(&source, disagreeing.as_ref(), &all).expect("audit");
+    assert!(!report.identical);
+    assert_eq!(report.spends_agreed, 1);
+    assert_eq!(report.spend_differences.len(), 1);
+    let d = &report.spend_differences[0];
+    assert_eq!(d.only_in, None);
+    assert_eq!(
+        (d.stored, d.reference),
+        (Some(other_spender[0]), Some(expected[0]))
+    );
+
+    // A store filled from an index never claimed to know what was spent:
+    // audited against full blocks that show spends, its detections agree
+    // and nothing is said about spends it could not have recorded.
+    let (again, _) = chain_with_spends();
+    let from_index = synced(&LocalTweakIndex::new(again, IndexPolicy::Bip352));
+    let report = audit(&source, from_index.as_ref(), &all).expect("audit");
+    assert!(report.identical, "{:?}", report.spend_differences);
+    assert!(report.spends_compared);
+    assert_eq!(
+        (
+            report.agreed,
+            report.spends_agreed,
+            report.spend_differences.len()
+        ),
+        (7, 0, 0)
+    );
+
     // An index reference cannot show spends: they are not compared, and the
     // report says so instead of calling them equal.
     let index = LocalTweakIndex::new(

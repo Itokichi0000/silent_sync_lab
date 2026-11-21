@@ -52,6 +52,12 @@ T = "crates/silent-sync/src/store.rs"
 Q = "crates/silent-sync-sqlite/src/lib.rs"
 M = "crates/lab-cli/src/main.rs"
 K = "crates/lab-cli/src/bench.rs"
+SP = "crates/silent-sync/src/spend.rs"
+W = "crates/silent-wallet/src/send.rs"
+WH = "crates/silent-wallet/src/holdings.rs"
+WR = "crates/silent-wallet/src/rpc.rs"
+WK = "crates/silent-wallet/src/keys.rs"
+WC = "crates/wallet-cli/src/main.rs"
 muts = [
     # --- block structure checks shared by the fixture and Core backends ---
     ("pow check removed", B, "    header.validate_pow(target).map_err(|e| e.to_string())", "    Ok(header.block_hash())"),
@@ -163,8 +169,8 @@ muts = [
     ("audit: served evidence kind not checked", A, "if r_block.evidence.kind() != report.reference_evidence {", "if false {"),
     ("audit: value differences ignored", A, "} else if s.value_sats != r.value_sats || s.label != r.label {", "} else if s.label != r.label {"),
     ("audit: label differences ignored", A, "} else if s.value_sats != r.value_sats || s.label != r.label {", "} else if s.value_sats != r.value_sats {"),
-    ("audit: identical despite different block hashes", A, "report.identical = report.differences.is_empty() && report.block_hash_mismatches.is_empty();", "report.identical = report.differences.is_empty();"),
-    ("audit: identical despite differences", A, "report.identical = report.differences.is_empty() && report.block_hash_mismatches.is_empty();", "report.identical = report.block_hash_mismatches.is_empty();"),
+    ("audit: identical despite different block hashes", A, "\n        && report.block_hash_mismatches.is_empty()", ""),
+    ("audit: identical despite differences", A, "    report.identical = report.differences.is_empty()\n        && ", "    report.identical = "),
     # --- scanning a store's range again into a fresh store ---
     ("rescan: binding unchecked", R, "        scanner,\n        false,\n    ) {\n        return Err(RescanError::BindingMismatch {", "        scanner,\n        false,\n    )\n    .filter(|_| false)\n    {\n        return Err(RescanError::BindingMismatch {"),
     ("rescan: another backend accepted", R, "        Some(source.backend_id()),\n        scanner,\n        false,", "        None,\n        scanner,\n        false,"),
@@ -175,6 +181,54 @@ muts = [
     ("rescan: lost detections accepted", R, "if !not_reproduced.is_empty() {", "if false {"),
     ("rescan: altered detections accepted", R, ".filter(|d| by_outpoint.get(&OutPoint::new(d.txid, d.vout)) != Some(d))", ".filter(|d| !by_outpoint.contains_key(&OutPoint::new(d.txid, d.vout)))"),
     ("rescan: fresh store keeps the old scanner version", R, "        scanner_version: SCANNER_VERSION.to_string(),\n        ..meta.clone()", "        ..meta.clone()"),
+    # --- spends of detected outputs ---
+    ("store: spend in a block that is not appended accepted", T, "        if !blocks.contains(&s.spent_in) {", "        if false {"),
+    ("store: output spent by its own transaction accepted", T, "        if s.spending_txid == s.txid {", "        if false {"),
+    ("store: spend of an undetected output accepted", T, "            .or_else(|| stored_height(outpoint));", "            .or(Some(0));"),
+    ("store: spend before the output exists accepted", T, "            Some(height) if height > s.spent_in.height => {", "            Some(height) if false && height > s.spent_in.height => {"),
+    ("store: output spent twice in one call accepted", T, "        if !spent.insert(outpoint) || already_spent(outpoint) {", "        if !spent.insert(outpoint) && false || already_spent(outpoint) {"),
+    ("store: output spent twice across calls accepted", T, "        if !spent.insert(outpoint) || already_spent(outpoint) {", "        if !spent.insert(outpoint) {"),
+    ("engine: spends of detected outputs not recognised", E, "                if is_detected(&input.previous_output) {", "                if false {"),
+    ("sync: spends not recorded", S, "        store.append(&blocks, &detections, &spends)?;", "        store.append(&blocks, &detections, &[])?;"),
+    ("sync: a chunk's own detections not checked for spends", S, "        detected.extend(detections.iter().map(|d| OutPoint::new(d.txid, d.vout)));\n", ""),
+    ("sync: stored detections not checked for spends", S, "        Some(_) => store\n            .detections()?\n            .iter()\n            .map(|d| OutPoint::new(d.txid, d.vout))\n            .collect(),", "        Some(_) => BTreeSet::new(),"),
+    ("sync: reverted spends not reported", S, "    spends_reverted.retain(|s| s.spent_in.height > fork_height);", "    spends_reverted.clear();"),
+    ("audit: spends not compared", A, "            if report.spends_compared && same_block {", "            if false {"),
+    ("audit: spends by different transactions called equal", A, "                        (Some(s), Some(r)) if s == r => {", "                        (Some(s), Some(r)) if s.txid == r.txid => {"),
+    ("audit: spend of an output the store does not list accepted", A, "        if !listed.contains(&outpoint)\n            || ", "        if "),
+    ("audit: spend listed twice accepted", A, "\n            || !spent_once.insert(outpoint)", ""),
+    ("audit: identical despite spend differences", A, "\n        && report.spend_differences.is_empty();", ";"),
+    ("audit: spends of index-detected outputs compared", A, "        .filter(|d| d.provenance.evidence_kind == EvidenceKind::FullBlockWithPrevouts)\n        .map(key)", "        .map(key)"),
+    ("rescan: lost spends accepted", R, "    if !spends_lost.is_empty() {", "    if false {"),
+    ("sqlite: stray spends not detected on open", Q, "        if stray_spends != 0 {", "        if false {"),
+    ("sqlite replace: lost spends accepted", Q, "if let Some(lost) = old.spends()?.iter().find(|s| !spent.contains(s)) {", "if let Some(lost) = old.spends()?.iter().find(|_| false) {"),
+    # --- what a wallet needs to spend (feature `spend`) ---
+    ("spend: detection resting on an index accepted", SP, "    if detection.provenance.evidence_kind != EvidenceKind::FullBlockWithPrevouts {", "    if false {"),
+    ("spend: another network accepted", SP, "    if source.chain().network() != detection.network {", "    if false {"),
+    ("spend: another block at the height accepted", SP, "    if block.block != detection.block {", "    if false {"),
+    ("spend: amount not compared", SP, ".filter(|m| m.amount.to_sat() == detection.value_sats && m.label == detection.label)", ".filter(|m| m.label == detection.label)"),
+    ("spend: label not compared", SP, ".filter(|m| m.amount.to_sat() == detection.value_sats && m.label == detection.label)", ".filter(|m| m.amount.to_sat() == detection.value_sats)"),
+    # --- wallet ---
+    # Three checks in the signing module cannot be made to fail by a test
+    # without breaking the libraries they guard against (derived key against
+    # the input's script, signature verification, the wallet's own scanner
+    # finding the change), and the typed confirmation of the CLI is only
+    # reached with funds, on a real node. They are not listed here.
+    ("wallet: payment below the relay minimum accepted", W, "        if payment.amount_sats < dust {", "        if false {"),
+    ("wallet: zero fee rate accepted", W, "    if fee_rate == 0 || fee_rate > limits.max_fee_rate {", "    if fee_rate > limits.max_fee_rate {"),
+    ("wallet: fee rate above the limit accepted", W, "    if fee_rate == 0 || fee_rate > limits.max_fee_rate {", "    if fee_rate == 0 {"),
+    ("wallet: fee above the limit accepted", W, "    if fee_sats > limits.max_fee_sats {", "    if false {"),
+    ("wallet: input limit ignored", W, "        if selected.len() == limits.max_inputs {", "        if false {"),
+    ("wallet: payment without enough inputs built", W, "    if selected.is_empty() || gathered < needed {", "    if selected.is_empty() {"),
+    ("wallet: address of another network accepted", W, "            .require_network(network.to_bitcoin())\n            .map_err(|_| SendError::Destination(format!(\"not a {network} address\")))?;", "            .assume_checked();"),
+    ("wallet: index claims counted as unspent", WH, "        if output.provenance.evidence_kind != EvidenceKind::FullBlockWithPrevouts {", "        if false {"),
+    ("wallet: spent outputs counted as unspent", WH, "        if spent.contains(&outpoint) {", "        if false {"),
+    ("wallet: inputs of pending transactions counted as unspent", WH, "        if waiting.contains(&outpoint) {", "        if false {"),
+    ("wallet: outputs without enough confirmations counted", WH, "        } else if confirmations >= min_confirmations {", "        } else if true {"),
+    ("wallet: RPC to a non-loopback address accepted", WR, ".filter(|address| address.ip().is_loopback() && *address.ip() != Ipv4Addr::UNSPECIFIED)", ".filter(|_| true)"),
+    ("wallet: seed of any length accepted", WK, "        if !(16..=64).contains(&seed.len()) {", "        if false {"),
+    ("wallet cli: store of another seed accepted", WC, "    if wallet.scanner().wallet_id() != meta.wallet_id {", "    if false {"),
+    ("wallet cli: change label handed out", WC, "            if label == Some(0) {", "            if false {"),
     ("sync: zero chunk size accepted", S, "if options.chunk_size == 0 {", "if false {"),
     ("sync: binding chain unchecked", S, "if meta.chain != chain {", "if false {"),
     ("sync: binding wallet unchecked", S, "if meta.wallet_id != wallet_id {", "if false {"),
@@ -209,7 +263,7 @@ muts = [
     ("store: blocks in a call need not link", T, "if u64::from(b.height) != u64::from(a.height) + 1 || b.prev_hash != a.hash {", "if false {"),
     ("store: detection network unchecked", T, "if d.network != meta.chain.network() {", "if false {"),
     ("store: detection block membership unchecked", T, "if !blocks.contains(&d.block) {", "if false {"),
-    ("store: duplicate outputs accepted", T, "if !seen.insert(outpoint) || already_stored(outpoint) {", "if (!seen.insert(outpoint) || already_stored(outpoint)) && false {"),
+    ("store: duplicate outputs accepted", T, "if !seen.insert(outpoint) || stored_height(outpoint).is_some() {", "if (!seen.insert(outpoint) || stored_height(outpoint).is_some()) && false {"),
     ("store: empty append accepted", T, '.ok_or_else(|| invariant("append of zero blocks".to_string()))?;', '.copied().unwrap_or(BlockRef { height: meta.birthday, hash: meta.chain.genesis_hash(), prev_hash: meta.chain.genesis_hash() });\n    if blocks.is_empty() { return Ok(()); }'),
     ("store: self-parent block accepted", T, "if b.hash == b.prev_hash {", "if false {"),
     ("store: block hash repeated within a call accepted", T, "if !hashes.insert(b.hash) || block_hash_stored(b.hash) {", "if (!hashes.insert(b.hash) && false) || block_hash_stored(b.hash) {"),
@@ -239,7 +293,7 @@ muts = [
     ("sqlite: append does not take the write lock up front", Q, "            .transaction_with_behavior(TransactionBehavior::Immediate)\n            .map_err(backend)?;\n        let meta = read_meta(&tx)?;\n        let checkpoint = read_checkpoint(&tx)?;", "            .transaction_with_behavior(TransactionBehavior::Deferred)\n            .map_err(backend)?;\n        let meta = read_meta(&tx)?;\n        let checkpoint = read_checkpoint(&tx)?;"),
     ("sqlite: no busy timeout", Q, "conn.busy_timeout(Duration::from_secs(10))", "conn.busy_timeout(Duration::from_secs(0))"),
     ("sqlite: stored block hash not pre-checked", Q, "            if exists.is_some() {\n                stored_hashes.insert(b.hash);", "            if false {\n                stored_hashes.insert(b.hash);"),
-    ("sqlite: negative vout wrapped", Q, 'vout: u32::try_from(vout).map_err(|_| corrupt("vout"))?,', "vout: vout as u32,"),
+    ("sqlite: negative vout wrapped", Q, '                    vout: u32::try_from(vout).map_err(|_| corrupt("vout"))?,', "                    vout: vout as u32,"),
     ("sqlite: negative value wrapped", Q, 'value_sats: u64::try_from(value).map_err(|_| corrupt("value"))?,', "value_sats: value as u64,"),
     ("sqlite: negative label wrapped", Q, '                        .map(|m| u32::try_from(m).map_err(|_| corrupt("label")))\n                        .transpose()?,', "                        .map(|m| m as u32),"),
     ("sqlite replace: chain not compared", Q, "            &old_meta.chain,\n", "            &new_meta.chain,\n"),

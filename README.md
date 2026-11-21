@@ -6,10 +6,14 @@
 > 安全性について一切の保証をしません。
 
 Bitcoin [BIP352 (Silent Payments)](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki) の**受信側の同期**を、
-再現可能な形で検証・計測するための実験環境です。ウォレット製品ではありません。送金・署名・残高表示の機能はありません。
+再現可能な形で検証・計測するための実験環境と、その上に作った**実験用のウォレット**（regtest / signet 専用）です。製品ではありません。
+
+- 同期の部分（`silent-sync`、`silent-sync-sqlite`、CLI `silent-sync`）は受信専用で、送金・署名の機能を持ちません。
+- ウォレットの部分（`silent-wallet`、CLI `silent-wallet`）は、無価値のコインで「受け取る → 未使用を確認する → 送る」を試すためのものです。mainnet は指定できません。
 
 - 要求仕様: [`SILENT_SYNC_LAB_DESIGN.md`](SILENT_SYNC_LAB_DESIGN.md)
-- 現在地: [`docs/PROGRESS.md`](docs/PROGRESS.md)（Phase 0〜5 を実施。Phase 6 の進路は未決定で、判断材料を [`docs/PHASE6_DECISION_MATERIALS.md`](docs/PHASE6_DECISION_MATERIALS.md) にまとめてあります）
+- 現在地: [`docs/PROGRESS.md`](docs/PROGRESS.md)（Phase 0〜5、SDK 化、ウォレット段階 W1〜W3 を実施。signet での確認と UI は未了）
+- ウォレットの範囲と設計: [`docs/WALLET_DESIGN_PROPOSAL.md`](docs/WALLET_DESIGN_PROPOSAL.md)、脅威モデルは [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) §4.6
 
 ## 出来ること / 出来ないこと
 
@@ -32,7 +36,9 @@ Bitcoin [BIP352 (Silent Payments)](https://github.com/bitcoin/bips/blob/master/b
 ```
 crates/silent-sync/     同期コア（ライブラリ）。BIP352 の暗号処理は上流 bdk_sp に委譲。CLI・DB に依存しない
 crates/silent-sync-sqlite/   同期状態の SQLite 実装
-crates/lab-cli/       薄い CLI（バイナリ名: silent-sync）
+crates/lab-cli/       薄い CLI（バイナリ名: silent-sync）。受信専用
+crates/silent-wallet/ ウォレットのライブラリ: 未使用の集計、送金 tx の組み立てと署名（暗号は上流の関数を呼ぶ）
+crates/wallet-cli/    ウォレットの CLI（バイナリ名: silent-wallet）
 crates/lab-testkit/   テスト専用: fixture 生成、regtest ノード操作、署名付きテスト tx、偽サーバ、故障注入
 fixtures/             公式テストベクトルと決定的なローカル fixture
 scripts/              テスト用バイナリの取得、無効化チェック
@@ -109,6 +115,46 @@ cargo run -p lab-cli -- lab add-label --db /tmp/lab.sqlite3 --backend fixture --
 - 終了コード: 0 成功、1 エラー、2 引数エラー、4 `verify` / `audit` で差分あり。
 - `--json` で機械可読な出力になります。
 
+### ウォレット（regtest / signet 専用）
+
+自分の Bitcoin Core ノード（`-rest=1 -server=1`、ループバック）が必要です。下は regtest の例です。
+
+シードは実行のたびに環境変数 `SILENT_WALLET_SEED`（16〜64 バイトを 16 進数で）から読みます。**保存も表示もしません。このプログラムはシードを作りません。** 試すときは、たとえば次のように自分で用意します（この値に価値のあるものを結び付けないでください）。
+
+```bash
+export SILENT_WALLET_SEED="$(openssl rand -hex 32)"
+```
+
+受け取り用のアドレスを表示し、ストアを作って同期します。
+
+```bash
+cargo run -p wallet-cli -- address
+```
+
+```bash
+cargo run -p wallet-cli -- init --db ~/silent-wallet.sqlite3 --core-rest-url http://127.0.0.1:18443
+```
+
+```bash
+cargo run -p wallet-cli -- sync --db ~/silent-wallet.sqlite3 --core-rest-url http://127.0.0.1:18443
+```
+
+```bash
+cargo run -p wallet-cli -- status --db ~/silent-wallet.sqlite3
+```
+
+送金します。内容が表示され、`SEND` と入力したときだけノードに渡します（省略する手段はありません）。
+
+```bash
+cargo run -p wallet-cli -- send --db ~/silent-wallet.sqlite3 --core-rest-url http://127.0.0.1:18443 --to <相手のアドレス> --amount 50000 --fee-rate 2 --rpc-cookie-file ~/.bitcoin/regtest/.cookie
+```
+
+- `status` の「unspent」は、**自分のノードのフルブロックで検出し、使用済みの記録が無い出力**だけの合計です。ブロックに入っていない tx は見えません。
+- `--no-broadcast` を付けると、署名した tx を表示するだけで送りません。
+- 送ったあとブロックに入るまでの tx は `pending` で確認できます。
+- シードを失うと、そのウォレットの出力は使えなくなります。保管の仕組みはありません（実験用です）。
+- signet での動作は未確認です（`docs/PROGRESS.md`）。
+
 ### 実ノードを使うテストとベンチマーク
 
 ```bash
@@ -129,7 +175,7 @@ cargo test --workspace --locked -- --ignored
 
 - CLI が使う受取人は、BIP352 公式テストベクトルに掲載されている**公開済みのテスト用鍵**です（`fixtures/bip352/SOURCE.md`）。このリポジトリ独自の秘密鍵はありません。
 - この鍵から導出したアドレスに、価値のあるものを送らないでください。
-- 自分のウォレットのシードや鍵を取り込む機能はありません。
+- 受信専用の CLI（`silent-sync`）に、自分のシードや鍵を取り込む機能はありません。ウォレットの CLI（`silent-wallet`）は、環境変数で渡されたシードをその実行の間だけ使います。
 
 ## 上流実装との関係
 

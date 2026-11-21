@@ -96,6 +96,21 @@ U-1, U-2, U-5 は上流への報告候補（未報告。DECISIONS O-002）。
 - 対処（**TLS 検証は無効化していない**）: 同じファイルを `curl`（プロキシ CA を信頼）で取得し、`BITCOIND_TARBALL_FILE` と `ELECTRSD_DOWNLOAD_ENDPOINT`（localhost の一時 HTTP サーバ）で渡した。両ビルドスクリプトは crate 同梱のハッシュ表で SHA-256 を検証するので完全性は保たれる（Bitcoin Core 25.0: `33930d43…0aec`、electrs: `865e26a9…ddf1`、いずれも一致を確認）。
 - 通常のネットワーク環境ではこの回避は不要。
 
+### 3.6 送信・署名側（ウォレット段階で使うもの。rev `bb373e566fa2` を読んで確認）
+
+| 用途 | 上流の関数・型 | 場所 | このプロジェクトでの使い方 |
+|---|---|---|---|
+| サイレントペイメント宛ての出力鍵の計算（自分の SP 出力を入力に使う場合） | `send::bip352::SpSender::new(spend_sk).send_to(&[SpOut], &[SilentPaymentCode])` | `silentpayments/src/send/bip352.rs` | `silent-wallet` の `send.rs` から呼ぶ。入力ごとに `spend_sk.add_tweak(tweak)` で出力の秘密鍵を作り、`create_silentpayment_partial_secret`（taproot 鍵の偶奇の扱いを含む）→ `create_silentpayment_scriptpubkeys` と進む。同じ受信者（scan 鍵）宛ての複数出力は、渡した順に `k = 0, 1, …` が割り当てられ、結果は `HashMap<SilentPaymentCode, Vec<XOnlyPublicKey>>` で返る |
+| 出力の秘密鍵 | `secp256k1::SecretKey::add_tweak`（spend 秘密鍵 + 出力ごとの tweak） | 上流の `wallet/src/signers.rs::populate_sp_keymap` と同じ呼び出し | `send.rs` で 1 入力につき 1 回。結果の x-only 公開鍵が、その入力の出力スクリプトの鍵と一致することを検査してから使う |
+| 署名 | `bitcoin::sighash::SighashCache::taproot_key_spend_signature_hash`、`secp256k1::Secp256k1::sign_schnorr_no_aux_rand`、検証に `verify_schnorr` | `bitcoin` 0.32.7 / `secp256k1` 0.29.1 | SP の出力はスクリプトの鍵そのものが出力鍵なので、BIP341 の taptweak は掛けない。署名後に必ず検証する |
+| 上流の PSBT 署名 `send::psbt::sign::sign_sp` | — | `silentpayments/src/send/psbt/sign.rs` | **使っていない。** 本番経路に `expect("will fix later")` があり、PSBT の独自フィールド経由で tweak を運ぶ形で、ここでは不要な経路が増える。同じ計算（鍵の加算 → sighash → Schnorr 署名）を、上の 2 行の関数を直接呼んで行う |
+| 上流のウォレット `bdk_sp_wallet` | — | `wallet/src/` | **使っていない**（`docs/WALLET_DESIGN_PROPOSAL.md` §3、§7） |
+| 鍵の導出 | `bitcoin::bip32::Xpriv::new_master` / `derive_priv` | — | 経路は上流のウォレットと同じ `m/352'/1'/0'/1'/0`（scan）、`m/352'/1'/0'/0'/0`（spend）。coin type 1（テストネットワーク）のみ |
+
+確認の方法: 実コードを読んだうえで、(1) オフラインの fixture で「組み立てた tx を受取側のスキャナが検出し、お釣りを自分のスキャナが検出する」こと、(2) 実ノード（Bitcoin Core 32.1、regtest）が署名済み tx を受理し、採掘後に相手側のウォレットが入金を検出することをテストした（`crates/silent-wallet/tests/wallet.rs`、`crates/wallet-cli/tests/regtest_wallet.rs`）。
+
+UNVERIFIED: signet での動作（この環境からは signet のピアに接続できない）。上流の `sign_sp` と `bdk_sp_wallet` の実動作（使っていないので動かしていない）。
+
 ## 4. BlindBit Oracle
 
 確認したパス: `README.md`, `blindbit.example.toml`, `go.mod`, `internal/config/{vars.go,config.go,endpoints.go}`, `internal/server/README.md`, `docker-compose-example.yaml`, `LICENSE`
