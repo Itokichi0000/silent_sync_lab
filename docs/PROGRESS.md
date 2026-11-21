@@ -463,8 +463,8 @@ SDK の API に関する 4 つの判断（出力ごとの tweak は渡さない�
   - 受信者の束縛をスキャナから導出（`ReceiveScanner::wallet_id()`。`sync` などから `wallet_id` 引数を削除）
   - 使用例 4 本: `cross_check_index`、`custom_store`、`audit_and_add_label`（以上 `silent-sync`）、`sync_from_node`（`silent-sync-sqlite`）
 - **実行したコマンド**: `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、feature ごとの clippy（7 通り）、`cargo test --workspace --locked -- --skip k_max`、`scripts/check_embedder_view.sh`、実ノードの `cargo test --workspace --locked -- --ignored`、`scripts/mutation_check.py`（スクラッチコピーに対して）
-- **テスト結果**: 高速テスト 212 件成功・失敗 0（K_max の 2 件を除く）。実ノード + 実 Oracle の 9 件成功。`probes/` と使用例は `scripts/check_embedder_view.sh` で成功。無効化チェック: 項目 3〜5 の実装時点の対象 45 項目は生存 0。**レビュー対応後の全 208 項目は実行中で、この記述の時点では結果未確認（UNVERIFIED）**
-- **出力証拠**: `docs/logs/sdk_api_mutation_check.log`（API 整理時点、158 項目）、`docs/logs/sdk_features_mutation_check.log`（最終、208 項目。実行完了後に追加する）、`docs/FAULT_INJECTION.md`（表はテストが生成結果と突き合わせる）、`docs/api/*.txt`
+- **テスト結果**: 高速テスト 212 件成功・失敗 0（K_max の 2 件を除く）。実ノード + 実 Oracle の 9 件成功。`probes/` と使用例は `scripts/check_embedder_view.sh` で成功。無効化チェック: レビュー対応後のコミット `3a9b5cd` に対して全 208 項目を実行し、**208 項目すべて検出、生存 0**
+- **出力証拠**: `docs/logs/sdk_api_mutation_check.log`（API 整理時点、158 項目）、`docs/logs/sdk_features_mutation_check.log`（最終、208 項目）、`docs/FAULT_INJECTION.md`（表はテストが生成結果と突き合わせる）、`docs/api/*.txt`
 - **調べた上流資料・commit SHA**: 追加の上流調査は無し（`bdk_sp` `bb373e566fa2`、Bitcoin Core 32.1、BlindBit Oracle `f9ab7fd` のまま）。暗号処理・依存バージョンは変更していない
 - **安全性で気をつけたこと**:
   - 追加した 3 機能はどれも「成功を返すのは、失うものが無いと確かめられたときだけ」。監査はストアを読むだけ、再スキャンは別のストアに作って差し替えは最後の 1 回の rename
