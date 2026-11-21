@@ -219,25 +219,28 @@ fn scan_fails_closed() {
 }
 
 #[test]
-fn unimplemented_backends_say_so_instead_of_pretending() {
-    let (output, stdout, stderr) = run(&["scan", "--backend", "oracle-v2"]);
-    assert_eq!(output.status.code(), Some(3));
-    assert!(stdout.is_empty());
-    assert!(stderr.contains("not implemented yet") && stderr.contains("Nothing was scanned"));
-
+fn doctor_without_urls_probes_nothing_and_says_so() {
     let (output, stdout, _) = run(&["doctor"]);
     assert!(output.status.success());
     assert!(stdout.contains("backend core      : not probed"));
-    assert!(stdout.contains("backend oracle-v2 : NOT IMPLEMENTED"));
+    assert!(stdout.contains("backend oracle-v2 : not probed"));
+    assert!(stdout.contains("backend local-index: available"));
     assert!(stdout.contains("persistence       : SQLite store"));
+}
+
+/// A loopback port nothing listens on.
+fn dead_port_url() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    url
 }
 
 /// Without a node, the Core backend must fail visibly and scan nothing.
 #[test]
 fn core_backend_without_a_node_fails_closed() {
-    // Port 9 (discard) on loopback: nothing listens there.
-    let url = "http://127.0.0.1:9";
-    let (output, stdout, stderr) = run(&["scan", "--backend", "core", "--core-rest-url", url]);
+    let url = dead_port_url();
+    let (output, stdout, stderr) = run(&["scan", "--backend", "core", "--core-rest-url", &url]);
     assert_eq!(output.status.code(), Some(1));
     assert!(stdout.is_empty());
     assert!(
@@ -245,24 +248,86 @@ fn core_backend_without_a_node_fails_closed() {
         "{stderr}"
     );
 
-    let (output, stdout, _) = run(&["doctor", "--core-rest-url", url]);
-    assert!(output.status.success());
+    // `doctor` reports it and does not exit successfully.
+    let (output, stdout, _) = run(&["doctor", "--core-rest-url", &url]);
+    assert_eq!(output.status.code(), Some(1));
     assert!(
         stdout.contains("backend core      : UNAVAILABLE"),
         "{stdout}"
     );
 
-    // Remote or non-HTTP nodes are out of scope and refused before any request.
+    // Remote, named or non-HTTP nodes are refused before any request, and a
+    // password in the URL is not echoed.
     for url in [
         "http://192.0.2.1:8332",
         "https://127.0.0.1:18443",
-        "http://example.com",
+        "http://example.com:8332",
+        "http://localhost:18443",
+        "http://127.0.0.1",
+        "http://rpcuser:hunter2@127.0.0.1:18443",
     ] {
         let (output, stdout, stderr) = run(&["scan", "--backend", "core", "--core-rest-url", url]);
         assert_eq!(output.status.code(), Some(1), "{url}");
         assert!(stdout.is_empty());
         assert!(stderr.contains("refusing REST URL"), "{url}: {stderr}");
+        assert!(!stderr.contains("hunter2"), "{stderr}");
     }
+}
+
+/// The Core backend through the CLI, against an in-process fake node serving
+/// the fixture: same result as scanning the fixture file.
+#[test]
+fn core_backend_through_the_cli_matches_the_fixture_scan() {
+    let fixture: sync_core::source::fixture::FixtureFile =
+        serde_json::from_str(&std::fs::read_to_string(FIXTURE).unwrap()).unwrap();
+    let node = lab_testkit::fake_http::FakeCoreRest::serve(&fixture);
+    let url = node.url();
+
+    let (output, stdout, stderr) = run(&["doctor", "--core-rest-url", &url]);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stdout.contains("backend core      : reachable: regtest at height 8"),
+        "{stdout}"
+    );
+    let (output, stdout, _) = run(&["--network", "signet", "doctor", "--core-rest-url", &url]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stdout.contains("UNUSABLE: the node is on regtest, but --network is signet"),
+        "{stdout}"
+    );
+
+    let detections = |args: &[&str]| -> serde_json::Value {
+        let (output, stdout, stderr) = run(args);
+        assert!(output.status.success(), "{args:?}: {stderr}");
+        let mut report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        let mut list = report["detected_received_outputs"].take();
+        for d in list.as_array_mut().unwrap() {
+            d.as_object_mut().unwrap().remove("provenance");
+        }
+        list
+    };
+    let via_core = detections(&[
+        "scan",
+        "--backend",
+        "core",
+        "--core-rest-url",
+        &url,
+        "--label",
+        "1",
+        "--json",
+    ]);
+    let via_file = detections(&sync_args(&["--label", "1", "--json"]));
+    assert_eq!(via_core.as_array().unwrap().len(), 7);
+    assert_eq!(via_core, via_file);
+
+    // A node that says "main" is refused through the CLI as well.
+    node.set_chain_info("main", 8, node.hashes[8]);
+    let (output, stdout, stderr) = run(&["scan", "--backend", "core", "--core-rest-url", &url]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stdout.is_empty() && stderr.contains("mainnet is refused"),
+        "{stderr}"
+    );
 }
 
 #[test]

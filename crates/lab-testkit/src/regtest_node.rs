@@ -65,21 +65,38 @@ impl Node {
             .unwrap_or_else(|| bitcoind.with_file_name("bitcoin-cli"));
         assert!(cli.exists(), "bitcoin-cli not found at {}", cli.display());
 
+        // Not guessable in advance, and never an existing directory: the
+        // datadir will hold the RPC cookie.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
         let datadir = env::temp_dir().join(format!(
-            "silent-sync-lab-node-{}-{}",
+            "silent-sync-lab-node-{}-{}-{nonce:09}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        let _ = std::fs::remove_dir_all(&datadir);
-        std::fs::create_dir_all(&datadir).expect("create datadir");
+        std::fs::create_dir(&datadir).expect("create a fresh datadir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&datadir, std::fs::Permissions::from_mode(0o700))
+                .expect("restrict datadir");
+        }
         let port = free_port();
 
         let chain_arg = match chain {
             NodeChain::Regtest => "-chain=regtest",
             NodeChain::OfflineMainnet => "-chain=main",
         };
+        // Belt and braces for the mainnet-parameter node: no network activity
+        // at all, in addition to having no peers configured.
+        let network_arg = match chain {
+            NodeChain::Regtest => "-networkactive=1",
+            NodeChain::OfflineMainnet => "-networkactive=0",
+        };
         let child = Command::new(&bitcoind)
             .arg(chain_arg)
+            .arg(network_arg)
             .arg(format!("-datadir={}", datadir.display()))
             .arg(format!("-rpcport={port}"))
             .args([

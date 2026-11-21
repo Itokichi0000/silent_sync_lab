@@ -25,6 +25,7 @@ use sync_core::{
     protocol::{
         LabAddress, ProtocolError, ReceiveScanner, ReceiverKeys, SkipReason, TxScanOutcome, K_MAX,
     },
+    source::{IndexedOutput, IndexedTx},
 };
 
 const VECTORS_JSON: &str =
@@ -231,6 +232,34 @@ fn check_receiving(comment: &str, case: &Receiving) {
         .collect();
     found.sort();
 
+    // The same transaction as a tweak index would present it — the expected
+    // public tweak data plus the taproot outputs, no inputs — must yield the
+    // same matches through `scan_indexed_tx`.
+    if let Some(tweak) = case.expected.tweak {
+        let indexed = IndexedTx {
+            txid: tx.compute_txid(),
+            tweak,
+            outputs: tx
+                .output
+                .iter()
+                .enumerate()
+                .map(|(vout, o)| IndexedOutput {
+                    vout: vout as u32,
+                    value_sats: o.value.to_sat(),
+                    output_key: o.script_pubkey.as_bytes()[2..].try_into().unwrap(),
+                })
+                .collect(),
+        };
+        let mut via_index = scanner.scan_indexed_tx(&indexed).unwrap();
+        let mut via_tx = matches.clone();
+        via_index.sort_by_key(|m| m.outpoint);
+        via_tx.sort_by_key(|m| m.outpoint);
+        assert_eq!(
+            via_index, via_tx,
+            "{comment}: index path differs from full-transaction path"
+        );
+    }
+
     let mut expected: Vec<ExpectedOutput> = case
         .expected
         .outputs
@@ -257,7 +286,7 @@ fn vector_file_is_the_pinned_canonical_file() {
 }
 
 #[test]
-fn all_receiving_vectors_except_k_max() {
+fn all_receiving_vectors_except_the_limit_case() {
     let all = vectors();
     let mut cases = 0;
     for case in all.iter().filter(|c| c.comment != K_MAX_VECTOR) {
@@ -333,6 +362,34 @@ fn k_max_vector() {
         ),
     };
     assert_eq!(matches.len(), expected_n);
+
+    // The tweak-index path applies the same cap.
+    let indexed = IndexedTx {
+        txid: tx.compute_txid(),
+        tweak: receiving.expected.tweak.unwrap(),
+        outputs: tx
+            .output
+            .iter()
+            .enumerate()
+            .map(|(vout, o)| IndexedOutput {
+                vout: vout as u32,
+                value_sats: o.value.to_sat(),
+                output_key: o.script_pubkey.as_bytes()[2..].try_into().unwrap(),
+            })
+            .collect(),
+    };
+    let via_index: BTreeSet<_> = scanner
+        .scan_indexed_tx(&indexed)
+        .unwrap()
+        .into_iter()
+        .map(|m| (m.outpoint, m.label))
+        .collect();
+    let via_tx: BTreeSet<_> = matches.iter().map(|m| (m.outpoint, m.label)).collect();
+    assert_eq!(via_index.len(), expected_n);
+    assert!(
+        via_index == via_tx,
+        "index path and transaction path cap differently"
+    );
 
     // The capped result must refer to the *original* transaction.
     let txid = tx.compute_txid();

@@ -32,7 +32,7 @@ fn scan_against_a_regtest_node_reports_the_expected_outputs() {
     assert_eq!(code, Some(0), "{stderr}");
     assert!(
         stdout.contains(&format!(
-            "reachable at {url}: regtest at height {}",
+            "reachable: regtest at height {}",
             scenario.tip_height
         )),
         "{stdout}"
@@ -99,8 +99,12 @@ fn scan_against_a_regtest_node_reports_the_expected_outputs() {
         stdout.is_empty() && stderr.contains("chain mismatch"),
         "{stderr}"
     );
-    let (_, stdout, _) = run(&["--network", "signet", "doctor", "--core-rest-url", &url]);
-    assert!(stdout.contains("UNUSABLE: node at"), "{stdout}");
+    let (code, stdout, _) = run(&["--network", "signet", "doctor", "--core-rest-url", &url]);
+    assert_eq!(code, Some(1));
+    assert!(
+        stdout.contains("UNUSABLE: the node is on regtest"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -116,7 +120,11 @@ fn cli_refuses_a_mainnet_node() {
         "{stderr}"
     );
     let (code, stdout, _) = run(&["doctor", "--core-rest-url", &url]);
-    assert_eq!(code, Some(0));
+    assert_eq!(
+        code,
+        Some(1),
+        "doctor must not exit successfully for a mainnet node"
+    );
     assert!(
         stdout.contains("UNAVAILABLE: mainnet is refused"),
         "{stdout}"
@@ -276,4 +284,77 @@ fn persistent_sync_follows_a_real_reorg() {
     };
     assert_eq!(outputs(&now[5..]), outputs(&want[5..]));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Gate 4 through the CLI, with the real oracle and the real node.
+#[test]
+#[ignore = "needs BITCOIND_EXE and BLINDBIT_ORACLE_EXE"]
+fn verify_real_oracle_against_real_node() {
+    let node = Node::regtest();
+    let mut faucet = Faucet::new(&node);
+    let scenario = standard_scenario(&mut faucet);
+    let oracle = lab_testkit::oracle_node::Oracle::start(&node);
+    let (core_url, oracle_url) = (node.rest_url(), oracle.url());
+    let from = (scenario.base_height + 1).to_string();
+    let label = LABEL_USED.to_string();
+
+    let (code, stdout, stderr) = run(&[
+        "doctor",
+        "--core-rest-url",
+        &core_url,
+        "--oracle-url",
+        &oracle_url,
+    ]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stdout.contains("backend oracle-v2 : reachable"), "{stdout}");
+
+    let (code, stdout, stderr) = run(&[
+        "verify",
+        "--backend",
+        "oracle-v2",
+        "--oracle-url",
+        &oracle_url,
+        "--core-rest-url",
+        &core_url,
+        "--reference",
+        "core",
+        "--from",
+        &from,
+        "--label",
+        &label,
+        "--json",
+    ]);
+    assert_eq!(code, Some(4), "{stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["agreed"], 7);
+    assert_eq!(report["candidate_only"], 1);
+    assert_eq!(report["reference_only"], 0);
+    assert_eq!(report["unexplained"], 0);
+    let diff = &report["differences"][0];
+    assert_eq!(diff["txid"], scenario.segwit_v2_txid.to_string());
+    assert_eq!(diff["explanation"]["kind"], "reference_not_eligible");
+    assert_eq!(
+        diff["explanation"]["reason"],
+        "spends_unknown_segwit_version"
+    );
+
+    // A locally computed BIP352 index of the same node agrees with it.
+    let (code, stdout, stderr) = run(&[
+        "verify",
+        "--backend",
+        "local-index",
+        "--core-rest-url",
+        &core_url,
+        "--reference",
+        "core",
+        "--from",
+        &from,
+        "--label",
+        &label,
+    ]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(
+        stdout.contains("verdict              : identical"),
+        "{stdout}"
+    );
 }

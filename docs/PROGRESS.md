@@ -8,7 +8,7 @@
 | 1 | 暗号処理を作らない受信検出（fixture） | **完了**（Gate 1 通過） |
 | 2 | Bitcoin Core / regtest 統合 | **完了**（Gate 2 通過） |
 | 3 | 永続化・再開・復元 | **完了**（Gate 3 通過） |
-| 4 | 第二バックエンド | 未着手 |
+| 4 | 第二バックエンド | **完了**（Gate 4 通過） |
 | 5 | ベンチマーク・故障注入 | 未着手 |
 | 6 | 進路決定 | 未着手 |
 
@@ -31,7 +31,6 @@
 
 ## Not done（このフェーズの対象外、または未実施）
 
-- [ ] tweak 方式の `Evidence`、Oracle アダプタ、`Verifier::cross_check`（Phase 4）
 - [ ] ベンチマーク、故障注入レポート、`export` / `bench` / `status` / `received list` / `lab init` コマンド（Phase 3〜5）
 - [ ] `docs/THREAT_MODEL.md`, `docs/BENCHMARK_PROTOCOL.md`（Phase 4〜5 の前に作成）
 - [ ] 機密情報検出の pre-commit / CI ツール（DECISIONS O-009）
@@ -259,6 +258,71 @@ Phase 2 以降の前提として未解決のもの:
 1. 「ソースがチェックポイントより短い」は 2 通りある: 別のチェーンに切り替わった（reorg）か、同じチェーンの手前にいるだけか。後者で巻き戻すと、正しい結果を捨てることになる。区別には保存済みのブロックハッシュ列が必要で、チェックポイント 1 点だけでは足りない。
 2. 再承認された同じ tx は、同じ txid・vout のまま別のブロックに属する検出として現れる。検出の同一性は outpoint、所属は (高さ, ブロックハッシュ) で持つ必要がある。
 3. テストの比較が暗黙の順序に依存していると、実ノードでは txid が毎回変わるため不安定になる。fixture（決定的）では表に出なかった。
+
+## Phase 4 Result
+
+- **実装したファイル**:
+  - `crates/sync-core/src/source/blindbit.rs`（BlindBit Oracle v2 の HTTP バックエンド、feature `blindbit-http`）, `source/local_index.rs`（手元で計算する tweak インデックス）, `source/http.rs`（ループバック専用 HTTP クライアントを共通化・厳格化）, `src/verify.rs`（`cross_check`）
+  - `Evidence::TweakIndex` / `IndexedTx` / `IndexedOutput`、`ReceiveScanner::scan_indexed_tx`、エンジンの対応
+  - `crates/lab-testkit/src/{fake_http.rs,oracle_node.rs}`（偽の Core REST / 偽の Oracle、実 Oracle プロセスの起動）, `test_source::Tamper`
+  - `crates/lab-cli/src/main.rs`: `--backend oracle-v2` / `--backend local-index`、`verify` コマンド、`doctor --oracle-url`
+  - テスト: `crates/sync-core/tests/{tweak_index.rs,oracle_fake.rs,oracle_e2e.rs}`, `crates/lab-cli/tests/verify_cli.rs`, `regtest_cli.rs`（実 Oracle）
+  - `scripts/build_blindbit_oracle.sh`、CI（E2E ジョブで Oracle をビルド、無効化チェックは別ワークフロー）
+  - Phase 2 レビュー対応（DECISIONS D-029）: `source/bitcoin_core.rs` の書き直し（genesis からのヘッダ鎖で全ブロックを固定）ほか
+- **実行したコマンド**: `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets --locked -- -D warnings` / `cargo test --workspace --locked` / `BITCOIND_EXE=… BLINDBIT_ORACLE_EXE=… cargo test --workspace --locked -- --ignored` / `scripts/build_blindbit_oracle.sh <dir>` / `VERIFY_SIGNATURES=1 scripts/fetch_bitcoind.sh <dir>` / `python3 scripts/mutation_check.py <スクラッチコピー>`
+- **テスト結果**: **成功**
+  | 対象 | 件数 |
+  |---|---|
+  | 通常テスト | 131 passed |
+  | 実ノード + 実 Oracle の E2E（Bitcoin Core 32.1、BlindBit Oracle `f9ab7fd`） | 8 passed（3 回連続で実行し全て成功） |
+  | 検査の無効化チェック | 92 項目。結果は下の「追記」を参照 |
+- **出力証拠**: `docs/logs/phase4_cargo_fmt.log`, `phase4_cargo_clippy.log`, `phase4_cargo_test.log`, `phase4_e2e.log`, `phase4_mutation_check.log`
+- **調べた上流資料・commit SHA**: BlindBit Oracle v2 `f9ab7fd` を実際にビルドし regtest で動かして応答を確認（RESEARCH §4.1）。
+- **安全性で気をつけたこと**:
+  - tweak インデックスのスキャンは上流の関数だけで構成（独自のマッチングなし）。公式ベクトル 29 件でフル tx 経路と一致。人間レビュー対象として D-030 に明記。
+  - Oracle にはブロックの高さしか送らない。接続先はループバックの IPv4 リテラルに限定。mainnet を名乗る Oracle は拒否。
+  - Oracle のブロックは、自分のノードの（genesis から検証した）ヘッダと照合する。追いついていない Oracle や別チェーンの Oracle は「入金なし」にならずエラーになる。
+  - インデックスの中身は検証できないことを、型（`SourceCapabilities`）・ドキュメント・テストで明示。
+- **未完成 / ブロッカー**: gRPC 未使用（O-014）。ホスト型 Oracle との比較は未実施（O-015）。Oracle の他の構成（cut-through、dust フィルタ）は未検証。
+
+### Gate 4 判定: 通過
+
+| 条件 | 根拠 |
+|---|---|
+| 独立した 2 方式の結果一致、または不一致の理由を個別 tx 単位で説明できる | 実物どうしの比較（`real_oracle_matches_core_except_for_the_segwit_version_rule`）: Core 直接方式と BlindBit Oracle 方式は、送信側が作った出力については**完全に一致**。差異は 1 件だけで、SegWit v2 の出力を使う tx の出力を Oracle 方式だけが検出する。`verify` はこの差異を `reference_not_eligible: spends_unknown_segwit_version` と説明する（説明不能 0 件） |
+| 外部 Oracle 未利用なら「実サーバー比較未完了」と明示 | 該当せず。実物の BlindBit Oracle v2 を regtest で動かして比較した。ただしローカルで動かした 1 構成のみで、公開サーバとの比較ではない |
+
+### 取引ごとの証拠・プライバシー露出・完全性（設計書 Phase 4）
+
+| 観点 | Core 直接（フルブロック） | tweak インデックス（BlindBit Oracle v2） |
+|---|---|---|
+| クライアントが受け取るもの | ブロック全体（witness 込み）と、使用した出力 | tx ごとの tweak と Taproot 出力 |
+| BIP352 の適格性判定 | クライアント自身が行う | サーバが行う（クライアントは入力を見ない） |
+| クライアントが検証できること | ハッシュ・マークルルート・witness commitment・PoW・genesis からの連結 | ブロックハッシュが自分のヘッダと一致することだけ |
+| 省略（tx を載せない）の検出 | マークルルートで検出 | **不可**（別ソースとの突き合わせが必要） |
+| 誤った tweak / 存在しない入金の捏造 | 該当なし | **不可**（同上）。アドレスを知るサーバは偽の入金を「検出」させられる |
+| 相手に見えるもの | 自分のノードなので外部には無し | サーバに: 接続元、時刻、要求したブロック範囲（今回はループバックなので外部には無し） |
+| scan 鍵 | 手元のみ | 手元のみ（送らない） |
+| 1 ブロックあたりのリクエスト | 2（ブロック、使用済み出力）＋ヘッダは 2000 件ずつ | 1（＋ヘッダは自分のノードから） |
+
+### 設計書のテストケースとの対応（Phase 4）
+
+| ID | 状態 | 備考 |
+|---|---|---|
+| T10 tweak 1 件を削除 | **済** | インデックス単体のスキャンは成功し 1 件見逃す。`verify` は `candidate_omitted_transaction` と報告 |
+| T11 不正データ・重複・順序変更 | **済** | 出力・tx の重複はエラー。順序変更は結果に影響しない。誤った tweak、出力の省略・改変、捏造は単体では通り、突き合わせで判明 |
+
+### Phase 4 で分かったこと
+
+1. **BlindBit Oracle v2 は「SegWit v>1 を使う tx はスキャンしない」規則を適用していない。** 上流 bdk-sp と同じ逸脱で、tweak だけを受け取るクライアントには直しようがない（入力が見えない）。BIP 準拠のウォレットと検出結果が食い違う。
+2. **Oracle は範囲外の高さに HTTP 200・空のハッシュ・空の結果を返す。** 別経路のヘッダと照合しないクライアントは、未同期の範囲を「入金なし」と区別できない。
+3. **インデックスは、アドレスを知っていれば存在しない入金を作れる。** tweak と出力を自分で選べばよく、クライアントのスキャンは正しく「検出」してしまう。防ぐには tx の実在を別途確かめる必要がある。
+4. 同一 tx 内で `k = 0` の出力を省かれると、`k = 1` 以降の出力も見えなくなる（ラベル欠落と同じ構造）。`verify` は省かれた出力は説明できるが、連鎖して見えなくなった出力は「説明不能」に分類される。
+5. Phase 2 のレビューで、Core 経路の mainnet 拒否が「申告の確認」にとどまっていたことが分かった。**ブロックが genesis に連結していること**を確かめて初めて、データそのものに対する拒否になる。
+
+### 追記: 無効化チェック
+
+（Phase 4 のコミット時点で実行中。結果は次のコミットでここに記録する。）
 
 ## 次に取り組む最小タスク（Phase 1 完了時点の記録）
 

@@ -7,7 +7,7 @@
 
 use super::{coinbase_height, TxWithPrevouts};
 use crate::{
-    bitcoin::{hashes::Hash, Block, BlockHash, Target, TxOut, Txid},
+    bitcoin::{block::Header, hashes::Hash, Block, BlockHash, Target, TxOut, Txid},
     models::BlockRef,
     network::LabNetwork,
 };
@@ -44,7 +44,7 @@ pub(crate) fn check_full_block(
     if !block.check_merkle_root() {
         return Err("transactions do not match the header merkle root".to_string());
     }
-    let hash = check_proof_of_work(&block, expect.network)
+    let hash = check_proof_of_work(&block.header, expect.network)
         .map_err(|e| format!("proof of work check failed: {e}"))?;
     if let Some(expected) = expect.hash {
         if hash != expected {
@@ -109,9 +109,12 @@ pub(crate) fn check_full_block(
 /// that, a file could choose an arbitrarily easy or wrapped-around target.)
 ///
 /// This still says nothing about the block being part of the most-work chain.
-fn check_proof_of_work(block: &Block, network: LabNetwork) -> Result<BlockHash, String> {
-    let bits = block.header.bits;
-    let target = block.header.target();
+pub(crate) fn check_proof_of_work(
+    header: &Header,
+    network: LabNetwork,
+) -> Result<BlockHash, String> {
+    let bits = header.bits;
+    let target = header.target();
     if target.to_compact_lossy() != bits {
         return Err(format!(
             "bits {:#010x} is not a canonical target encoding",
@@ -128,7 +131,7 @@ fn check_proof_of_work(block: &Block, network: LabNetwork) -> Result<BlockHash, 
             bits.to_consensus()
         ));
     }
-    block.header.validate_pow(target).map_err(|e| e.to_string())
+    header.validate_pow(target).map_err(|e| e.to_string())
 }
 
 /// BIP141 witness commitment, checked strictly.
@@ -185,4 +188,149 @@ fn check_witness_commitment(block: &Block) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Cross-checks supplied previous outputs against the outputs that were
+/// created inside the same batch.
+///
+/// Nothing in a block commits to the outputs it spends, so in general a
+/// source's prevouts cannot be verified. The exception is an input spending an
+/// output of an earlier transaction in the fetched range: there the real
+/// output is known, and a prevout that differs is proof the source lied (or
+/// mixed data up). A wrong prevout silently changes — usually destroys — the
+/// BIP352 shared secret, i.e. it hides payments.
+pub(crate) fn check_prevouts_within_range(blocks: &[super::BlockEvidence]) -> Result<(), String> {
+    use crate::bitcoin::OutPoint;
+    use std::collections::BTreeMap;
+
+    let mut created: BTreeMap<OutPoint, &TxOut> = BTreeMap::new();
+    for block in blocks {
+        let super::Evidence::FullBlock(txs) = &block.evidence else {
+            continue;
+        };
+        for entry in txs {
+            for (txin, supplied) in entry.tx.input.iter().zip(&entry.prevouts) {
+                if let Some(real) = created.get(&txin.previous_output) {
+                    if *real != supplied {
+                        return Err(format!(
+                            "block {}: transaction {} spends {} but the supplied previous output \
+                             differs from the output created in this range",
+                            block.block.height,
+                            entry.tx.compute_txid(),
+                            txin.previous_output
+                        ));
+                    }
+                }
+            }
+            let txid = entry.tx.compute_txid();
+            for (vout, output) in entry.tx.output.iter().enumerate() {
+                if let Ok(vout) = u32::try_from(vout) {
+                    created.insert(OutPoint::new(txid, vout), output);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        bitcoin::{
+            absolute::LockTime, transaction::Version, Amount, OutPoint, ScriptBuf, Sequence,
+            Transaction, TxIn, Witness,
+        },
+        source::{BlockEvidence, Evidence},
+    };
+
+    fn tx(inputs: &[OutPoint], outputs: &[(u64, u8)]) -> Transaction {
+        Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: inputs
+                .iter()
+                .map(|&previous_output| TxIn {
+                    previous_output,
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                })
+                .collect(),
+            output: outputs
+                .iter()
+                .map(|&(sats, tag)| TxOut {
+                    value: Amount::from_sat(sats),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51, tag]),
+                })
+                .collect(),
+        }
+    }
+
+    fn block(height: u32, txs: Vec<TxWithPrevouts>) -> BlockEvidence {
+        let hash = BlockHash::from_byte_array([height as u8; 32]);
+        BlockEvidence {
+            block: BlockRef {
+                height,
+                hash,
+                prev_hash: hash,
+            },
+            evidence: Evidence::FullBlock(txs),
+        }
+    }
+
+    /// An input that spends an output created earlier in the same batch must
+    /// be given exactly that output as its prevout.
+    #[test]
+    fn prevouts_are_cross_checked_against_outputs_created_in_the_range() {
+        let outside = OutPoint::new(crate::bitcoin::Txid::from_byte_array([9; 32]), 0);
+        let funding = tx(&[outside], &[(1_000, 1), (2_000, 2)]);
+        let spent = OutPoint::new(funding.compute_txid(), 1);
+        let spender = tx(&[outside, spent], &[(2_500, 3)]);
+        let unknown = TxOut {
+            value: Amount::from_sat(777),
+            script_pubkey: ScriptBuf::new(),
+        };
+        let build = |supplied: TxOut, same_block: bool| {
+            let first = TxWithPrevouts {
+                tx: funding.clone(),
+                prevouts: vec![unknown.clone()],
+            };
+            let second = TxWithPrevouts {
+                tx: spender.clone(),
+                // The first prevout is from outside the range: unverifiable.
+                prevouts: vec![unknown.clone(), supplied],
+            };
+            if same_block {
+                vec![block(5, vec![first, second])]
+            } else {
+                vec![block(5, vec![first]), block(6, vec![second])]
+            }
+        };
+        let real = funding.output[1].clone();
+        for same_block in [true, false] {
+            assert_eq!(
+                check_prevouts_within_range(&build(real.clone(), same_block)),
+                Ok(())
+            );
+            for lie in [
+                funding.output[0].clone(), // the wrong output of the right transaction
+                TxOut {
+                    value: Amount::from_sat(2_001),
+                    ..real.clone()
+                },
+                TxOut {
+                    script_pubkey: ScriptBuf::new(),
+                    ..real.clone()
+                },
+            ] {
+                let err = check_prevouts_within_range(&build(lie, same_block)).expect_err("lie");
+                assert!(
+                    err.contains("differs from the output created in this range"),
+                    "{err}"
+                );
+                assert!(err.contains(&spent.to_string()), "{err}");
+            }
+        }
+    }
 }

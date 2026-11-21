@@ -141,3 +141,45 @@ impl ScanSource for TestSource {
         Ok(batch)
     }
 }
+
+/// Wraps any source and rewrites every batch it returns: a generic way to
+/// model a source that omits, alters or invents data.
+pub struct Tamper<S, F> {
+    pub inner: S,
+    pub tamper: F,
+    pub backend_id: String,
+}
+
+impl<S: ScanSource, F: Fn(&mut ScanBatch)> Tamper<S, F> {
+    pub fn new(inner: S, tamper: F) -> Self {
+        let backend_id = inner.backend_id().to_string();
+        Self {
+            inner,
+            tamper,
+            backend_id,
+        }
+    }
+}
+
+impl<S: ScanSource, F: Fn(&mut ScanBatch)> ScanSource for Tamper<S, F> {
+    fn backend_id(&self) -> &str {
+        &self.backend_id
+    }
+    fn capabilities(&self) -> SourceCapabilities {
+        self.inner.capabilities()
+    }
+    fn chain(&self) -> ChainIdentity {
+        self.inner.chain()
+    }
+    fn tip(&self) -> Result<BlockRef, SourceError> {
+        self.inner.tip()
+    }
+    fn block_ref(&self, height: u32) -> Result<BlockRef, SourceError> {
+        self.inner.block_ref(height)
+    }
+    fn fetch_range(&self, from: u32, to: u32) -> Result<ScanBatch, SourceError> {
+        let mut batch = self.inner.fetch_range(from, to)?;
+        (self.tamper)(&mut batch);
+        Ok(batch)
+    }
+}

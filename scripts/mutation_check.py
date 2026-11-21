@@ -34,6 +34,9 @@ env = dict(
 )
 B = "crates/sync-core/src/source/block_check.rs"
 C = "crates/sync-core/src/source/bitcoin_core.rs"
+H = "crates/sync-core/src/source/http.rs"
+O = "crates/sync-core/src/source/blindbit.rs"
+V = "crates/sync-core/src/verify.rs"
 E = "crates/sync-core/src/engine.rs"
 P = "crates/sync-core/src/protocol.rs"
 N = "crates/sync-core/src/network.rs"
@@ -60,17 +63,43 @@ muts = [
     ("merkle root check removed", B, "if !block.check_merkle_root() {", "if false {"),
     ("prevout list count unchecked", B, "if prevouts.len() != block.txdata.len() {", "if false {"),
     ("prevout count per tx unchecked", B, "if tx_prevouts.len() != expected_prevouts {", "if false {"),
+    ("witness commitment: first match used instead of last", B, "        .iter()\n        .rev()\n        .map(|o| o.script_pubkey.as_bytes())", "        .iter()\n        .map(|o| o.script_pubkey.as_bytes())"),
+    ("witness commitment: longer scripts ignored", B, "script.len() >= 38 && script[..6] == MAGIC", "script.len() == 38 && script[..6] == MAGIC"),
+    ("witness commitment: extra reserved items accepted", B, "Some(items) if items.len() == 1 && items[0].len() == 32 => items[0].clone(),", "Some(items) if !items.is_empty() && items[0].len() == 32 => items[0].clone(),"),
+    ("prevouts not cross-checked within the range", B, "if *real != supplied {", "if false {"),
+    # --- loopback HTTP client shared by the network backends ---
+    ("http: non-loopback host accepted", H, "if !ip.is_loopback() {", "if false {"),
+    ("http: port not validated", H, "if !valid_port {", "if false {"),
+    ("http: credentials echoed in refusal", H, "let shown = if url.contains('@') {", "let shown = if false {"),
+    ("http: redirects followed", H, ".with_max_redirects(0)", ".with_max_redirects(5)"),
+    ("http: non-200 success statuses accepted", H, "if status != 200 {", "if status >= 400 {"),
+    ("http: response size unbounded", H, "if body.len() as u64 > self.max_body_bytes {", "if false {"),
     # --- Bitcoin Core REST backend ---
     ("core: mainnet chain name accepted", C, '"main" => Err(NetworkError::MainnetRefused.into()),', '"main" => Ok(LabNetwork::Regtest),'),
-    ("core: genesis hash not verified", C, "source.chain = ChainIdentity::verified(network, genesis)?;", "source.chain = ChainIdentity::for_network(network);\n        let _ = genesis;"),
-    ("core: non-loopback host accepted", C, "if !is_loopback {", "if false {"),
+    ("core: node's block 0 not compared with genesis", C, "ChainIdentity::verified(network, genesis)?;", "let _ = genesis;"),
+    ("core: header chain links unchecked", C, "if header.prev_blockhash != parent {", "if false {"),
+    ("core: header proof of work unchecked", C, "let hash = check_proof_of_work(header, network)", "let hash = Ok::<_, String>(header.block_hash())"),
+    ("core: header response need not start at the anchor", C, "Some(first) if first.block_hash() == top => {}", "Some(_) if true => {}"),
+    ("core: stale header anchor kept after a reorg", C, "            anchored.pop();", "            break;"),
     ("core: trailing bytes after block accepted", C, "if !cursor.is_empty() {\n                return Err(at(", "if false {\n                return Err(at("),
     ("core: trailing bytes after spent outputs accepted", C, "if !cursor.is_empty() {\n        return Err(format!(", "if false {\n        return Err(format!("),
+    ("core: spent-output transaction count unbounded", C, "if count > MAX_TXS_PER_BLOCK {", "if false {"),
     ("core: range beyond tip not refused", C, "if from < 1 || to > tip {", "if false {"),
     ("core: chain switch at tip() unnoticed", C, "if network_from_core_chain(&info.chain)? != self.chain.network() {", "if false {"),
-    ("core: tip header not checked", C, "if !cursor.is_empty() || header.block_hash() != hash {", "if false {"),
-    ("core: blocks not linked within a fetch", C, "                    parent,\n", "                    parent: None,\n"),
+    ("core: tip not bound to the header chain", C, "if tip.hash != info.bestblockhash {", "if false {"),
     ("core: block not checked against requested hash", C, "hash: Some(hash),", "hash: None,"),
+    # --- BlindBit Oracle backend ---
+    ("oracle: mainnet name accepted", O, '"main" | "mainnet" => Err(NetworkError::MainnetRefused.into()),', '"main" | "mainnet" => Ok(LabNetwork::Regtest),'),
+    ("oracle: network not compared with header source", O, "if network != source.headers.chain().network() {", "if false {"),
+    ("oracle: tweaks_only accepted", O, "if info.tweaks_only {", "if false {"),
+    ("oracle: block hash not compared with header source", O, "if hash != expected.hash {", "if false {"),
+    ("oracle: range beyond the index not refused", O, "if from < 1 || to > indexed_to {", "if false {"),
+    # --- tweak-index scanning and cross-check ---
+    ("index: duplicate output accepted", P, "if let Some(dup) = indexed.outputs.iter().find(|o| !seen.insert(o.vout)) {", "if let Some(dup) = indexed.outputs.iter().find(|o| !seen.insert(o.vout) && false) {"),
+    ("index: duplicate transaction accepted", E, "if !seen_txids.insert(entry.txid) {", "if !seen_txids.insert(entry.txid) && false {"),
+    ("verify: chain mismatch unchecked", V, "if source.chain() != expected_chain {", "if false {"),
+    ("verify: block hash differences ignored", V, "let same_block: bool = same_hash(c_block.block, r_block.block);", "let same_block: bool = true;"),
+    ("verify: detail differences ignored", V, "} else if c.value_sats != r.value_sats || c.label != r.label {", "} else if false {"),
     # --- scanner wrapper ---
     ("missing-witness check removed", P, ".position(|(txin, prevout)| witness_is_missing(txin, &prevout.script_pubkey))", ".position(|(txin, prevout)| false && witness_is_missing(txin, &prevout.script_pubkey))"),
     ("missing-witness: p2sh-wrapped dropped", P, "return redeem.is_p2wpkh() || redeem.is_p2wsh();", "return false;"),
@@ -118,6 +147,8 @@ muts = [
     # --- CLI ---
     ("cli: store network unchecked", M, "if meta.chain.network() != network {", "if false {"),
     ("cli: empty birthday basis accepted", M, "if birthday_basis.trim().is_empty() {", "if false {"),
+    ("cli: verify succeeds despite differences", M, "    if report.identical {\n        Ok(())", "    if true {\n        Ok(())"),
+    ("cli: doctor succeeds with an unusable backend", M, "    if usable {\n        Ok(())", "    if true {\n        Ok(())"),
 ]
 survived = []
 for name, path, old, new in muts:
@@ -126,7 +157,7 @@ for name, path, old, new in muts:
     if src.count(old) != 1:
         print(f"SETUP-ERROR  {name}: pattern count {src.count(old)}"); survived.append(name + " (setup)"); continue
     open(full, "w").write(src.replace(old, new))
-    r = subprocess.run(["cargo", "test", "--locked", "-q", "--workspace", "--", "--skip", "k_max"], cwd=root, env=env, capture_output=True, text=True)
+    r = subprocess.run(["cargo", "test", "--locked", "-q", "--workspace", "--", "--skip", "k_max"], cwd=root, env=env, capture_output=True, text=True, timeout=1800)
     open(full, "w").write(src)
     out = r.stdout + r.stderr
     if r.returncode == 0:

@@ -11,13 +11,19 @@
 
 #[cfg(feature = "core-rest")]
 pub mod bitcoin_core;
+#[cfg(feature = "blindbit-http")]
+pub mod blindbit;
 mod block_check;
 pub mod fixture;
+#[cfg(any(feature = "core-rest", feature = "blindbit-http"))]
+mod http;
+pub mod local_index;
 
 use crate::{
     bitcoin::{
         script::{self, Instruction},
-        Transaction, TxOut,
+        secp256k1::PublicKey,
+        Transaction, TxOut, Txid,
     },
     models::{BlockRef, EvidenceKind},
     network::{ChainIdentity, NetworkError},
@@ -56,18 +62,44 @@ pub struct TxWithPrevouts {
     pub prevouts: Vec<TxOut>,
 }
 
+/// A taproot output as listed by a tweak index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedOutput {
+    pub vout: u32,
+    pub value_sats: u64,
+    /// The 32-byte witness program (x-only output key).
+    pub output_key: [u8; 32],
+}
+
+/// One transaction as listed by a tweak index: its BIP352 public tweak data
+/// (`input_hash·A`) and its taproot outputs. Inputs are not available.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedTx {
+    pub txid: Txid,
+    pub tweak: PublicKey,
+    pub outputs: Vec<IndexedOutput>,
+}
+
 /// Scan data for one block.
+///
+/// The variants carry *different information* and are deliberately not
+/// unified: with [`Evidence::FullBlock`] the client itself decides which
+/// transactions BIP352 says to scan and derives the tweak data; with
+/// [`Evidence::TweakIndex`] both were decided by whoever built the index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Evidence {
     /// Every transaction of the block, in block order, with previous outputs.
     FullBlock(Vec<TxWithPrevouts>),
+    /// The transactions an index considers scannable, with tweak data.
+    TweakIndex(Vec<IndexedTx>),
 }
 
 impl Evidence {
     pub fn kind(&self) -> EvidenceKind {
         match self {
             Evidence::FullBlock(_) => EvidenceKind::FullBlockWithPrevouts,
+            Evidence::TweakIndex(_) => EvidenceKind::TweakIndex,
         }
     }
 }

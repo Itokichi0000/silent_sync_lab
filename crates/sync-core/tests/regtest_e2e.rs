@@ -24,8 +24,6 @@ use sync_core::{
     source::{bitcoin_core::CoreRestSource, ScanSource, SourceError},
 };
 
-const NEEDS_NODE: &str = "needs BITCOIND_EXE (Bitcoin Core >= 30)";
-
 fn regtest() -> ChainIdentity {
     ChainIdentity::for_network(LabNetwork::Regtest)
 }
@@ -41,7 +39,6 @@ fn detected(report: &ScanReport) -> Vec<(u32, sync_core::bitcoin::Txid, u32, u64
 #[test]
 #[ignore = "needs BITCOIND_EXE (Bitcoin Core >= 30)"]
 fn regtest_send_mine_detect() {
-    let _ = NEEDS_NODE;
     let node = Node::regtest();
     let mut faucet = Faucet::new(&node);
     let scenario = standard_scenario(&mut faucet);
@@ -190,7 +187,17 @@ fn mainnet_node_is_refused() {
     let node = Node::start(NodeChain::OfflineMainnet);
     let info = node.cli_json(&["getblockchaininfo"]);
     assert_eq!(info["chain"], "main");
-    assert_eq!(node.cli_json(&["getnetworkinfo"])["connections"], 0);
+    let net = node.cli_json(&["getnetworkinfo"]);
+    assert_eq!(
+        net["networkactive"], false,
+        "the mainnet-parameter node must be offline"
+    );
+    assert_eq!(net["connections"], 0);
+    assert_eq!(
+        node.block_count(),
+        0,
+        "it holds nothing but the genesis block"
+    );
     assert_eq!(
         CoreRestSource::connect(&node.rest_url()).err(),
         Some(SourceError::Network(NetworkError::MainnetRefused))

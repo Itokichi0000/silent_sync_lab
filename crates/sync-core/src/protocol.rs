@@ -16,13 +16,16 @@
 
 use crate::{
     bitcoin::{
+        absolute::LockTime,
         hashes::{sha256, Hash, HashEngine},
         key::Secp256k1,
         script::Instruction,
         secp256k1::{self, PublicKey, Scalar, SecretKey},
+        transaction::Version,
         Amount, Network, OutPoint, Script, ScriptBuf, Transaction, TxIn, TxOut,
     },
     network::LabNetwork,
+    source::IndexedTx,
 };
 use bdk_sp::{
     encoding::SilentPaymentCode,
@@ -272,6 +275,8 @@ pub enum ProtocolError {
 /// Scanner for one receiver (one scan key / spend key pair plus labels).
 pub struct ReceiveScanner {
     inner: Scanner,
+    /// Needed for the ECDH step when the tweak data comes from an index.
+    scan_sk: SecretKey,
     labels: BTreeSet<u32>,
 }
 
@@ -315,6 +320,7 @@ impl ReceiveScanner {
 
         Ok(Self {
             inner: Scanner::new(keys.scan_sk, keys.spend_pk, lookup),
+            scan_sk: keys.scan_sk,
             labels,
         })
     }
@@ -450,6 +456,119 @@ impl ReceiveScanner {
         }
     }
 
+    /// Scans a transaction as described by a tweak index: public tweak data
+    /// plus taproot outputs, no inputs.
+    ///
+    /// The matching is upstream's `scan_txouts`, run on a stand-in transaction
+    /// that holds exactly the listed outputs; the ECDH step is upstream's
+    /// `compute_shared_secret`. Nothing here re-implements BIP352, and the
+    /// K_max cap is applied the same way as for full transactions.
+    ///
+    /// What cannot be done here: BIP352's eligibility rules need the inputs,
+    /// so whether the transaction should be scanned at all — and whether the
+    /// tweak is right, or the transaction even exists — is taken on the
+    /// index's word.
+    pub fn scan_indexed_tx(&self, indexed: &IndexedTx) -> Result<Vec<ScanMatch>, ProtocolError> {
+        let mut seen = BTreeSet::new();
+        if let Some(dup) = indexed.outputs.iter().find(|o| !seen.insert(o.vout)) {
+            return Err(ProtocolError::Upstream(format!(
+                "index lists output {} of {} twice",
+                dup.vout, indexed.txid
+            )));
+        }
+        // Position `i` of the stand-in transaction is `indexed.outputs[i]`.
+        let stand_in = |blank: &[ScriptBuf]| Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: Vec::new(),
+            output: indexed
+                .outputs
+                .iter()
+                .map(|o| {
+                    let mut script = vec![0x51, 0x20];
+                    script.extend_from_slice(&o.output_key);
+                    let script_pubkey = ScriptBuf::from_bytes(script);
+                    TxOut {
+                        value: Amount::from_sat(o.value_sats),
+                        script_pubkey: if blank.contains(&script_pubkey) {
+                            ScriptBuf::new()
+                        } else {
+                            script_pubkey
+                        },
+                    }
+                })
+                .collect(),
+        };
+        let scan = |blank: &[ScriptBuf]| {
+            catch_unwind(AssertUnwindSafe(|| {
+                let shared = bdk_sp::compute_shared_secret(&self.scan_sk, &indexed.tweak);
+                self.inner.scan_txouts(&stand_in(blank), shared)
+            }))
+            .map_err(|_| ProtocolError::UpstreamPanic)
+        };
+
+        let matches = match scan(&[])? {
+            Ok(matches) => matches,
+            Err(SpReceiveError::ScanLimitExceeded(k_max)) => {
+                // Same correction as `scan_tx_capped_at_k_max` (D-005).
+                let beyond_limit = catch_unwind(AssertUnwindSafe(|| {
+                    self.inner.get_spks_from_tweak(&indexed.tweak, K_MAX)
+                }))
+                .map_err(|_| ProtocolError::UpstreamPanic)?;
+                match scan(&beyond_limit)? {
+                    Ok(matches) if matches.len() == K_MAX as usize => matches,
+                    Ok(matches) => {
+                        return Err(ProtocolError::KMaxFallbackInconsistent(matches.len()))
+                    }
+                    Err(SpReceiveError::ScanLimitExceeded(_)) => {
+                        return Err(ProtocolError::KMaxExceeded(k_max))
+                    }
+                    Err(other) => return Err(ProtocolError::Upstream(other.to_string())),
+                }
+            }
+            Err(other) => return Err(ProtocolError::Upstream(other.to_string())),
+        };
+
+        matches
+            .into_iter()
+            .map(|m| {
+                let listed = indexed
+                    .outputs
+                    .get(m.outpoint.vout as usize)
+                    .ok_or_else(|| {
+                        ProtocolError::Upstream("match outside the listed outputs".to_string())
+                    })?;
+                let mut found = ScanMatch::from(m);
+                found.outpoint = OutPoint::new(indexed.txid, listed.vout);
+                Ok(found)
+            })
+            .collect()
+    }
+
+    /// BIP352 public tweak data as an index that does **not** apply the
+    /// "spends SegWit version > 1" rule would compute it. Exists to model such
+    /// indexes (see `source::local_index`); wallets must use
+    /// [`Self::public_tweak_data`].
+    pub fn public_tweak_data_ignoring_segwit_version_rule(
+        tx: &Transaction,
+        prevouts: &[TxOut],
+    ) -> Result<Result<PublicKey, SkipReason>, ProtocolError> {
+        match Self::eligibility(tx, prevouts)? {
+            Ok(()) | Err(SkipReason::SpendsUnknownSegwitVersion) => {}
+            Err(reason) => return Ok(Err(reason)),
+        }
+        let has_eligible_input = catch_unwind(AssertUnwindSafe(|| {
+            tx.input.iter().zip(prevouts).any(|(txin, prevout)| {
+                extract_pubkey(txin.clone(), &prevout.script_pubkey).is_some()
+            })
+        }))
+        .map_err(|_| ProtocolError::UpstreamPanic)?;
+        if !has_eligible_input {
+            return Ok(Err(SkipReason::NoEligibleInputs));
+        }
+        Self::tweak_data_of_eligible(tx, prevouts)
+    }
+
     /// BIP352 public tweak data (`input_hash·A`) of an eligible transaction.
     /// Uses no private key. The inner `Err` carries the reason when BIP352 says
     /// the transaction must not be scanned.
@@ -460,6 +579,13 @@ impl ReceiveScanner {
         if let Err(reason) = Self::eligibility(tx, prevouts)? {
             return Ok(Err(reason));
         }
+        Self::tweak_data_of_eligible(tx, prevouts)
+    }
+
+    fn tweak_data_of_eligible(
+        tx: &Transaction,
+        prevouts: &[TxOut],
+    ) -> Result<Result<PublicKey, SkipReason>, ProtocolError> {
         let computed = catch_unwind(AssertUnwindSafe(|| {
             bdk_sp::receive::compute_tweak_data(tx, prevouts)
         }))

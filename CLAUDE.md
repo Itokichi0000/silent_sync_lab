@@ -63,6 +63,6 @@ cargo test --workspace --locked -- --ignored
 | 1 | fixture による受信検出 | 完了（Gate 1 通過） |
 | 2 | Bitcoin Core / regtest 統合 | 完了（Gate 2 通過） |
 | 3 | 永続化・再開・復元 | 完了（Gate 3 通過） |
-| 4 | 第二バックエンド | 未着手 |
+| 4 | 第二バックエンド | 完了（Gate 4 通過） |
 | 5 | ベンチマーク・故障注入 | 未着手 |
 | 6 | 進路決定 | 未着手 |

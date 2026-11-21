@@ -25,7 +25,7 @@ use crate::{
     store::{StoreError, StoreMeta, SyncStore, SCANNER_VERSION},
 };
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// How a [`sync`] call should proceed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,6 +345,7 @@ pub fn sync(
             scanner,
             &batch.blocks,
             &mut counters,
+            &mut BTreeSet::new(),
         )?;
         let blocks: Vec<BlockRef> = batch.blocks.iter().map(|b| b.block).collect();
         store.append(&blocks, &detections)?;

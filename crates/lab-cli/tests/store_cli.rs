@@ -451,9 +451,7 @@ fn the_store_is_protected_from_misuse() {
         "refused commands must not modify the store"
     );
 
-    // Unimplemented backend and mainnet, for the persistent commands too.
-    let (code, _, stderr) = run(&["sync", "--db", &db, "--backend", "oracle-v2"]);
-    assert_eq!(code, Some(3), "{stderr}");
+    // Mainnet is refused for the persistent commands too.
     for args in [
         vec!["--network", "mainnet", "status", "--db", db.as_str()],
         vec![

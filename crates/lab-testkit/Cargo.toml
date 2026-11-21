@@ -7,7 +7,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-sync-core = { path = "../sync-core", features = ["core-rest"] }
+sync-core = { path = "../sync-core", features = ["core-rest", "blindbit-http"] }
 bdk_sp = { workspace = true }
 serde_json = { workspace = true }
 

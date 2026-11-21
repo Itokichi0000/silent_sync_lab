@@ -11,7 +11,7 @@ name = "silent-sync"
 path = "src/main.rs"
 
 [dependencies]
-sync-core = { path = "../sync-core", features = ["core-rest"] }
+sync-core = { path = "../sync-core", features = ["core-rest", "blindbit-http"] }
 lab-storage = { path = "../lab-storage" }
 clap = { version = "4.5", features = ["derive"] }
 serde = { workspace = true }

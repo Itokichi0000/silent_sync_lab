@@ -1091,3 +1091,181 @@ fn engine_rejects_structurally_impossible_blocks() {
         "block 1 claims to be its own parent",
     );
 }
+
+/// Recomputes the merkle root and regtest proof of work after editing a block
+/// by hand (unlike `fixture_gen::seal`, the witness commitment is left alone).
+fn remine(block: &mut Block) {
+    block.header.merkle_root = block.compute_merkle_root().unwrap();
+    block.header.nonce = 0;
+    while block.header.validate_pow(block.header.target()).is_err() {
+        block.header.nonce += 1;
+    }
+}
+
+/// BIP141 details of locating and checking the witness commitment.
+#[test]
+fn witness_commitment_location_rules() {
+    let is_commitment = |o: &TxOut| {
+        o.script_pubkey
+            .as_bytes()
+            .starts_with(&[0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed])
+    };
+    let bogus = || {
+        let mut script = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+        script.extend_from_slice(&[0x77; 32]);
+        TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::from_bytes(script),
+        }
+    };
+    let load = |edit: &dyn Fn(&mut Block)| {
+        let mut file = fixture_file();
+        edit_block(&mut file, TIP_INDEX, |b| {
+            edit(b);
+            remine(b);
+        });
+        FixtureSource::from_file(file)
+    };
+
+    // Sanity: the tip block has witness data and exactly one commitment.
+    let tip: Block = deserialize_hex(&fixture_file().blocks[TIP_INDEX].block_hex).unwrap();
+    assert_eq!(
+        tip.txdata[0]
+            .output
+            .iter()
+            .filter(|o| is_commitment(o))
+            .count(),
+        1
+    );
+    assert!(is_commitment(tip.txdata[0].output.last().unwrap()));
+
+    // Several commitment-shaped outputs: the *last* one counts.
+    assert!(load(&|b| {
+        let at = b.txdata[0].output.len() - 1;
+        b.txdata[0].output.insert(at, bogus());
+    })
+    .is_ok());
+    match load(&|b| b.txdata[0].output.push(bogus())) {
+        Err(SourceError::InvalidData(msg)) => assert!(
+            msg.contains("does not match the coinbase commitment"),
+            "{msg}"
+        ),
+        other => panic!("a wrong last commitment must be refused, got {other:?}"),
+    }
+
+    // A commitment script may be longer than the 38 bytes that matter.
+    assert!(load(&|b| {
+        let last = b.txdata[0].output.last_mut().unwrap();
+        let mut script = last.script_pubkey.to_bytes();
+        script.push(0x51);
+        last.script_pubkey = ScriptBuf::from_bytes(script);
+    })
+    .is_ok());
+
+    // The coinbase witness must be exactly one 32-byte item.
+    for witness in [
+        Witness::from_slice(&[[0u8; 32], [0u8; 32]]),
+        Witness::from_slice(&[vec![0u8; 31]]),
+        Witness::from_slice(&[vec![0u8; 33]]),
+    ] {
+        match load(&|b| b.txdata[0].input[0].witness = witness.clone()) {
+            Err(SourceError::InvalidData(msg)) => assert!(msg.contains("reserved value"), "{msg}"),
+            other => panic!("a malformed reserved value must be refused, got {other:?}"),
+        }
+    }
+    // A different (well-formed) reserved value no longer matches.
+    assert!(load(&|b| b.txdata[0].input[0].witness = Witness::from_slice(&[[1u8; 32]])).is_err());
+}
+
+/// The fixture adapter cross-checks prevouts of inputs that spend an output
+/// created inside the file (it cannot check any other prevout).
+#[test]
+fn fixture_adapter_cross_checks_prevouts_created_in_the_file() {
+    // Append a transaction to the tip block that spends the first payment
+    // (created at height 2), with a placeholder witness.
+    let payment = fixture_txs(2)[1].0.clone();
+    let spent = OutPoint::new(payment.compute_txid(), 0);
+    let real = payment.output[0].clone();
+    let spender = Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: spent,
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::from_slice(&[vec![0u8; 64]]),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(40_000),
+            script_pubkey: ScriptBuf::from_hex("0014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap(),
+        }],
+    };
+    let with_prevout = |value_sats: u64, script: &ScriptBuf| {
+        let mut file = fixture_file();
+        file.blocks[TIP_INDEX]
+            .prevouts
+            .push(vec![sync_core::source::fixture::FixturePrevout {
+                value_sats,
+                script_pubkey_hex: script.to_hex_string(),
+            }]);
+        edit_block(&mut file, TIP_INDEX, |b| {
+            b.txdata.push(spender.clone());
+            fixture_gen::seal(b);
+        });
+        FixtureSource::from_file(file)
+    };
+
+    assert!(with_prevout(real.value.to_sat(), &real.script_pubkey).is_ok());
+    for (value, script) in [
+        (real.value.to_sat() + 1, real.script_pubkey.clone()),
+        (real.value.to_sat(), payment.output[1].script_pubkey.clone()),
+    ] {
+        match with_prevout(value, &script) {
+            Err(SourceError::InvalidData(msg)) => {
+                assert!(
+                    msg.contains("differs from the output created in this range"),
+                    "{msg}"
+                )
+            }
+            other => panic!("a lying prevout must be refused, got {other:?}"),
+        }
+    }
+}
+
+/// `scan_range` works in chunks; the result must not depend on it.
+#[test]
+fn stateless_scan_is_chunked_and_still_all_or_nothing() {
+    use sync_core::engine::SCAN_CHUNK_BLOCKS;
+    // Count fetches through a wrapper and check linkage across chunk borders
+    // with a source that serves the fork from the second chunk on.
+    struct Counting<'a>(&'a FixtureSource, std::cell::Cell<u32>);
+    impl ScanSource for Counting<'_> {
+        fn backend_id(&self) -> &str {
+            "counting"
+        }
+        fn capabilities(&self) -> SourceCapabilities {
+            self.0.capabilities()
+        }
+        fn chain(&self) -> ChainIdentity {
+            self.0.chain()
+        }
+        fn tip(&self) -> Result<BlockRef, SourceError> {
+            self.0.tip()
+        }
+        fn fetch_range(&self, from: u32, to: u32) -> Result<ScanBatch, SourceError> {
+            self.1.set(self.1.get() + 1);
+            assert!(
+                to - from < SCAN_CHUNK_BLOCKS,
+                "a chunk larger than the limit was requested"
+            );
+            self.0.fetch_range(from, to)
+        }
+    }
+    let src = source();
+    let counting = Counting(&src, std::cell::Cell::new(0));
+    let scanner = ReceiveScanner::new(&fixture_gen::lab_receiver_keys(), &[LABEL_USED]).unwrap();
+    let report = scan_range(&counting, &scanner, regtest(), 1, TIP).unwrap();
+    assert_eq!(report.detected_received_outputs.len(), 7);
+    assert_eq!(counting.1.get(), TIP.div_ceil(SCAN_CHUNK_BLOCKS));
+}

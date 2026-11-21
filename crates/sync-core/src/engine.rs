@@ -1,8 +1,8 @@
 //! Range scanning.
 //!
-//! Phase 1 scope: scan one contiguous block range from one source and report
-//! what was detected. There is no persistence, resume or reorg handling yet
-//! (Phase 3); the function is therefore called `scan_range`, not `sync`.
+//! [`scan_range`] is the stateless scan: one contiguous block range from one
+//! source, nothing stored. The persistent, resumable variant is `crate::sync`
+//! and builds on the same block scanning code.
 //!
 //! The engine does not trust a source to honour its own contract: a batch that
 //! is short, out of order, duplicated or not hash-linked is an error, and any
@@ -86,20 +86,51 @@ pub fn scan_range(
         return Err(ScanError::InvalidRange { from, to });
     }
 
-    let batch = source.fetch_range(from, to)?;
-    check_batch(&backend_id, &batch.blocks, from, to)?;
-
-    let (Some(first), Some(last)) = (batch.blocks.first(), batch.blocks.last()) else {
-        // `check_batch` guarantees `to - from + 1 >= 1` blocks.
+    // Fetched and scanned in chunks so that memory use does not grow with the
+    // size of the range; the result is all-or-nothing regardless.
+    let mut counters = ScanCounters::default();
+    let mut detected = Vec::new();
+    let mut seen_txids = BTreeSet::new();
+    let mut first_block: Option<BlockRef> = None;
+    let mut previous: Option<BlockRef> = None;
+    let mut next = from;
+    loop {
+        let last = to.min(next.saturating_add(SCAN_CHUNK_BLOCKS - 1));
+        let batch = source.fetch_range(next, last)?;
+        check_batch(&backend_id, &batch.blocks, next, last)?;
+        if let (Some(prev), Some(first)) = (previous, batch.blocks.first()) {
+            if first.block.prev_hash != prev.hash {
+                return Err(ScanError::InconsistentBatch {
+                    backend_id,
+                    reason: format!(
+                        "block {} does not link to block {} (the chain changed during the scan?)",
+                        first.block.height, prev.height
+                    ),
+                });
+            }
+        }
+        detected.extend(scan_blocks(
+            &backend_id,
+            chain,
+            scanner,
+            &batch.blocks,
+            &mut counters,
+            &mut seen_txids,
+        )?);
+        first_block = first_block.or(batch.blocks.first().map(|b| b.block));
+        previous = batch.blocks.last().map(|b| b.block);
+        if last == to {
+            break;
+        }
+        next = last + 1;
+    }
+    let (Some(first_block), Some(last_block)) = (first_block, previous) else {
+        // `check_batch` guarantees at least one block per chunk.
         return Err(ScanError::InconsistentBatch {
             backend_id,
             reason: "empty batch".to_string(),
         });
     };
-    let (first_block, last_block) = (first.block, last.block);
-
-    let mut counters = ScanCounters::default();
-    let detected = scan_blocks(&backend_id, chain, scanner, &batch.blocks, &mut counters)?;
 
     Ok(ScanReport {
         chain,
@@ -114,6 +145,9 @@ pub fn scan_range(
         detected_received_outputs: detected,
     })
 }
+
+/// Blocks fetched per request by [`scan_range`].
+pub const SCAN_CHUNK_BLOCKS: u32 = 100;
 
 /// Counters accumulated while scanning blocks.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -133,9 +167,9 @@ pub(crate) fn scan_blocks(
     scanner: &ReceiveScanner,
     blocks: &[BlockEvidence],
     counters: &mut ScanCounters,
+    seen_txids: &mut BTreeSet<Txid>,
 ) -> Result<Vec<DetectedOutput>, ScanError> {
     let mut detected = Vec::new();
-    let mut seen_txids = BTreeSet::<Txid>::new();
 
     for block in blocks {
         let provenance = MatchProvenance {
@@ -144,7 +178,7 @@ pub(crate) fn scan_blocks(
         };
         match &block.evidence {
             Evidence::FullBlock(txs) => {
-                check_full_block(backend_id, block.block.height, txs, &mut seen_txids)?;
+                check_full_block(backend_id, block.block.height, txs, seen_txids)?;
                 for entry in txs {
                     counters.txs_seen += 1;
                     let outcome =
@@ -179,6 +213,40 @@ pub(crate) fn scan_blocks(
                                 });
                             }
                         }
+                    }
+                }
+            }
+            Evidence::TweakIndex(indexed) => {
+                for entry in indexed {
+                    if !seen_txids.insert(entry.txid) {
+                        return Err(ScanError::InconsistentBatch {
+                            backend_id: backend_id.to_string(),
+                            reason: format!(
+                                "block {}: transaction {} appears more than once in the range",
+                                block.block.height, entry.txid
+                            ),
+                        });
+                    }
+                    counters.txs_seen += 1;
+                    counters.txs_scanned += 1;
+                    let mut matches = scanner.scan_indexed_tx(entry).map_err(|source| {
+                        ScanError::Transaction {
+                            height: block.block.height,
+                            txid: entry.txid,
+                            source,
+                        }
+                    })?;
+                    matches.sort_by_key(|m| m.outpoint.vout);
+                    for m in matches {
+                        detected.push(DetectedOutput {
+                            network: chain.network(),
+                            block: block.block,
+                            txid: m.outpoint.txid,
+                            vout: m.outpoint.vout,
+                            value_sats: m.amount.to_sat(),
+                            label: m.label,
+                            provenance: provenance.clone(),
+                        });
                     }
                 }
             }

@@ -10,6 +10,8 @@ publish.workspace = true
 # Bitcoin Core REST backend. Pulls in a small plain-HTTP client; off by default
 # so that the core stays free of network code unless a frontend asks for it.
 core-rest = ["dep:minreq"]
+# BlindBit Oracle v2 backend over its HTTP JSON interface (tweak index).
+blindbit-http = ["dep:minreq"]
 
 [dependencies]
 bdk_sp = { workspace = true }

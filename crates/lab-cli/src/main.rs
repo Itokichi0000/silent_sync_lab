@@ -21,15 +21,23 @@ use sync_core::{
     models::DetectedOutput,
     network::{ChainIdentity, LabNetwork},
     protocol::ReceiveScanner,
-    source::{bitcoin_core::CoreRestSource, fixture::FixtureSource, ScanSource},
+    source::{
+        bitcoin_core::CoreRestSource,
+        blindbit::BlindbitHttpSource,
+        fixture::FixtureSource,
+        local_index::{IndexPolicy, LocalTweakIndex},
+        ScanSource,
+    },
     store::{StoreMeta, SyncStore},
     sync::{new_store_meta, sync, SyncOptions, SyncReport},
+    verify::{cross_check, VerificationReport},
     EXPERIMENTAL_BANNER,
 };
 
-/// Exit code for "understood, but not implemented in this phase".
-const EXIT_NOT_IMPLEMENTED: u8 = 3;
 const DEFAULT_DB: &str = "silent-sync-lab.sqlite3";
+/// Exit code of `verify` when the two backends do not agree.
+const EXIT_DIFFERENCES: u8 = 4;
+const DEFAULT_ORACLE_URL: &str = "http://127.0.0.1:8000";
 
 #[derive(Parser)]
 #[command(
@@ -51,11 +59,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Report which backends are usable; probes Bitcoin Core when a URL is given.
+    /// Report which backends are usable; probes the services whose URLs are given.
     Doctor {
         /// REST URL of a local Bitcoin Core node to probe, e.g. http://127.0.0.1:18443.
         #[arg(long)]
         core_rest_url: Option<String>,
+        /// HTTP URL of a local BlindBit Oracle v2 to probe (needs --core-rest-url
+        /// too: the node supplies the headers the oracle is checked against).
+        #[arg(long)]
+        oracle_url: Option<String>,
     },
     /// Show the lab's test-only silent payment address.
     Address {
@@ -80,6 +92,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Scan the same range through two backends and explain every difference.
+    Verify(VerifyArgs),
     /// Inspect what was detected.
     Received {
         #[command(subcommand)]
@@ -152,6 +166,57 @@ struct SourceArgs {
     /// [default: http://127.0.0.1:18443 on regtest, http://127.0.0.1:38332 on signet].
     #[arg(long)]
     core_rest_url: Option<String>,
+    /// HTTP URL of a BlindBit Oracle v2 on this machine, for `--backend
+    /// oracle-v2`. Block identity is still taken from your own node
+    /// (`--core-rest-url`); the oracle only supplies the tweak index.
+    #[arg(long)]
+    oracle_url: Option<String>,
+    /// For `--backend local-index`: which transactions the simulated index lists.
+    #[arg(long, value_enum, default_value = "bip352")]
+    index_policy: IndexPolicyArg,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum IndexPolicyArg {
+    /// Exactly the transactions BIP352 says to scan.
+    Bip352,
+    /// Also transactions spending SegWit v2+ outputs (as BlindBit Oracle v2
+    /// was observed to list).
+    IgnoreSegwitVersionRule,
+}
+
+#[derive(clap::Args)]
+struct VerifyArgs {
+    /// The backend being checked.
+    #[command(flatten)]
+    candidate: SourceArgs,
+    /// The full-block backend to check against.
+    #[arg(long, value_enum)]
+    reference: ReferenceBackend,
+    /// Fixture file for `--reference fixture` [default: the candidate's --fixture].
+    #[arg(long)]
+    reference_fixture: Option<PathBuf>,
+    /// REST URL for `--reference core` [default: the candidate's --core-rest-url].
+    #[arg(long)]
+    reference_core_rest_url: Option<String>,
+    /// First height [default: 1].
+    #[arg(long)]
+    from: Option<u32>,
+    /// Last height [default: the reference's tip].
+    #[arg(long)]
+    to: Option<u32>,
+    /// Label integer to scan for in addition to the change label (repeatable).
+    #[arg(long = "label")]
+    labels: Vec<u32>,
+    /// Print the report as JSON on stdout.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ReferenceBackend {
+    Fixture,
+    Core,
 }
 
 #[derive(clap::Args)]
@@ -202,9 +267,13 @@ enum Backend {
     Fixture,
     /// Your own Bitcoin Core node, via its REST interface.
     Core,
-    /// BlindBit Oracle v2 (not implemented yet — Phase 4).
+    /// BlindBit Oracle v2 tweak index over HTTP, anchored by your own node's headers.
     #[value(name = "oracle-v2")]
     OracleV2,
+    /// A tweak index computed locally from full blocks (the fixture if
+    /// --fixture is given, otherwise your node). A model of an index server
+    /// for comparisons; nothing is fetched from a third party.
+    LocalIndex,
 }
 
 fn parse_network(value: &str) -> Result<LabNetwork, String> {
@@ -220,13 +289,6 @@ impl Failure {
     fn error(message: impl Into<String>) -> Self {
         Self {
             code: 1,
-            message: message.into(),
-        }
-    }
-
-    fn not_implemented(message: impl Into<String>) -> Self {
-        Self {
-            code: EXIT_NOT_IMPLEMENTED,
             message: message.into(),
         }
     }
@@ -269,7 +331,11 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), Failure> {
     let network = cli.network;
     match cli.command {
-        Command::Doctor { core_rest_url } => doctor(network, core_rest_url.as_deref()),
+        Command::Doctor {
+            core_rest_url,
+            oracle_url,
+        } => doctor(network, core_rest_url.as_deref(), oracle_url.as_deref()),
+        Command::Verify(args) => verify(network, args),
         Command::Address {
             action: AddressAction::Show { label },
         } => address_show(network, label),
@@ -313,16 +379,48 @@ fn open_source(network: LabNetwork, args: &SourceArgs) -> Result<Box<dyn ScanSou
                 .core_rest_url
                 .as_deref()
                 .unwrap_or_else(|| default_core_rest_url(network));
-            eprintln!("connecting to Bitcoin Core REST at {url}");
+            eprintln!("connecting to Bitcoin Core REST (loopback)");
             Box::new(
                 CoreRestSource::connect(url)
                     .map_err(|e| Failure::error(format!("{e}\nnothing was scanned")))?,
             )
         }
         Backend::OracleV2 => {
-            return Err(Failure::not_implemented(
-                "backend `oracle-v2` is not implemented yet (Phase 4). Nothing was scanned.",
-            ))
+            let core_url = args
+                .core_rest_url
+                .as_deref()
+                .unwrap_or_else(|| default_core_rest_url(network));
+            let oracle_url = args.oracle_url.as_deref().unwrap_or(DEFAULT_ORACLE_URL);
+            eprintln!("connecting to BlindBit Oracle (loopback); headers from Bitcoin Core REST");
+            let headers = CoreRestSource::connect(core_url)
+                .map_err(|e| Failure::error(format!("header source: {e}\nnothing was scanned")))?;
+            Box::new(
+                BlindbitHttpSource::connect(oracle_url, headers)
+                    .map_err(|e| Failure::error(format!("{e}\nnothing was scanned")))?,
+            )
+        }
+        Backend::LocalIndex => {
+            let policy = match args.index_policy {
+                IndexPolicyArg::Bip352 => IndexPolicy::Bip352,
+                IndexPolicyArg::IgnoreSegwitVersionRule => IndexPolicy::IgnoreSegwitVersionRule,
+            };
+            match args.fixture.as_deref() {
+                Some(path) => Box::new(LocalTweakIndex::new(
+                    FixtureSource::from_path(path).map_err(fail)?,
+                    policy,
+                )),
+                None => {
+                    let url = args
+                        .core_rest_url
+                        .as_deref()
+                        .unwrap_or_else(|| default_core_rest_url(network));
+                    Box::new(LocalTweakIndex::new(
+                        CoreRestSource::connect(url)
+                            .map_err(|e| Failure::error(format!("{e}\nnothing was scanned")))?,
+                        policy,
+                    ))
+                }
+            }
         }
     };
     let expected = ChainIdentity::for_network(network);
@@ -336,39 +434,81 @@ fn open_source(network: LabNetwork, args: &SourceArgs) -> Result<Box<dyn ScanSou
     Ok(source)
 }
 
-fn doctor(network: LabNetwork, core_rest_url: Option<&str>) -> Result<(), Failure> {
-    let core = match core_rest_url {
-        None => format!(
+fn doctor(
+    network: LabNetwork,
+    core_rest_url: Option<&str>,
+    oracle_url: Option<&str>,
+) -> Result<(), Failure> {
+    // `Err` = a backend the user asked about cannot be used.
+    let core: Result<String, String> = match core_rest_url {
+        None => Ok(format!(
             "not probed (needs your own Bitcoin Core >= 30 with -rest=1; pass \
              --core-rest-url, e.g. {})",
             default_core_rest_url(network)
-        ),
-        Some(url) => match CoreRestSource::connect(url).and_then(|s| Ok((s.chain(), s.tip()?))) {
-            Ok((chain, tip)) if chain.network() == network => {
-                format!(
-                    "reachable at {url}: {} at height {}",
-                    chain.network(),
-                    tip.height
-                )
-            }
-            Ok((chain, _)) => format!(
-                "UNUSABLE: node at {url} is on {}, but --network is {network}",
+        )),
+        Some(url) => match CoreRestSource::connect(url).and_then(|s| {
+            let tip = s.tip()?;
+            Ok((s.chain(), tip, s.is_pruned()))
+        }) {
+            Ok((chain, tip, pruned)) if chain.network() == network => Ok(format!(
+                "reachable: {} at height {}{}",
+                chain.network(),
+                tip.height,
+                if pruned {
+                    " (PRUNED: blocks below the prune height cannot be scanned)"
+                } else {
+                    ""
+                }
+            )),
+            Ok((chain, _, _)) => Err(format!(
+                "UNUSABLE: the node is on {}, but --network is {network}",
                 chain.network()
-            ),
-            Err(e) => format!("UNAVAILABLE: {e}"),
+            )),
+            Err(e) => Err(format!("UNAVAILABLE: {e}")),
         },
     };
+    let oracle: Result<String, String> = match oracle_url {
+        None => Ok("not probed (pass --oracle-url and --core-rest-url)".to_string()),
+        Some(url) => {
+            let core_url = core_rest_url.unwrap_or_else(|| default_core_rest_url(network));
+            CoreRestSource::connect(core_url)
+                .and_then(|headers| BlindbitHttpSource::connect(url, headers))
+                .and_then(|s| {
+                    let tip = s.tip()?;
+                    // Does the oracle have, and agree on, the node's tip block?
+                    s.fetch_range(tip.height, tip.height)?;
+                    Ok(tip)
+                })
+                .map(|tip| {
+                    format!(
+                        "reachable: indexes the node's chain up to its tip (height {})",
+                        tip.height
+                    )
+                })
+                .map_err(|e| format!("UNAVAILABLE: {e}"))
+        }
+    };
+    let usable = core.is_ok() && oracle.is_ok();
+    let core = core.unwrap_or_else(|e| e);
+    let oracle = oracle.unwrap_or_else(|e| e);
     let lines = [
         format!("silent-sync {}", env!("CARGO_PKG_VERSION")),
         format!("network           : {network} (mainnet is refused by design)"),
         format!("receiver          : {}", lab_keys::DESCRIPTION),
         "backend fixture   : available (offline, structurally validated only)".to_string(),
         format!("backend core      : {core}"),
-        "backend oracle-v2 : NOT IMPLEMENTED (Phase 4)".to_string(),
+        format!("backend oracle-v2 : {oracle}"),
+        "backend local-index: available (tweak index computed locally from full blocks)"
+            .to_string(),
         "persistence       : SQLite store (`lab init`, `sync`, `status`, `received list`)"
             .to_string(),
     ];
-    emit(&(lines.join("\n") + "\n"))
+    emit(&(lines.join("\n") + "\n"))?;
+    if usable {
+        Ok(())
+    } else {
+        Err(Failure::error("a probed backend is not usable (see above)"))
+    }
 }
 
 fn address_show(network: LabNetwork, label: Option<u32>) -> Result<(), Failure> {
@@ -426,6 +566,118 @@ fn scan(network: LabNetwork, args: ScanArgs) -> Result<(), Failure> {
     } else {
         emit(&render_scan_report(&report))
     }
+}
+
+fn verify(network: LabNetwork, args: VerifyArgs) -> Result<(), Failure> {
+    let candidate = open_source(network, &args.candidate)?;
+    let reference_args = SourceArgs {
+        backend: match args.reference {
+            ReferenceBackend::Fixture => Backend::Fixture,
+            ReferenceBackend::Core => Backend::Core,
+        },
+        fixture: args
+            .reference_fixture
+            .or_else(|| args.candidate.fixture.clone()),
+        core_rest_url: args
+            .reference_core_rest_url
+            .or_else(|| args.candidate.core_rest_url.clone()),
+        oracle_url: None,
+        index_policy: IndexPolicyArg::Bip352,
+    };
+    let reference = open_source(network, &reference_args)?;
+    let keys = lab_keys::lab_receiver_keys().map_err(Failure::error)?;
+    let scanner = ReceiveScanner::new(&keys, &args.labels).map_err(fail)?;
+    let from = args.from.unwrap_or(1);
+    let to = match args.to {
+        Some(to) => to,
+        None => reference.tip().map_err(fail)?.height,
+    };
+    eprintln!(
+        "cross-checking `{}` against `{}` over {from}..={to} ({network})",
+        candidate.backend_id(),
+        reference.backend_id()
+    );
+    let report = cross_check(
+        candidate.as_ref(),
+        reference.as_ref(),
+        &scanner,
+        ChainIdentity::for_network(network),
+        from,
+        to,
+    )
+    .map_err(|e| Failure::error(format!("{e}\nverification aborted: no result")))?;
+
+    if args.json {
+        emit_json(&report)?;
+    } else {
+        emit(&render_verification(&report))?;
+    }
+    if report.identical {
+        Ok(())
+    } else {
+        Err(Failure {
+            code: EXIT_DIFFERENCES,
+            message: format!(
+                "the backends differ: {} only in the candidate, {} only in the reference, {} unexplained",
+                report.candidate_only, report.reference_only, report.unexplained
+            ),
+        })
+    }
+}
+
+fn render_verification(report: &VerificationReport) -> String {
+    let mut out = String::new();
+    let mut line = |text: String| {
+        let _ = writeln!(out, "{text}");
+    };
+    line(format!(
+        "candidate            : {}",
+        report.candidate_backend
+    ));
+    line(format!(
+        "reference            : {}",
+        report.reference_backend
+    ));
+    line(format!("network              : {}", report.chain.network()));
+    line(format!(
+        "range                : {}..={}",
+        report.first_height, report.last_height
+    ));
+    line(format!(
+        "labels scanned       : {:?}",
+        report.labels_scanned
+    ));
+    line(format!("agreed outputs       : {}", report.agreed));
+    line(format!("only in candidate    : {}", report.candidate_only));
+    line(format!("only in reference    : {}", report.reference_only));
+    line(format!("unexplained          : {}", report.unexplained));
+    if !report.block_hash_mismatches.is_empty() {
+        line(format!(
+            "block hash mismatches: heights {:?}",
+            report.block_hash_mismatches
+        ));
+    }
+    for d in &report.differences {
+        let explanation = serde_json::to_string(&d.explanation).unwrap_or_default();
+        line(format!(
+            "  height {:>4}  {}:{}  {}",
+            d.height, d.txid, d.vout, explanation
+        ));
+    }
+    line(format!(
+        "verdict              : {}",
+        if report.identical {
+            "identical"
+        } else {
+            "DIFFERENT"
+        }
+    ));
+    line(
+        "note: agreement shows the candidate served what the reference shows for this receiver; \
+         it does not prove either is complete."
+            .to_string(),
+    );
+    out
 }
 
 fn lab_init(

@@ -20,6 +20,7 @@ pub mod protocol;
 pub mod source;
 pub mod store;
 pub mod sync;
+pub mod verify;
 
 /// Re-export of the exact `bitcoin` crate version used by the upstream scanner,
 /// so downstream crates cannot accidentally mix incompatible versions.

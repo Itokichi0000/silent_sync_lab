@@ -28,15 +28,15 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      # Fast unit + integration tests only. Tests that need Bitcoin Core will
-      # live in a separate job once Phase 2 exists.
+      # Fast unit + integration tests only. Tests that need Bitcoin Core are
+      # `#[ignore]`d here and run in the regtest-e2e job below.
       - name: Test
         run: cargo test --workspace --locked
 
   # End-to-end tests against a real Bitcoin Core regtest node. They are
   # `#[ignore]`d in the normal suite because they need the binary.
   regtest-e2e:
-    name: regtest end-to-end (Bitcoin Core)
+    name: regtest end-to-end (Bitcoin Core, BlindBit Oracle)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -51,5 +51,9 @@ jobs:
         run: |
           exe="$(VERIFY_SIGNATURES=1 scripts/fetch_bitcoind.sh "$RUNNER_TEMP/bitcoind")"
           echo "BITCOIND_EXE=$exe" >> "$GITHUB_ENV"
+      - name: Build BlindBit Oracle v2 (pinned commit)
+        run: |
+          exe="$(scripts/build_blindbit_oracle.sh "$RUNNER_TEMP/oracle")"
+          echo "BLINDBIT_ORACLE_EXE=$exe" >> "$GITHUB_ENV"
       - name: End-to-end tests
         run: cargo test --workspace --locked -- --ignored

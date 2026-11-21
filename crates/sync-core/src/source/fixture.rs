@@ -16,7 +16,7 @@
 //! nothing about a real chain.
 
 use super::{
-    block_check::{check_full_block, BlockExpectation},
+    block_check::{check_full_block, check_prevouts_within_range, BlockExpectation},
     BlockEvidence, Evidence, ScanBatch, ScanSource, SourceCapabilities, SourceError,
     TxWithPrevouts,
 };
@@ -145,6 +145,7 @@ impl FixtureSource {
             });
         }
 
+        check_prevouts_within_range(&blocks).map_err(invalid)?;
         Ok(Self {
             chain,
             blocks,
