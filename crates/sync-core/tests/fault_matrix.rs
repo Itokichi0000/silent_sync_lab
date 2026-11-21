@@ -51,6 +51,9 @@ fn every_fault_has_the_documented_verdict() {
         ("I14", Refused),
         ("I15", Refused),
         ("I16", Refused),
+        // Claims no block can satisfy are refused, whoever they concern.
+        ("I17", Refused),
+        ("I18", Refused),
         // Structure of a response.
         ("B01", Refused),
         ("B02", Refused),

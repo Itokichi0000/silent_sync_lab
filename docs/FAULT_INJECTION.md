@@ -46,7 +46,7 @@ EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
 | I04 | T11 | tweak index (BlindBit Oracle HTTP) | the amount of a paying output is altered | **scan succeeds**: 1 payment(s) with a wrong amount | differences: `details_differ` | NOT detected alone; shown by a cross-check |
 | I05 | T11 | tweak index (BlindBit Oracle HTTP) | the output key of a paying output is altered | **scan succeeds**: 1 payment(s) missing | differences: `candidate_output_differs` | NOT detected alone; shown by a cross-check |
 | I06 | T11 | tweak index (BlindBit Oracle HTTP) | a paying entry is copied under a transaction id that is not in the block (fabricated payment) | **scan succeeds**: 1 non-existent payment(s) reported | differences: `reference_transaction_missing` | NOT detected alone; shown by a cross-check |
-| I07 | T11 | tweak index (BlindBit Oracle HTTP) | a paying entry is replayed in a later block under its own transaction id | scan fails (inconsistent batch) | differences: `reference_transaction_missing` | refused (fail-closed) |
+| I07 | T11 | tweak index (BlindBit Oracle HTTP) | a paying entry is replayed in a later block under its own transaction id | scan fails (inconsistent batch) | fails (inconsistent batch) | refused (fail-closed) |
 | I08 | T11 | tweak index (BlindBit Oracle HTTP) | an index entry is listed twice in the same block | scan fails (inconsistent batch) | fails (inconsistent batch) | refused (fail-closed) |
 | I09 | T11 | tweak index (BlindBit Oracle HTTP) | the entries of a block are served in reverse order | scan succeeds with the honest result for the range the source reports | identical | no effect |
 | I10 | T11 | tweak index (BlindBit Oracle HTTP) | an entry for a transaction that pays someone else is removed | scan succeeds with the honest result for the range the source reports | identical | no effect |
@@ -56,6 +56,8 @@ EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
 | I14 | T12 | tweak index (BlindBit Oracle HTTP) | the oracle stops answering block requests (HTTP 404) | scan fails (source unavailable) | fails (source unavailable) | refused (fail-closed) |
 | I15 | T11 | tweak index (BlindBit Oracle HTTP) | the oracle says it indexes mainnet | scan fails (network refused) | fails (network refused) | refused (fail-closed) |
 | I16 | T11 | tweak index (BlindBit Oracle HTTP) | a tweak is not a point on the curve | scan fails (invalid data) | fails (invalid data) | refused (fail-closed) |
+| I17 | T11 | tweak index (BlindBit Oracle HTTP) | the amount of a paying output is set above the total supply | scan fails (inconsistent batch) | fails (inconsistent batch) | refused (fail-closed) |
+| I18 | T11 | tweak index (BlindBit Oracle HTTP) | an index entry lists no outputs | scan fails (inconsistent batch) | fails (inconsistent batch) | refused (fail-closed) |
 | B01 | T11 | any source (batch handed to the engine) | the blocks of a response are in the wrong order | scan fails (inconsistent batch) | fails (inconsistent batch) | refused (fail-closed) |
 | B02 | T11 | any source (batch handed to the engine) | a block appears twice in a response | scan fails (inconsistent batch) | fails (inconsistent batch) | refused (fail-closed) |
 | B03 | T11 | any source (batch handed to the engine) | the last block of a response is missing (partial response) | scan fails (inconsistent batch) | fails (inconsistent batch) | refused (fail-closed) |
@@ -74,10 +76,12 @@ EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
    - 省略（I01〜I03、I05）: 入金を黙って見逃す。設計書 §5.5 のとおり。
    - **金額の改変（I04）: 誤った金額のまま「検出」として報告される。**
    - **捏造（I06）: 存在しない入金が「検出」として報告される。** インデックスの項目（txid・vout・金額・出力鍵）は、ヘッダにコミットされたブロック内容と結び付けられていない。
-     捏造には受信者宛ての正しい出力鍵が要るため、作れるのは実在の支払いの項目を知っている者（インデックスサーバ自身、または送信者と結託したサーバ）に限られるが、ウォレット側では区別できない。
+     捏造に受信者の秘密は要らない。**受信者のアドレスを知っている者なら誰でも**、存在しない tx に対する「正しくマッチする」項目を作れる（テスト `an_index_can_fabricate_a_payment_and_only_a_cross_check_shows_it`）。アドレスは支払いを受けるために公開するものなので、これはインデックスサーバにとって現実的に可能な嘘である。
    - したがって **tweak インデックス由来の検出は「サーバがそう言った」以上の意味を持たない**。検出結果には証拠の種類（`tweak_index`）を必ず付けており、フルブロック由来の検出と同じ確度として扱ってはならない。
 4. **インデックス型でも、ブロックの同一性に関わる不正は拒否する**（I11〜I15）。ブロックの高さとハッシュは自分のノードのヘッダから取り、Oracle の申告と一致しなければ失敗にする。Oracle が遅れている・停止している場合も「空のブロック」とは扱わない。
 5. **応答の構造の乱れ（順序違い・重複・欠落・部分応答）はすべて拒否する**（B01〜B04、I07、I08）。
+   どのブロックにも当てはまり得ない申告（総発行量を超える金額、出力を持たない項目、1 ブロックに入り切らない数の出力）も拒否する（I17、I18）。
+   ただしこれは「あり得ない値」を落とすだけで、あり得る範囲の嘘（I04 の金額改変）は通る。
 6. 順序の入れ替え（I09）と、自分宛てでない項目の省略（I10）は結果に影響しない。I10 は「このウォレットにとっては」無害というだけで、サーバが正直である証拠にはならない。
 
 ## 永続同期での挙動（同期スイートで検査）
@@ -97,7 +101,7 @@ EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
 - **突き合わせ（cross-check）は、参照側が正直で完全であることを前提にしている。** 参照も同じ嘘をつけば差分は出ない。
   自分で運用していない 2 つのサーバの一致は、独立した正しさの証明にならない（設計書 §5.6）。
 - 「範囲より前の prevout の嘘」（F05）は、参照側のノードが同じ嘘をつく場合は検出できない。表の F05 が「突き合わせで分かる」になっているのは、参照が正直な別ソースだからである。
-- ここで注入したのは 31 種類の不正だけで、網羅ではない。特に、時間的な攻撃（応答を遅らせて古い先端を見せ続ける等）、リソース枯渇、
+- ここで注入したのは 33 種類の不正だけで、網羅ではない。特に、時間的な攻撃（応答を遅らせて古い先端を見せ続ける等）、リソース枯渇、
   複数の不正の組み合わせは扱っていない。
 - 対象は 8 ブロックの fixture。規模に依存する不具合（チャンク境界など）は `crates/sync-core/tests/long_chain.rs` で別に検査している。
 - リモートのサーバに対するプライバシー上の露出（IP アドレス、接続時刻、要求範囲）は故障注入の対象外。`docs/THREAT_MODEL.md` を参照。

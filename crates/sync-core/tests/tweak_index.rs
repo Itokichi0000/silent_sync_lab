@@ -315,36 +315,16 @@ fn omissions_and_alterations_by_an_index_are_silent_until_cross_checked() {
 /// An index that knows the receiver's *address* can invent a payment: it
 /// picks tweak data whose secret it knows and derives a matching output, for
 /// a transaction that does not exist. The scanner has no way to notice.
+/// (The entry is built in `lab-testkit`, the only place sending functions
+/// are used.)
 #[test]
 fn an_index_can_fabricate_a_payment_and_only_a_cross_check_shows_it() {
-    use bdk_sp::send::{create_silentpayment_partial_secret, create_silentpayment_scriptpubkeys};
     let blocks = full_blocks();
     let scanner = scanner();
     let receiver = fixture_gen::lab_receiver_keys().address(LabNetwork::Regtest);
-
-    // "Sender side" without any real input: a made-up key and outpoint.
     let fake_txid = Txid::from_byte_array([0x42; 32]);
-    let secret = sync_core::bitcoin::secp256k1::SecretKey::from_slice(&[0x11; 32]).unwrap();
-    let pubkey = secret.public_key(&sync_core::bitcoin::key::Secp256k1::new());
-    let p2wpkh = sync_core::bitcoin::ScriptBuf::new_p2wpkh(
-        &sync_core::bitcoin::CompressedPublicKey(pubkey).wpubkey_hash(),
-    );
-    let mut outpoint = [0u8; 36];
-    outpoint[..32].copy_from_slice(&[0x99; 32]);
-    let partial = create_silentpayment_partial_secret(&outpoint, &[(p2wpkh, secret)]).unwrap();
-    let code = regtest_wallet::upstream_code(receiver);
-    let key = create_silentpayment_scriptpubkeys(partial, std::slice::from_ref(&code))[&code][0];
-    // The public tweak data that goes with it: partial_secret · G.
-    let tweak = partial.public_key(&sync_core::bitcoin::key::Secp256k1::new());
-    let fabricated = IndexedTx {
-        txid: fake_txid,
-        tweak,
-        outputs: vec![IndexedOutput {
-            vout: 0,
-            value_sats: 21_000_000,
-            output_key: key.serialize(),
-        }],
-    };
+    let fabricated =
+        regtest_wallet::fabricated_index_entry(fake_txid, receiver, &[(0, 21_000_000)]);
 
     let lying = Tamper::new(index(IndexPolicy::Bip352), move |b: &mut ScanBatch| {
         if let Some(i) = b.blocks.iter().position(|blk| blk.block.height == 4) {
@@ -458,4 +438,202 @@ fn cross_check_refuses_mismatched_chains_and_reports_block_hash_differences() {
         ),
         Err(ScanError::Source(_))
     ));
+}
+
+/// What the engine refuses from any index before scanning it: claims that
+/// cannot be true of a block, whatever the receiver's keys are.
+#[test]
+fn impossible_index_claims_are_refused() {
+    let scanner = scanner();
+    let refused = |tamper: &dyn Fn(&mut Vec<IndexedTx>), needle: &str| {
+        let lying = Tamper::new(index(IndexPolicy::Bip352), |b: &mut ScanBatch| {
+            if let Some(i) = b.blocks.iter().position(|blk| blk.block.height == 2) {
+                tamper(indexed(b, i));
+            }
+        });
+        match scan_range(&lying, &scanner, regtest(), 1, TIP) {
+            Err(ScanError::InconsistentBatch { reason, .. }) => {
+                assert!(
+                    reason.contains(needle),
+                    "`{reason}` should mention `{needle}`"
+                )
+            }
+            other => panic!("expected a refusal mentioning `{needle}`, got {other:?}"),
+        }
+    };
+    let max_sats = sync_core::bitcoin::Amount::MAX_MONEY.to_sat();
+
+    // An entry without outputs: an index lists a transaction for its outputs.
+    refused(&|txs| txs[0].outputs.clear(), "lists no outputs");
+    // More money than exists — in the output that pays us, or in any other.
+    refused(
+        &|txs| txs[0].outputs[0].value_sats = max_sats + 1,
+        "more than can exist",
+    );
+    refused(
+        &|txs| txs[0].outputs[1].value_sats = u64::MAX,
+        "more than can exist",
+    );
+    // More outputs than a block can hold (bounds the work an index can cause).
+    refused(
+        &|txs| {
+            let filler = txs[0].outputs[1].clone();
+            let limit = sync_core::engine::MAX_INDEXED_OUTPUTS_PER_BLOCK as u32;
+            txs[0].outputs.extend((0..limit).map(|n| IndexedOutput {
+                vout: 10 + n,
+                ..filler.clone()
+            }));
+        },
+        "more than a block can hold",
+    );
+
+    // Exactly at the limits nothing is refused.
+    let at_limits = Tamper::new(index(IndexPolicy::Bip352), move |b: &mut ScanBatch| {
+        if let Some(i) = b.blocks.iter().position(|blk| blk.block.height == 2) {
+            let txs = indexed(b, i);
+            txs[0].outputs[1].value_sats = max_sats;
+            let filler = txs[0].outputs[1].clone();
+            let room = sync_core::engine::MAX_INDEXED_OUTPUTS_PER_BLOCK - txs[0].outputs.len();
+            txs[0]
+                .outputs
+                .extend((0..room as u32).map(|n| IndexedOutput {
+                    vout: 10 + n,
+                    ..filler
+                }));
+        }
+    });
+    assert_eq!(
+        scan_range(&at_limits, &scanner, regtest(), 1, TIP)
+            .unwrap()
+            .detected_received_outputs
+            .len(),
+        7
+    );
+}
+
+/// The local index lists taproot outputs only, with their real positions.
+#[test]
+fn the_local_index_lists_only_taproot_outputs() {
+    let batch = index(IndexPolicy::Bip352).fetch_range(2, 2).unwrap();
+    let Evidence::TweakIndex(entries) = &batch.blocks[0].evidence else {
+        panic!("index evidence expected");
+    };
+    // Block 2's payment: outputs 0 (silent payment) and 2 (unrelated taproot)
+    // are listed; output 1 (P2WPKH change) is not.
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0]
+            .outputs
+            .iter()
+            .map(|o| o.vout)
+            .collect::<Vec<_>>(),
+        vec![0, 2]
+    );
+    assert_eq!(
+        entries[0]
+            .outputs
+            .iter()
+            .map(|o| o.value_sats)
+            .collect::<Vec<_>>(),
+        vec![50_000, 9_000]
+    );
+    // A P2WSH output is as long as a taproot one (34 bytes) and must still
+    // not be listed: the payment gets such an output appended.
+    let with_p2wsh = Tamper::new(full_blocks(), |b: &mut ScanBatch| {
+        for block in &mut b.blocks {
+            if let (2, Evidence::FullBlock(txs)) = (block.block.height, &mut block.evidence) {
+                let mut script = vec![0x00, 0x20];
+                script.extend([0x77; 32]);
+                txs[1].tx.output.push(sync_core::bitcoin::TxOut {
+                    value: sync_core::bitcoin::Amount::from_sat(1_234),
+                    script_pubkey: sync_core::bitcoin::ScriptBuf::from_bytes(script),
+                });
+            }
+        }
+    });
+    let batch = LocalTweakIndex::new(with_p2wsh, IndexPolicy::Bip352)
+        .fetch_range(2, 2)
+        .unwrap();
+    let Evidence::TweakIndex(entries) = &batch.blocks[0].evidence else {
+        panic!("index evidence expected");
+    };
+    assert_eq!(
+        entries[0]
+            .outputs
+            .iter()
+            .map(|o| o.vout)
+            .collect::<Vec<_>>(),
+        vec![0, 2],
+        "the P2WSH output at position 3 is not a taproot output"
+    );
+}
+
+/// Detections of one transaction are reported by output index, whatever
+/// order the matching (by `k`) finds them in.
+#[test]
+fn detections_of_one_transaction_are_ordered_by_output_index() {
+    let receiver = fixture_gen::lab_receiver_keys().address(LabNetwork::Regtest);
+    let txid = Txid::from_byte_array([0x43; 32]);
+    // k = 0 sits at output 5, k = 1 at output 2.
+    let entry = regtest_wallet::fabricated_index_entry(txid, receiver, &[(5, 500), (2, 200)]);
+    let source = Tamper::new(index(IndexPolicy::Bip352), move |b: &mut ScanBatch| {
+        if let Some(i) = b.blocks.iter().position(|blk| blk.block.height == 4) {
+            indexed(b, i).push(entry.clone());
+        }
+    });
+    let report = scan_range(&source, &scanner(), regtest(), 4, 4).unwrap();
+    let found: Vec<(u32, u64)> = report
+        .detected_received_outputs
+        .iter()
+        .filter(|d| d.txid == txid)
+        .map(|d| (d.vout, d.value_sats))
+        .collect();
+    assert_eq!(found, vec![(2, 200), (5, 500)]);
+}
+
+/// The two index policies detect different outputs, so a store made with one
+/// is not continued with the other.
+#[test]
+fn a_store_is_bound_to_the_index_policy() {
+    let strict = index(IndexPolicy::Bip352);
+    let lenient = index(IndexPolicy::IgnoreSegwitVersionRule);
+    assert_ne!(strict.backend_id(), lenient.backend_id());
+
+    let keys = fixture_gen::lab_receiver_keys();
+    let scanner = scanner();
+    let mut store = MemoryStore::new();
+    store
+        .initialize(&new_store_meta(
+            &strict,
+            &scanner,
+            &keys.wallet_id(),
+            1,
+            "test",
+        ))
+        .unwrap();
+    let half = SyncOptions {
+        target_height: Some(5),
+        ..SyncOptions::default()
+    };
+    sync(&strict, &scanner, &keys.wallet_id(), &mut store, &half).unwrap();
+    let before = store.detections().unwrap();
+
+    let result = sync(
+        &lenient,
+        &scanner,
+        &keys.wallet_id(),
+        &mut store,
+        &SyncOptions::default(),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(sync_core::sync::SyncError::BindingMismatch {
+                field: "backend",
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(store.detections().unwrap(), before);
 }

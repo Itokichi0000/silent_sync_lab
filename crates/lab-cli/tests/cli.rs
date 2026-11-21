@@ -201,7 +201,11 @@ fn scan_fails_closed() {
     let (output, stdout, stderr) = run(&sync_args(&["--network", "signet"]));
     assert_eq!(output.status.code(), Some(1));
     assert!(stdout.is_empty());
-    assert!(stderr.contains("chain mismatch"), "{stderr}");
+    assert!(
+        stderr.contains("chain mismatch: --network is signet but source `fixture` serves regtest")
+            && stderr.contains("nothing was scanned"),
+        "{stderr}"
+    );
 
     // Missing / unreadable fixture.
     let (output, stdout, _) = run(&["scan", "--backend", "fixture"]);

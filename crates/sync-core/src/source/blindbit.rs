@@ -49,7 +49,7 @@ pub struct BlindbitHttpSource<H> {
 struct Info {
     network: String,
     height: u32,
-    #[serde(default)]
+    // Required: an answer without it is not from an oracle this adapter knows.
     tweaks_only: bool,
 }
 
@@ -70,7 +70,7 @@ struct FullBlock {
 struct FullBlockTx {
     txid: Txid,
     tweak: PublicKey,
-    #[serde(default)]
+    // Required: the oracle lists a transaction because it has outputs for it.
     utxos: Vec<FullBlockUtxo>,
 }
 
@@ -122,8 +122,9 @@ impl<H: ScanSource> BlindbitHttpSource<H> {
 
     fn info(&self) -> Result<Info, SourceError> {
         let body = self.http.get("/info")?;
-        serde_json::from_slice(&body)
-            .map_err(|e| SourceError::InvalidData(format!("oracle /info: {e}")))
+        serde_json::from_slice(&body).map_err(|e| {
+            SourceError::InvalidData(format!("oracle /info: {}", printable(&e.to_string())))
+        })
     }
 
     /// The oracle's index for `expected`, after checking it is for that block.
@@ -131,7 +132,8 @@ impl<H: ScanSource> BlindbitHttpSource<H> {
         let height = expected.height;
         let at = |e: String| SourceError::InvalidData(format!("oracle block {height}: {e}"));
         let body = self.http.get(&format!("/full-block/{height}"))?;
-        let parsed: FullBlock = serde_json::from_slice(&body).map_err(|e| at(e.to_string()))?;
+        let parsed: FullBlock =
+            serde_json::from_slice(&body).map_err(|e| at(printable(&e.to_string())))?;
 
         if parsed.block_identifier.block_height != height {
             return Err(at(format!(
@@ -233,8 +235,7 @@ impl<H: ScanSource> ScanSource for BlindbitHttpSource<H> {
             });
         }
         let mut blocks = Vec::new();
-        for height in from..=to {
-            let block = self.headers.block_ref(height)?;
+        for block in self.headers.block_refs(from, to)? {
             let indexed = self.indexed_block(block)?;
             blocks.push(BlockEvidence {
                 block,

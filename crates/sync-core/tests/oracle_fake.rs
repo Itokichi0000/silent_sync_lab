@@ -286,6 +286,54 @@ fn malformed_oracle_answers_are_refused() {
     );
     assert!(matches!(setup.connect(), Err(SourceError::Unavailable(_))));
 
+    // Fields an answer of the known shape always has.
+    assert_refused(
+        edit(&|v| {
+            v["index"][0].as_object_mut().unwrap().remove("utxos");
+        }),
+        "oracle block 3:",
+    );
+    assert_refused(
+        edit(&|v| v["index"][0]["utxos"] = serde_json::json!([])),
+        "lists no outputs",
+    );
+    // More money than exists.
+    assert_refused(
+        edit(&|v| v["index"][0]["utxos"][0]["amount"] = serde_json::json!(u64::MAX)),
+        "more than can exist",
+    );
+    let setup = Setup::new();
+    setup
+        .oracle
+        .http
+        .set("/info", br#"{"network":"regtest","height":8}"#.to_vec());
+    assert!(
+        matches!(setup.connect(), Err(SourceError::InvalidData(m)) if m.contains("tweaks_only"))
+    );
+    // Error text taken from an answer is bounded, however large the answer.
+    let setup = Setup::new();
+    setup.oracle.http.set(
+        "/info",
+        format!(
+            r#"{{"network":"regtest","height":"{}","tweaks_only":false}}"#,
+            "A".repeat(100_000)
+        )
+        .into_bytes(),
+    );
+    let message = setup.connect().err().unwrap().to_string();
+    assert!(message.len() < 400, "{} bytes of error text", message.len());
+    let setup = Setup::new();
+    setup.node.set(
+        "/rest/chaininfo.json",
+        format!(
+            r#"{{"chain":"regtest","blocks":"{}"}}"#,
+            "B".repeat(100_000)
+        )
+        .into_bytes(),
+    );
+    let message = setup.connect().err().unwrap().to_string();
+    assert!(message.len() < 400, "{} bytes of error text", message.len());
+
     // `index: null` with a correct hash is an empty block, not an error.
     let node_hash = honest.node.hashes[1];
     let mut empty: serde_json::Value =
@@ -312,4 +360,38 @@ fn only_loopback_oracles_are_contacted() {
             other => panic!("{url} must be refused, got {:?}", other.map(|_| ())),
         }
     }
+}
+
+/// The header source is asked once per fetched range, not once per block.
+#[test]
+fn block_identity_for_a_range_costs_one_header_lookup() {
+    use lab_testkit::fixture_gen::LongChain;
+    let fixture = fixture_gen::generate_long(&LongChain::standard(150));
+    let node = FakeCoreRest::serve(&fixture);
+    let index = LocalTweakIndex::new(
+        FixtureSource::from_file(fixture).unwrap(),
+        IndexPolicy::Bip352,
+    )
+    .fetch_range(1, 150)
+    .unwrap()
+    .blocks;
+    let oracle_server = FakeOracle::serve("regtest", &index);
+    let oracle = BlindbitHttpSource::connect(
+        &oracle_server.url(),
+        CoreRestSource::connect(&node.url()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(oracle.tip().unwrap().height, 150);
+
+    let before = oracle.header_source().stats().requests;
+    let report = scan_range(&oracle, &scanner(), regtest(), 1, 150).unwrap();
+    let header_requests = oracle.header_source().stats().requests - before;
+    assert_eq!(report.detected_received_outputs.len(), 15);
+    // Two chunks (100 + 50 blocks): one freshness check each.
+    assert_eq!(
+        header_requests, 2,
+        "header lookups must not grow with the range"
+    );
+    // The backend's own counters cover both connections.
+    assert!(oracle.stats().requests >= 150 + header_requests);
 }

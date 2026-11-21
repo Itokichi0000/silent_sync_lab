@@ -228,3 +228,165 @@ fn sync_and_tweak_index_agree_with_the_full_scan_on_a_long_chain() {
     assert!(report.identical, "{:?}", report.differences);
     assert_eq!(report.agreed, expected.len() as u64);
 }
+
+/// `cross_check` holds both sides to the rules of a plain scan: a chunk that
+/// does not link, a short batch or a transaction listed twice in the range is
+/// an error, not "identical".
+#[test]
+fn cross_check_applies_the_range_rules_to_both_sides() {
+    let honest = || long_chain(&LongChain::standard(BLOCKS)).0;
+    let other_chain = || {
+        long_chain(&LongChain {
+            payment_every: 7,
+            ..LongChain::standard(BLOCKS)
+        })
+        .0
+    };
+    let splice = || {
+        let other = other_chain();
+        Tamper::new(honest(), move |batch| {
+            let (Some(first), Some(last)) = (batch.blocks.first(), batch.blocks.last()) else {
+                return;
+            };
+            if first.block.height > SCAN_CHUNK_BLOCKS {
+                *batch = other
+                    .fetch_range(first.block.height, last.block.height)
+                    .unwrap();
+            }
+        })
+    };
+    let short = || {
+        Tamper::new(honest(), |batch| {
+            batch.blocks.pop();
+        })
+    };
+    let border = |result: Result<sync_core::verify::VerificationReport, ScanError>,
+                  backend: &str,
+                  needle: &str| match result {
+        Err(ScanError::InconsistentBatch { backend_id, reason }) => {
+            assert_eq!(backend_id, backend);
+            assert!(
+                reason.contains(needle),
+                "`{reason}` should mention `{needle}`"
+            );
+        }
+        other => panic!("expected `{needle}`, got {other:?}"),
+    };
+    /// Gives a tampering source a name, to tell the two sides apart.
+    fn named<F: Fn(&mut sync_core::source::ScanBatch)>(
+        mut source: Tamper<FixtureSource, F>,
+        name: &str,
+    ) -> Tamper<FixtureSource, F> {
+        source.backend_id = name.to_string();
+        source
+    }
+
+    // Both sides splice in the same foreign chunk: every block pair agrees,
+    // and without the link check the report would be "identical".
+    border(
+        cross_check(
+            &named(splice(), "candidate"),
+            &honest(),
+            &scanner(),
+            regtest(),
+            1,
+            BLOCKS,
+        ),
+        "candidate",
+        "block 101 does not link to block 100",
+    );
+    border(
+        cross_check(
+            &named(splice(), "candidate"),
+            &named(splice(), "reference"),
+            &scanner(),
+            regtest(),
+            1,
+            BLOCKS,
+        ),
+        "candidate",
+        "block 101 does not link to block 100",
+    );
+    border(
+        cross_check(
+            &honest(),
+            &named(splice(), "reference"),
+            &scanner(),
+            regtest(),
+            1,
+            BLOCKS,
+        ),
+        "reference",
+        "block 101 does not link to block 100",
+    );
+
+    // A batch that lacks its last block, on either side.
+    border(
+        cross_check(
+            &named(short(), "candidate"),
+            &honest(),
+            &scanner(),
+            regtest(),
+            1,
+            50,
+        ),
+        "candidate",
+        "",
+    );
+    border(
+        cross_check(
+            &honest(),
+            &named(short(), "reference"),
+            &scanner(),
+            regtest(),
+            1,
+            50,
+        ),
+        "reference",
+        "",
+    );
+
+    // An index that lists one (non-paying) transaction again in a later block.
+    let replaying = Tamper::new(
+        LocalTweakIndex::new(honest(), IndexPolicy::Bip352),
+        |batch| {
+            let entry = batch.blocks.iter().find_map(|b| match &b.evidence {
+                sync_core::source::Evidence::TweakIndex(txs) if b.block.height == 3 => {
+                    txs.first().cloned()
+                }
+                _ => None,
+            });
+            for block in &mut batch.blocks {
+                if let (7, sync_core::source::Evidence::TweakIndex(txs), Some(entry)) =
+                    (block.block.height, &mut block.evidence, &entry)
+                {
+                    txs.push(entry.clone());
+                }
+            }
+        },
+    );
+    assert!(matches!(
+        scan_range(&replaying, &scanner(), regtest(), 1, 20),
+        Err(ScanError::InconsistentBatch { reason, .. }) if reason.contains("appears more than once")
+    ));
+    assert!(matches!(
+        cross_check(&replaying, &honest(), &scanner(), regtest(), 1, 20),
+        Err(ScanError::InconsistentBatch { reason, .. }) if reason.contains("appears more than once")
+    ));
+
+    // Two different chains without any payment for this receiver: there is no
+    // output to disagree about, and the result is still not "identical".
+    let quiet = |txs_per_block| {
+        long_chain(&LongChain {
+            blocks: 20,
+            txs_per_block,
+            payment_every: 1_000,
+        })
+        .0
+    };
+    let report = cross_check(&quiet(3), &quiet(4), &scanner(), regtest(), 1, 20).unwrap();
+    assert!(report.differences.is_empty());
+    assert_eq!(report.agreed, 0);
+    assert!(!report.block_hash_mismatches.is_empty());
+    assert!(!report.identical);
+}

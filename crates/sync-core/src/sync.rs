@@ -11,6 +11,11 @@
 //!    chunk is committed atomically, so an interruption at any point leaves a
 //!    store that a later call simply continues from.
 //!
+//! A transaction listed twice is refused within one chunk by the scan, and
+//! across chunks only when it pays the receiver (the store records an output
+//! once). A stateless [`scan_range`](crate::engine::scan_range) checks the
+//! whole range.
+//!
 //! Fail-closed rules: a chunk that does not link to the stored checkpoint, a
 //! source whose tip is *behind* the checkpoint on the same chain, an explicit
 //! target above the tip, and any scan error abort the call. What was committed
@@ -18,7 +23,7 @@
 
 use crate::{
     engine::{check_batch, scan_blocks, ScanCounters, ScanError},
-    models::{BlockRef, DetectedOutput},
+    models::{BlockRef, DetectedOutput, EvidenceKind},
     network::ChainIdentity,
     protocol::ReceiveScanner,
     source::{ScanSource, SourceError},
@@ -116,6 +121,9 @@ pub struct ReorgReport {
 pub struct SyncReport {
     pub chain: ChainIdentity,
     pub backend_id: String,
+    /// What kind of evidence the detections rest on (see
+    /// [`ScanReport::evidence_kind`](crate::engine::ScanReport)).
+    pub evidence_kind: EvidenceKind,
     pub wallet_id: String,
     pub labels_scanned: Vec<u32>,
     pub birthday: u32,
@@ -345,6 +353,7 @@ pub fn sync_with_progress(
     let mut report = SyncReport {
         chain: meta.chain,
         backend_id: backend_id.clone(),
+        evidence_kind: source.capabilities().evidence_kind,
         wallet_id: meta.wallet_id.clone(),
         labels_scanned: meta.labels.clone(),
         birthday: meta.birthday,

@@ -43,8 +43,9 @@ pub enum Explanation {
     ReferenceNotEligible { reason: &'static str },
     /// Candidate-only: the reference block contains no such transaction.
     ReferenceTransactionMissing,
-    /// Candidate-only: the reference scanned the transaction and this output
-    /// did not match (e.g. the candidate used different tweak data).
+    /// Candidate-only: the reference has the transaction and scanned it, and
+    /// this output is not among its matches — the candidate used other tweak
+    /// data, or lists an output the transaction does not have.
     ReferenceScannedNoMatch,
     /// Reference-only: the candidate's evidence has no entry for the
     /// transaction (an index omitted it).
@@ -222,24 +223,46 @@ pub fn cross_check(
         unexplained: 0,
     };
 
-    let scan_one = |backend_id: &str, block: &BlockEvidence| {
+    // Each side is held to the rules of a plain scan of the range: complete,
+    // ordered batches, chunks that link to each other, and no transaction
+    // listed twice anywhere in the range.
+    let (mut seen_c, mut seen_r) = (BTreeSet::new(), BTreeSet::new());
+    let scan_one = |backend_id: &str, block: &BlockEvidence, seen: &mut BTreeSet<Txid>| {
         scan_blocks(
             backend_id,
             expected_chain,
             scanner,
             std::slice::from_ref(block),
             &mut ScanCounters::default(),
-            &mut BTreeSet::new(),
+            seen,
         )
     };
+    let linked = |backend_id: &str, previous: Option<BlockRef>, blocks: &[BlockEvidence]| match (
+        previous,
+        blocks.first(),
+    ) {
+        (Some(prev), Some(first)) if first.block.prev_hash != prev.hash => {
+            Err(ScanError::InconsistentBatch {
+                backend_id: backend_id.to_string(),
+                reason: format!(
+                    "block {} does not link to block {} (the chain changed during the scan?)",
+                    first.block.height, prev.height
+                ),
+            })
+        }
+        _ => Ok(blocks.last().map(|b| b.block)),
+    };
+    let (mut previous_c, mut previous_r) = (None, None);
 
     let mut next = from;
     loop {
         let last = to.min(next.saturating_add(SCAN_CHUNK_BLOCKS - 1));
         let candidate_batch = candidate.fetch_range(next, last)?;
         check_batch(&candidate_id, &candidate_batch.blocks, next, last)?;
+        previous_c = linked(&candidate_id, previous_c, &candidate_batch.blocks)?;
         let reference_batch = reference.fetch_range(next, last)?;
         check_batch(&reference_id, &reference_batch.blocks, next, last)?;
+        previous_r = linked(&reference_id, previous_r, &reference_batch.blocks)?;
 
         for (c_block, r_block) in candidate_batch.blocks.iter().zip(&reference_batch.blocks) {
             let height = r_block.block.height;
@@ -247,8 +270,8 @@ pub fn cross_check(
             if !same_block {
                 report.block_hash_mismatches.push(height);
             }
-            let found_c = scan_one(&candidate_id, c_block)?;
-            let found_r = scan_one(&reference_id, r_block)?;
+            let found_c = scan_one(&candidate_id, c_block, &mut seen_c)?;
+            let found_r = scan_one(&reference_id, r_block, &mut seen_r)?;
             let by_c: BTreeMap<OutPoint, &DetectedOutput> =
                 found_c.iter().map(|d| (key(d), d)).collect();
             let by_r: BTreeMap<OutPoint, &DetectedOutput> =

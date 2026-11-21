@@ -23,7 +23,12 @@ use crate::{
     protocol::ReceiveScanner,
 };
 
+/// Backend id of an index built with [`IndexPolicy::Bip352`].
 pub const LOCAL_INDEX_BACKEND_ID: &str = "local_tweak_index";
+/// Backend id of an index built with [`IndexPolicy::IgnoreSegwitVersionRule`].
+/// The two policies detect different outputs, so they are different backends
+/// as far as a store's binding is concerned.
+pub const LOCAL_INDEX_LENIENT_BACKEND_ID: &str = "local_tweak_index_ignoring_segwit_version_rule";
 
 /// Which transactions the index lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +59,10 @@ impl<S: ScanSource> LocalTweakIndex<S> {
 
 impl<S: ScanSource> ScanSource for LocalTweakIndex<S> {
     fn backend_id(&self) -> &str {
-        LOCAL_INDEX_BACKEND_ID
+        match self.policy {
+            IndexPolicy::Bip352 => LOCAL_INDEX_BACKEND_ID,
+            IndexPolicy::IgnoreSegwitVersionRule => LOCAL_INDEX_LENIENT_BACKEND_ID,
+        }
     }
 
     fn capabilities(&self) -> SourceCapabilities {
@@ -81,6 +89,10 @@ impl<S: ScanSource> ScanSource for LocalTweakIndex<S> {
 
     fn block_ref(&self, height: u32) -> Result<BlockRef, SourceError> {
         self.inner.block_ref(height)
+    }
+
+    fn block_refs(&self, from: u32, to: u32) -> Result<Vec<BlockRef>, SourceError> {
+        self.inner.block_refs(from, to)
     }
 
     fn fetch_range(&self, from: u32, to: u32) -> Result<ScanBatch, SourceError> {

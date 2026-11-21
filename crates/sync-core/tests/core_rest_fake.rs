@@ -570,3 +570,117 @@ fn only_loopback_http_urls_are_contacted() {
         }
     }
 }
+
+/// A node that fails to answer is not a node whose chain got shorter: one
+/// failed request ends the call, and the verified header chain is kept.
+#[test]
+fn an_unreachable_node_costs_one_request_and_keeps_the_verified_headers() {
+    let node = fresh();
+    let source = CoreRestSource::connect(&node.url()).unwrap();
+    assert_eq!(source.tip().unwrap().height, TIP);
+    let top = format!("/rest/blockhashbyheight/{TIP}.hex");
+    let honest = node.get(&top);
+
+    // The node answers the freshness check with a server error.
+    node.http.set_reply(&top, 503, &[], b"warming up".to_vec());
+    let before = source.stats().requests;
+    assert!(matches!(
+        source.block_ref(5),
+        Err(SourceError::Unavailable(m)) if m.contains("HTTP 503")
+    ));
+    assert_eq!(
+        source.stats().requests - before,
+        1,
+        "the cache must not be probed entry by entry"
+    );
+
+    // Back to normal: the headers are still there, nothing is downloaded again.
+    node.set(&top, honest);
+    let before = source.stats().requests;
+    assert_eq!(source.block_ref(5).unwrap().hash, node.hashes[5]);
+    assert_eq!(
+        source.stats().requests - before,
+        1,
+        "only the freshness check"
+    );
+
+    // The node is gone altogether.
+    let url = node.url();
+    drop(node);
+    let before = source.stats().requests;
+    assert!(matches!(
+        source.block_ref(5),
+        Err(SourceError::Unavailable(_))
+    ));
+    assert!(matches!(source.tip(), Err(SourceError::Unavailable(_))));
+    assert_eq!(source.stats().requests - before, 2);
+    assert!(CoreRestSource::connect(&url).is_err());
+}
+
+/// After a deep reorg the fork point is found with a handful of requests, and
+/// a whole range of block references costs one freshness check.
+#[test]
+fn deep_reorgs_and_range_lookups_cost_few_requests() {
+    use lab_testkit::fixture_gen::LongChain;
+    let chain = |payment_every| {
+        fixture_gen::generate_long(&LongChain {
+            payment_every,
+            ..LongChain::standard(300)
+        })
+    };
+    let (main, other) = (chain(10), chain(7));
+    let mut node = FakeCoreRest::serve(&main);
+    let source = CoreRestSource::connect(&node.url()).unwrap();
+    assert_eq!(source.tip().unwrap().height, 300);
+
+    // A range of references: one request, whatever its length.
+    let before = source.stats().requests;
+    let refs = source.block_refs(1, 300).unwrap();
+    assert_eq!(source.stats().requests - before, 1);
+    assert_eq!(refs.len(), 300);
+    for (index, block) in refs.iter().enumerate() {
+        assert_eq!(block.height as usize, index + 1);
+        assert_eq!(block.hash, node.hashes[index + 1]);
+        assert_eq!(block.prev_hash, node.hashes[index]);
+    }
+    assert_eq!(source.block_refs(250, 250).unwrap(), vec![refs[249]]);
+    assert!(matches!(
+        source.block_refs(5, 4),
+        Err(SourceError::InvalidRange { from: 5, to: 4 })
+    ));
+    assert!(matches!(
+        source.block_refs(290, 301),
+        Err(SourceError::RangeUnavailable { .. })
+    ));
+
+    // The node reorganizes from height 7 on (the chains share blocks 1..=6).
+    node.replace_chain(other.network, &fixture_blocks(&other));
+    assert_eq!(node.hashes[6], refs[5].hash);
+    assert_ne!(node.hashes[7], refs[6].hash);
+    let before = source.stats().requests;
+    let tip = source.tip().unwrap();
+    let spent = source.stats().requests - before;
+    assert_eq!(tip.hash, node.hashes[300]);
+    assert!(
+        spent <= 15,
+        "re-anchoring 294 blocks took {spent} requests (bisection expected)"
+    );
+    let after = source.block_refs(1, 300).unwrap();
+    assert_eq!(after[5], refs[5], "below the fork nothing changed");
+    for (index, block) in after.iter().enumerate() {
+        assert_eq!(block.hash, node.hashes[index + 1]);
+    }
+
+    // The node's chain becomes shorter than the cache (a definite answer).
+    let short = chain(10);
+    let blocks = fixture_blocks(&short);
+    node.replace_chain(short.network, &blocks[..40]);
+    assert_eq!(source.tip().unwrap().height, 40);
+    assert!(matches!(
+        source.block_ref(41),
+        Err(SourceError::RangeUnavailable {
+            available_to: 40,
+            ..
+        })
+    ));
+}

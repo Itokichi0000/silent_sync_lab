@@ -23,6 +23,8 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// Largest response body accepted. A serialized block is at most 4 MB; the
 /// JSON forms served by index servers are a small multiple of that.
 pub(crate) const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
+/// Largest status line, and largest header block, accepted.
+pub(crate) const MAX_HEADER_BYTES: usize = 16 * 1024;
 
 #[derive(Debug)]
 pub(crate) struct LoopbackHttp {
@@ -72,12 +74,38 @@ impl LoopbackHttp {
     /// GETs `path` (starting with `/`). Anything but HTTP 200 — including
     /// every redirect — and any body larger than the limit is an error.
     pub(crate) fn get(&self, path: &str) -> Result<Vec<u8>, SourceError> {
+        match self.request(path)? {
+            (200, body) => Ok(body),
+            (status, body) => Err(SourceError::Unavailable(format!(
+                "GET {path}: HTTP {status}: {}",
+                printable(&String::from_utf8_lossy(&body))
+            ))),
+        }
+    }
+
+    /// Like [`get`](Self::get), but tells "the server answered: not found"
+    /// (HTTP 404, `Ok(None)`) apart from every failure to get an answer.
+    pub(crate) fn get_if_found(&self, path: &str) -> Result<Option<Vec<u8>>, SourceError> {
+        match self.request(path)? {
+            (200, body) => Ok(Some(body)),
+            (404, _) => Ok(None),
+            (status, body) => Err(SourceError::Unavailable(format!(
+                "GET {path}: HTTP {status}: {}",
+                printable(&String::from_utf8_lossy(&body))
+            ))),
+        }
+    }
+
+    /// One bounded request: status code and body.
+    fn request(&self, path: &str) -> Result<(i32, Vec<u8>), SourceError> {
         let unavailable = |e: String| SourceError::Unavailable(format!("GET {path}: {e}"));
         let url = format!("{}{path}", self.base);
         self.requests.fetch_add(1, Ordering::Relaxed);
         let response = minreq::get(&url)
             .with_timeout(self.timeout_secs)
             .with_max_redirects(0)
+            .with_max_headers_size(MAX_HEADER_BYTES)
+            .with_max_status_line_length(MAX_HEADER_BYTES)
             .send_lazy()
             .map_err(|e| unavailable(e.to_string()))?;
         let status = response.status_code;
@@ -93,13 +121,7 @@ impl LoopbackHttp {
                 self.max_body_bytes
             )));
         }
-        if status != 200 {
-            return Err(unavailable(format!(
-                "HTTP {status}: {}",
-                printable(&String::from_utf8_lossy(&body))
-            )));
-        }
-        Ok(body)
+        Ok((status, body))
     }
 
     pub(crate) fn stats(&self) -> SourceStats {
@@ -315,6 +337,53 @@ mod tests {
         assert!(
             waited < std::time::Duration::from_secs(3),
             "gave up only after {waited:?}"
+        );
+    }
+
+    /// Serves one raw response (status line, headers and body as given).
+    fn serve_raw_once(response: Vec<u8>) -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                    line.clear();
+                }
+                let _ = stream.write_all(&response);
+            }
+        });
+        url
+    }
+
+    /// The body limit alone is not enough: headers and the status line are
+    /// read before it and must be bounded too.
+    #[test]
+    fn response_headers_and_status_line_are_bounded() {
+        let get = |response: Vec<u8>| {
+            LoopbackHttp::new(&serve_raw_once(response), "test")
+                .expect("url")
+                .get("/x")
+        };
+        let ok = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec();
+        assert_eq!(get(ok).ok(), Some(b"ok".to_vec()));
+
+        let mut flood = b"HTTP/1.1 200 OK\r\nX-Flood: ".to_vec();
+        flood.extend(std::iter::repeat_n(b'a', 4 * MAX_HEADER_BYTES));
+        flood.extend_from_slice(b"\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        assert!(
+            matches!(get(flood), Err(SourceError::Unavailable(_))),
+            "an oversized header must be refused"
+        );
+
+        let mut status = b"HTTP/1.1 200 ".to_vec();
+        status.extend(std::iter::repeat_n(b'a', 4 * MAX_HEADER_BYTES));
+        status.extend_from_slice(b"\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        assert!(
+            matches!(get(status), Err(SourceError::Unavailable(_))),
+            "an oversized status line must be refused"
         );
     }
 

@@ -19,7 +19,7 @@ use std::{
 };
 use sync_core::{
     engine::{scan_range, ScanReport},
-    models::DetectedOutput,
+    models::{DetectedOutput, EvidenceKind},
     network::{ChainIdentity, LabNetwork},
     protocol::ReceiveScanner,
     source::{
@@ -568,7 +568,8 @@ fn doctor(
                 })
                 .map(|tip| {
                     format!(
-                        "reachable: indexes the node's chain up to its tip (height {})",
+                        "reachable: has the node's tip block (height {}); earlier heights were \
+                         not probed",
                         tip.height
                     )
                 })
@@ -705,8 +706,13 @@ fn verify(network: LabNetwork, args: VerifyArgs) -> Result<(), Failure> {
         Err(Failure {
             code: EXIT_DIFFERENCES,
             message: format!(
-                "the backends differ: {} only in the candidate, {} only in the reference, {} unexplained",
-                report.candidate_only, report.reference_only, report.unexplained
+                "the backends differ: {} difference(s) ({} only in the candidate, {} only in the \
+                 reference, {} unexplained), {} block(s) with different hashes",
+                report.differences.len(),
+                report.candidate_only,
+                report.reference_only,
+                report.unexplained,
+                report.block_hash_mismatches.len()
             ),
         })
     }
@@ -1178,14 +1184,37 @@ fn received_list(network: LabNetwork, db: &Path, json: bool) -> Result<(), Failu
     }
 }
 
+/// How the evidence kind is named in text output.
+fn evidence_text(kind: EvidenceKind) -> &'static str {
+    match kind {
+        EvidenceKind::FullBlockWithPrevouts => "full_block",
+        EvidenceKind::TweakIndex => "tweak_index: UNVERIFIED index claim",
+    }
+}
+
+const INDEX_CLAIM_NOTE: &str = "note: outputs marked `tweak_index` are what the index server \
+    claimed. Their transaction id, output index and amount were NOT checked against the block; \
+    an index can omit, alter or invent them (docs/FAULT_INJECTION.md).";
+
 fn render_detections(out: &mut String, detections: &[DetectedOutput]) {
     for d in detections {
         let label = d.label.map_or_else(|| "-".to_string(), |m| m.to_string());
         let _ = writeln!(
             out,
-            "  height {:>4}  {}:{}  {} sat  label {}",
-            d.block.height, d.txid, d.vout, d.value_sats, label
+            "  height {:>4}  {}:{}  {} sat  label {}  [{}]",
+            d.block.height,
+            d.txid,
+            d.vout,
+            d.value_sats,
+            label,
+            evidence_text(d.provenance.evidence_kind)
         );
+    }
+    if detections
+        .iter()
+        .any(|d| d.provenance.evidence_kind == EvidenceKind::TweakIndex)
+    {
+        let _ = writeln!(out, "{INDEX_CLAIM_NOTE}");
     }
 }
 
@@ -1221,6 +1250,15 @@ fn render_meta(
     out
 }
 
+/// A full-block source shows every transaction; an index only the entries it
+/// chose to list.
+fn seen_label(kind: EvidenceKind) -> &'static str {
+    match kind {
+        EvidenceKind::FullBlockWithPrevouts => "transactions seen   ",
+        EvidenceKind::TweakIndex => "index entries seen  ",
+    }
+}
+
 fn render_scan_report(report: &ScanReport) -> String {
     let mut out = String::new();
     {
@@ -1228,6 +1266,10 @@ fn render_scan_report(report: &ScanReport) -> String {
             let _ = writeln!(out, "{text}");
         };
         line(format!("backend              : {}", report.backend_id));
+        line(format!(
+            "evidence             : {}",
+            evidence_text(report.evidence_kind)
+        ));
         line(format!("network              : {}", report.chain.network()));
         line(format!(
             "range                : {} ({}) ..= {} ({})",
@@ -1241,7 +1283,11 @@ fn render_scan_report(report: &ScanReport) -> String {
             report.labels_scanned
         ));
         line(format!("blocks scanned       : {}", report.blocks_scanned));
-        line(format!("transactions seen    : {}", report.txs_seen));
+        line(format!(
+            "{} : {}",
+            seen_label(report.evidence_kind),
+            report.txs_seen
+        ));
         line(format!("transactions scanned : {}", report.txs_scanned));
         for (reason, count) in &report.txs_skipped {
             line(format!("  not scanned ({reason}): {count}"));
@@ -1266,6 +1312,10 @@ fn render_sync_report(report: &SyncReport) -> String {
             let _ = writeln!(out, "{text}");
         };
         line(format!("backend              : {}", report.backend_id));
+        line(format!(
+            "evidence             : {}",
+            evidence_text(report.evidence_kind)
+        ));
         line(format!("network              : {}", report.chain.network()));
         match report.resumed_from {
             Some(cp) => line(format!(
@@ -1290,7 +1340,11 @@ fn render_sync_report(report: &SyncReport) -> String {
             ));
         }
         line(format!("blocks scanned       : {}", report.blocks_scanned));
-        line(format!("transactions seen    : {}", report.txs_seen));
+        line(format!(
+            "{} : {}",
+            seen_label(report.evidence_kind),
+            report.txs_seen
+        ));
         line(format!("transactions scanned : {}", report.txs_scanned));
         match report.checkpoint {
             Some(cp) => line(format!(

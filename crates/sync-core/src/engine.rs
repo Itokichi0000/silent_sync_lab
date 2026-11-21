@@ -11,7 +11,7 @@
 
 use crate::{
     bitcoin::Txid,
-    models::{BlockRef, DetectedOutput, MatchProvenance},
+    models::{BlockRef, DetectedOutput, EvidenceKind, MatchProvenance},
     network::ChainIdentity,
     protocol::{ProtocolError, ReceiveScanner, SkipReason, TxScanOutcome},
     source::{BlockEvidence, Evidence, ScanSource, SourceError},
@@ -49,6 +49,10 @@ pub enum ScanError {
 pub struct ScanReport {
     pub chain: ChainIdentity,
     pub backend_id: String,
+    /// What kind of evidence the detections rest on. For
+    /// [`EvidenceKind::TweakIndex`], transaction ids, output positions and
+    /// amounts are the index's claims and were not checked against a block.
+    pub evidence_kind: EvidenceKind,
     pub first_block: BlockRef,
     pub last_block: BlockRef,
     /// Label integers that were scanned for (always includes the change label
@@ -135,6 +139,7 @@ pub fn scan_range(
     Ok(ScanReport {
         chain,
         backend_id,
+        evidence_kind: source.capabilities().evidence_kind,
         first_block,
         last_block,
         labels_scanned: scanner.labels().collect(),
@@ -217,6 +222,7 @@ pub(crate) fn scan_blocks(
                 }
             }
             Evidence::TweakIndex(indexed) => {
+                check_index_entries(backend_id, block.block.height, indexed)?;
                 for entry in indexed {
                     if !seen_txids.insert(entry.txid) {
                         return Err(ScanError::InconsistentBatch {
@@ -254,6 +260,53 @@ pub(crate) fn scan_blocks(
         counters.blocks += 1;
     }
     Ok(detected)
+}
+
+/// Most taproot outputs one block can hold: 4,000,000 weight units at 172
+/// per output (8 bytes value, 1 byte length, 34 bytes script), ignoring every
+/// other part of the block.
+pub const MAX_INDEXED_OUTPUTS_PER_BLOCK: usize = 4_000_000 / 172;
+
+/// Bounds on what an index may claim about one block, checked before any
+/// entry is scanned. They cannot make the claims true; they keep impossible
+/// ones out of the result and bound the work an index can cause.
+///
+/// * every listed transaction lists at least one output (an index lists a
+///   transaction *because* it has taproot outputs);
+/// * no output is worth more than all the coins that can exist;
+/// * the block does not list more outputs than a block can hold.
+fn check_index_entries(
+    backend_id: &str,
+    height: u32,
+    indexed: &[crate::source::IndexedTx],
+) -> Result<(), ScanError> {
+    let inconsistent = |reason: String| ScanError::InconsistentBatch {
+        backend_id: backend_id.to_string(),
+        reason: format!("block {height}: {reason}"),
+    };
+    let max_value = crate::bitcoin::Amount::MAX_MONEY.to_sat();
+    let mut outputs = 0usize;
+    for entry in indexed {
+        if entry.outputs.is_empty() {
+            return Err(inconsistent(format!(
+                "index entry {} lists no outputs",
+                entry.txid
+            )));
+        }
+        if let Some(output) = entry.outputs.iter().find(|o| o.value_sats > max_value) {
+            return Err(inconsistent(format!(
+                "index entry {}:{} claims {} sat, more than can exist",
+                entry.txid, output.vout, output.value_sats
+            )));
+        }
+        outputs = outputs.saturating_add(entry.outputs.len());
+    }
+    if outputs > MAX_INDEXED_OUTPUTS_PER_BLOCK {
+        return Err(inconsistent(format!(
+            "the index lists {outputs} outputs, more than a block can hold"
+        )));
+    }
+    Ok(())
 }
 
 /// Structural facts every real block satisfies, checked regardless of what the

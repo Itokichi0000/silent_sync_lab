@@ -89,7 +89,9 @@ impl CoreRestSource {
             anchored: Mutex::new(vec![chain.genesis_hash()]),
         };
         // Fails with a clear message if the node's block 0 is another chain's.
-        let genesis = source.block_hash_at(0)?;
+        let genesis = source.block_hash_at(0)?.ok_or_else(|| {
+            SourceError::InvalidData("the node reports no block at height 0".to_string())
+        })?;
         ChainIdentity::verified(network, genesis)?;
         Ok(source)
     }
@@ -104,11 +106,20 @@ impl CoreRestSource {
         self.http.get(path)
     }
 
-    fn block_hash_at(&self, height: u32) -> Result<BlockHash, SourceError> {
-        let body = self.get(&format!("/rest/blockhashbyheight/{height}.hex"))?;
+    /// The hash the node has at `height` on its active chain, or `None` if
+    /// the node *answers* that its chain does not reach that height (HTTP
+    /// 404). A node that does not answer is an error, never "no such block".
+    fn block_hash_at(&self, height: u32) -> Result<Option<BlockHash>, SourceError> {
+        let Some(body) = self
+            .http
+            .get_if_found(&format!("/rest/blockhashbyheight/{height}.hex"))?
+        else {
+            return Ok(None);
+        };
         std::str::from_utf8(&body)
             .ok()
             .and_then(|s| s.trim().parse().ok())
+            .map(Some)
             .ok_or_else(|| {
                 SourceError::InvalidData(format!("blockhashbyheight/{height}: not a block hash"))
             })
@@ -134,32 +145,44 @@ impl CoreRestSource {
             .collect()
     }
 
-    /// Makes sure the verified header chain reaches `height` on the node's
-    /// *current* chain and returns a copy of it up to that height.
+    /// Makes sure the verified header chain reaches `to` on the node's
+    /// *current* chain and returns the verified hashes of heights
+    /// `from..=to` (`from` may be 0, the genesis block).
     ///
     /// Stale entries (after a reorg on the node) are dropped first; new ones
     /// are added only by following `prev_blockhash` links from an already
     /// verified hash, with proof of work checked for every header.
-    fn anchor_up_to(&self, height: u32) -> Result<Vec<BlockHash>, SourceError> {
+    fn anchor(&self, from: u32, to: u32) -> Result<Vec<BlockHash>, SourceError> {
+        let height = to;
         let mut anchored = self
             .anchored
             .lock()
             .map_err(|_| SourceError::Unavailable("internal lock poisoned".to_string()))?;
         let network = self.chain.network();
 
-        // Drop whatever is no longer on the node's active chain.
-        while anchored.len() > 1 {
-            let top = (anchored.len() - 1) as u32;
-            let still_active = match self.block_hash_at(top) {
-                Ok(hash) => Some(&hash) == anchored.last(),
-                // The node's chain is shorter than our cache.
-                Err(SourceError::Unavailable(_)) => false,
-                Err(e) => return Err(e),
-            };
-            if still_active {
-                break;
+        // Drop whatever is no longer on the node's active chain. Hashes are
+        // linked, so "the node has our hash at height h" holds for a prefix
+        // of the cache: the fork point is found by bisection. Only a definite
+        // answer from the node (another hash, or "no such height") removes
+        // entries; a node that cannot be reached fails the call and leaves
+        // the verified cache as it is.
+        let on_node = |h: usize, anchored: &[BlockHash]| -> Result<bool, SourceError> {
+            Ok(self.block_hash_at(h as u32)? == Some(anchored[h]))
+        };
+        let top = anchored.len() - 1;
+        if top > 0 && !on_node(top, &anchored)? {
+            // Invariant: `low` is on the node's chain (genesis by construction
+            // of the chain identity), `high` is not.
+            let (mut low, mut high) = (0usize, top);
+            while high - low > 1 {
+                let mid = low + (high - low) / 2;
+                if on_node(mid, &anchored)? {
+                    low = mid;
+                } else {
+                    high = mid;
+                }
             }
-            anchored.pop();
+            anchored.truncate(low + 1);
         }
 
         while anchored.len() <= height as usize {
@@ -209,13 +232,18 @@ impl CoreRestSource {
                 parent = hash;
             }
         }
-        Ok(anchored[..=height as usize].to_vec())
+        Ok(anchored[from as usize..=height as usize].to_vec())
     }
 }
 
 fn chain_info(http: &LoopbackHttp) -> Result<ChainInfo, SourceError> {
     let body = http.get("/rest/chaininfo.json")?;
-    serde_json::from_slice(&body).map_err(|e| SourceError::InvalidData(format!("chaininfo: {e}")))
+    serde_json::from_slice(&body).map_err(|e| {
+        SourceError::InvalidData(format!(
+            "chaininfo: {}",
+            super::http::printable(&e.to_string())
+        ))
+    })
 }
 
 /// Maps Bitcoin Core's chain names. `main` is refused explicitly.
@@ -249,17 +277,37 @@ fn decode_spent_outputs(bytes: &[u8]) -> Result<Vec<Vec<TxOut>>, String> {
     Ok(all)
 }
 
-fn block_ref_from(anchored: &[BlockHash], height: u32) -> BlockRef {
-    let h = height as usize;
-    BlockRef {
-        height,
-        hash: anchored[h],
-        // The genesis block's parent is the all-zero hash.
-        prev_hash: if h == 0 {
-            BlockHash::all_zeros()
-        } else {
-            anchored[h - 1]
-        },
+impl CoreRestSource {
+    /// Verified block references for `from..=to`, from one validation of the
+    /// header anchor.
+    fn verified_refs(&self, from: u32, to: u32) -> Result<Vec<BlockRef>, SourceError> {
+        if from > to {
+            return Err(SourceError::InvalidRange { from, to });
+        }
+        // One more below `from`, for the first block's parent.
+        let first = from.saturating_sub(1);
+        let hashes = self.anchor(first, to)?;
+        Ok((from..=to)
+            .map(|height| {
+                let index = (height - first) as usize;
+                BlockRef {
+                    height,
+                    hash: hashes[index],
+                    // The genesis block's parent is the all-zero hash.
+                    prev_hash: if height == 0 {
+                        BlockHash::all_zeros()
+                    } else {
+                        hashes[index - 1]
+                    },
+                }
+            })
+            .collect())
+    }
+
+    fn verified_ref(&self, height: u32) -> Result<BlockRef, SourceError> {
+        self.verified_refs(height, height)?
+            .pop()
+            .ok_or_else(|| SourceError::InvalidData("empty header anchor".to_string()))
     }
 }
 
@@ -291,8 +339,7 @@ impl ScanSource for CoreRestSource {
                 "the node switched to another chain".to_string(),
             ));
         }
-        let anchored = self.anchor_up_to(info.blocks)?;
-        let tip = block_ref_from(&anchored, info.blocks);
+        let tip = self.verified_ref(info.blocks)?;
         if tip.hash != info.bestblockhash {
             return Err(SourceError::Unavailable(format!(
                 "the node reports best block {} at height {}, but the verified header chain has {} \
@@ -304,8 +351,11 @@ impl ScanSource for CoreRestSource {
     }
 
     fn block_ref(&self, height: u32) -> Result<BlockRef, SourceError> {
-        let anchored = self.anchor_up_to(height)?;
-        Ok(block_ref_from(&anchored, height))
+        self.verified_ref(height)
+    }
+
+    fn block_refs(&self, from: u32, to: u32) -> Result<Vec<BlockRef>, SourceError> {
+        self.verified_refs(from, to)
     }
 
     fn fetch_range(&self, from: u32, to: u32) -> Result<ScanBatch, SourceError> {
@@ -322,13 +372,13 @@ impl ScanSource for CoreRestSource {
                 available_to: tip,
             });
         }
-        let anchored = self.anchor_up_to(to)?;
+        let verified = self.verified_refs(from, to)?;
 
         let mut blocks = Vec::new();
         let mut seen_txids = BTreeSet::new();
-        for height in from..=to {
+        for expected in verified {
+            let height = expected.height;
             let at = |e: String| SourceError::InvalidData(format!("block {height}: {e}"));
-            let expected = block_ref_from(&anchored, height);
             let hash = expected.hash;
             let body = self.get(&format!("/rest/block/{hash}.bin"))?;
             let mut cursor: &[u8] = &body;

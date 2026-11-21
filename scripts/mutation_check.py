@@ -36,6 +36,7 @@ B = "crates/sync-core/src/source/block_check.rs"
 C = "crates/sync-core/src/source/bitcoin_core.rs"
 H = "crates/sync-core/src/source/http.rs"
 O = "crates/sync-core/src/source/blindbit.rs"
+L = "crates/sync-core/src/source/local_index.rs"
 V = "crates/sync-core/src/verify.rs"
 E = "crates/sync-core/src/engine.rs"
 P = "crates/sync-core/src/protocol.rs"
@@ -72,7 +73,11 @@ muts = [
     ("http: port not validated", H, "if !valid_port {", "if false {"),
     ("http: credentials echoed in refusal", H, "let shown = if url.contains('@') {", "let shown = if false {"),
     ("http: redirects followed", H, ".with_max_redirects(0)", ".with_max_redirects(5)"),
-    ("http: non-200 success statuses accepted", H, "if status != 200 {", "if status >= 400 {"),
+    ("http: no timeout", H, ".with_timeout(self.timeout_secs)", ".with_timeout(3_600)"),
+    ("http: header size unbounded", H, "            .with_max_headers_size(MAX_HEADER_BYTES)\n", ""),
+    ("http: status line unbounded", H, "            .with_max_status_line_length(MAX_HEADER_BYTES)\n", ""),
+    ("http: any error status read as not found", H, "            (404, _) => Ok(None),", "            (_, _) if true => Ok(None),"),
+    ("http: non-200 success statuses accepted", H, "            (200, body) => Ok(body),", "            (status, body) if status < 400 => Ok(body),"),
     ("http: response size unbounded", H, "if body.len() as u64 > self.max_body_bytes {", "if false {"),
     # --- Bitcoin Core REST backend ---
     ("core: mainnet chain name accepted", C, '"main" => Err(NetworkError::MainnetRefused.into()),', '"main" => Ok(LabNetwork::Regtest),'),
@@ -80,7 +85,8 @@ muts = [
     ("core: header chain links unchecked", C, "if header.prev_blockhash != parent {", "if false {"),
     ("core: header proof of work unchecked", C, "let hash = check_proof_of_work(header, network)", "let hash = Ok::<_, String>(header.block_hash())"),
     ("core: header response need not start at the anchor", C, "Some(first) if first.block_hash() == top => {}", "Some(_) if true => {}"),
-    ("core: stale header anchor kept after a reorg", C, "            anchored.pop();", "            break;"),
+    ("core: stale header anchor kept after a reorg", C, "            anchored.truncate(low + 1);", "            let _ = low;"),
+    ("core: reorg fork point not bisected", C, "                let mid = low + (high - low) / 2;", "                let mid = high - 1;"),
     ("core: trailing bytes after block accepted", C, "if !cursor.is_empty() {\n                return Err(at(", "if false {\n                return Err(at("),
     ("core: trailing bytes after spent outputs accepted", C, "if !cursor.is_empty() {\n        return Err(format!(", "if false {\n        return Err(format!("),
     ("core: spent-output transaction count unbounded", C, "if count > MAX_TXS_PER_BLOCK {", "if false {"),
@@ -117,6 +123,23 @@ muts = [
     ("signet mapped to testnet", N, "LabNetwork::Signet => Network::Signet,", "LabNetwork::Signet => Network::Testnet,"),
     ("chain identity deserialize unverified", N, "Self::verified(raw.network, raw.genesis_hash)", "Ok(Self { network: raw.network, genesis_hash: raw.genesis_hash })"),
     ("mainnet name accepted as regtest", N, '"regtest" => Ok(LabNetwork::Regtest),', '"regtest" | "mainnet" => Ok(LabNetwork::Regtest),'),
+    # --- tweak-index evidence: bounds in the engine, local index, cross-check ---
+    ("index: entry without outputs accepted", E, "if entry.outputs.is_empty() {", "if false {"),
+    ("index: impossible amount accepted", E, ".find(|o| o.value_sats > max_value)", ".find(|_| false)"),
+    ("index: output count unbounded", E, "if outputs > MAX_INDEXED_OUTPUTS_PER_BLOCK {", "if false {"),
+    ("index: detections not ordered by output index", E, "                    })?;\n                    matches.sort_by_key(|m| m.outpoint.vout);", "                    })?;"),
+    ("local index: non-taproot outputs listed", L, "                    .filter(|(_, o)| o.script_pubkey.is_p2tr())\n", ""),
+    ("local index: policy not part of the backend id", L, "IndexPolicy::IgnoreSegwitVersionRule => LOCAL_INDEX_LENIENT_BACKEND_ID,", "IndexPolicy::IgnoreSegwitVersionRule => LOCAL_INDEX_BACKEND_ID,"),
+    ("verify: candidate batch not checked", V, "check_batch(&candidate_id, &candidate_batch.blocks, next, last)?;", "let _ = (&candidate_id, check_batch);"),
+    ("verify: reference batch not checked", V, "check_batch(&reference_id, &reference_batch.blocks, next, last)?;", "let _ = (&reference_id, check_batch);"),
+    ("verify: candidate chunks not linked", V, "previous_c = linked(&candidate_id, previous_c, &candidate_batch.blocks)?;", "previous_c = linked(&candidate_id, None, &candidate_batch.blocks)?;"),
+    ("verify: reference chunks not linked", V, "previous_r = linked(&reference_id, previous_r, &reference_batch.blocks)?;", "previous_r = linked(&reference_id, None, &reference_batch.blocks)?;"),
+    ("verify: duplicates only checked per block", V, "let found_c = scan_one(&candidate_id, c_block, &mut seen_c)?;", "let found_c = scan_one(&candidate_id, c_block, &mut BTreeSet::new())?;"),
+    ("verify: identical despite different block hashes", V, "report.identical = report.differences.is_empty() && report.block_hash_mismatches.is_empty();", "report.identical = report.differences.is_empty();"),
+    ("oracle: tweaks_only may be absent", O, "    // Required: an answer without it is not from an oracle this adapter knows.\n    tweaks_only: bool,", "    #[serde(default)]\n    tweaks_only: bool,"),
+    ("oracle: error text from /info unbounded", O, 'SourceError::InvalidData(format!("oracle /info: {}", printable(&e.to_string())))', 'SourceError::InvalidData(format!("oracle /info: {}", e))'),
+    ("core: error text from chaininfo unbounded", C, "super::http::printable(&e.to_string())", "e.to_string()"),
+    ("core: range lookup validates per block", C, "    fn block_refs(&self, from: u32, to: u32) -> Result<Vec<BlockRef>, SourceError> {\n        self.verified_refs(from, to)\n    }", "    fn block_refs(&self, from: u32, to: u32) -> Result<Vec<BlockRef>, SourceError> {\n        (from..=to).map(|height| self.block_ref(height)).collect()\n    }"),
     # --- persistent sync ---
     ("sync: zero chunk size accepted", S, "if options.chunk_size == 0 {", "if false {"),
     ("sync: binding chain unchecked", S, "if meta.chain != source.chain() {", "if false {"),
@@ -178,6 +201,7 @@ muts = [
     ("cli: interrupted sync hides what it changed", M, "            show(&partial)?;\n", ""),
     ("cli: control characters in the birthday basis accepted", M, "if birthday_basis.chars().any(char::is_control) || birthday_basis.chars().count() > 500 {", "if birthday_basis.chars().count() > 500 {"),
     ("cli: unbounded birthday basis accepted", M, "if birthday_basis.chars().any(char::is_control) || birthday_basis.chars().count() > 500 {", "if birthday_basis.chars().any(char::is_control) {"),
+    ("cli: source chain not compared with --network", M, "    if source.chain() != expected {", "    if false {"),
     ("cli: store network unchecked", M, "if meta.chain.network() != network {", "if false {"),
     ("cli: empty birthday basis accepted", M, "if birthday_basis.trim().is_empty() {", "if false {"),
     ("cli: verify succeeds despite differences", M, "    if report.identical {\n        Ok(())", "    if true {\n        Ok(())"),

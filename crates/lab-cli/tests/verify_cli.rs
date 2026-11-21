@@ -74,6 +74,7 @@ fn local_index_scan_and_verify_on_the_fixture() {
         0,
     );
     assert_eq!(scan["backend_id"], "local_tweak_index");
+    assert_eq!(scan["evidence_kind"], "tweak_index");
     let detections = scan["detected_received_outputs"].as_array().unwrap();
     assert_eq!(detections.len(), 7);
     assert!(detections
@@ -125,9 +126,13 @@ fn local_index_scan_and_verify_on_the_fixture() {
         "{stdout}"
     );
     assert!(stdout.contains("spends_unknown_segwit_version"), "{stdout}");
-    assert!(stderr.contains(
-        "the backends differ: 1 only in the candidate, 0 only in the reference, 0 unexplained"
-    ));
+    assert!(
+        stderr.contains(
+            "the backends differ: 1 difference(s) (1 only in the candidate, 0 only in the \
+             reference, 0 unexplained), 0 block(s) with different hashes"
+        ),
+        "{stderr}"
+    );
     let mut with_json = args.to_vec();
     with_json.push("--json");
     let report = json(&with_json, 4);
@@ -164,7 +169,8 @@ fn oracle_backend_scan_verify_doctor_and_persistent_sync() {
     assert_eq!(code, Some(0), "{stderr}");
     assert!(
         stdout.contains(
-            "backend oracle-v2 : reachable: indexes the node's chain up to its tip (height 8)"
+            "backend oracle-v2 : reachable: has the node's tip block (height 8); earlier heights \
+             were not probed"
         ),
         "{stdout}"
     );
@@ -175,6 +181,43 @@ fn oracle_backend_scan_verify_doctor_and_persistent_sync() {
     assert_eq!(
         scan["detected_received_outputs"].as_array().unwrap().len(),
         8
+    );
+
+    // Text output says what kind of evidence every line rests on.
+    let args = with(&["scan"], &["--label", "1"]);
+    let (code, text, stderr) = run(&refs(&args));
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(
+        text.contains("evidence             : tweak_index: UNVERIFIED index claim")
+            && text.contains("index entries seen   : 7")
+            && !text.contains("transactions seen"),
+        "{text}"
+    );
+    assert_eq!(
+        text.matches("[tweak_index: UNVERIFIED index claim]")
+            .count(),
+        8,
+        "{text}"
+    );
+    assert!(
+        text.contains("NOT checked against the block") && text.contains("not a balance"),
+        "{text}"
+    );
+    let (_, full, _) = run(&[
+        "scan",
+        "--backend",
+        "core",
+        "--core-rest-url",
+        &core_url,
+        "--label",
+        "1",
+    ]);
+    assert!(
+        full.contains("evidence             : full_block")
+            && full.contains("transactions seen    : 17")
+            && full.matches("[full_block]").count() == 7
+            && !full.contains("index claim"),
+        "{full}"
     );
 
     let args = with(
@@ -213,7 +256,18 @@ fn oracle_backend_scan_verify_doctor_and_persistent_sync() {
     args.extend(["--db", &db]);
     let report = json(&args, 0);
     assert_eq!(report["caught_up"], true);
+    assert_eq!(report["evidence_kind"], "tweak_index");
     assert_eq!(report["new_detections"].as_array().unwrap().len(), 8);
+    let (code, listed, _) = run(&["received", "list", "--db", &db]);
+    assert_eq!(code, Some(0));
+    assert!(
+        listed
+            .matches("[tweak_index: UNVERIFIED index claim]")
+            .count()
+            == 8
+            && listed.contains("NOT checked against the block"),
+        "{listed}"
+    );
     let status = json(&["status", "--db", &db, "--json"], 0);
     assert_eq!(status["binding"]["backend_id"], "blindbit_oracle_v2_http");
     let _ = std::fs::remove_dir_all(&dir);

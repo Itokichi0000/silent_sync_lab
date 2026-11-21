@@ -5,9 +5,11 @@
 //! explicit through [`SourceCapabilities`] and the [`Evidence`] enum instead of
 //! being hidden behind one lowest-common-denominator type (design spec §4.2).
 //!
-//! Only full-block evidence exists so far. Tweak-index evidence will be added
-//! as a *separate* `Evidence` variant together with the first oracle-style
-//! backend (Phase 4); it is intentionally not sketched here as a mock.
+//! Two kinds of evidence exist: full blocks with the outputs they spend
+//! ([`Evidence::FullBlock`]) and a per-transaction tweak index
+//! ([`Evidence::TweakIndex`]). They are separate variants because they let the
+//! scanner verify very different things; see `docs/FAULT_INJECTION.md` for
+//! what each can and cannot detect.
 
 #[cfg(feature = "core-rest")]
 pub mod bitcoin_core;
@@ -168,6 +170,14 @@ pub trait ScanSource {
             .ok_or_else(|| {
                 SourceError::InvalidData(format!("no block returned for height {height}"))
             })
+    }
+    /// Block references for `from..=to`. The default asks for them one by
+    /// one; sources for which that costs a request each override it.
+    fn block_refs(&self, from: u32, to: u32) -> Result<Vec<BlockRef>, SourceError> {
+        if from > to {
+            return Err(SourceError::InvalidRange { from, to });
+        }
+        (from..=to).map(|height| self.block_ref(height)).collect()
     }
     /// Transfer counters; sources without I/O keep the default.
     fn stats(&self) -> SourceStats {

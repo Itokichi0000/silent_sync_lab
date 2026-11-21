@@ -550,6 +550,48 @@ pub fn standard_scenario(faucet: &mut Faucet<'_>) -> Scenario {
     }
 }
 
+/// A tweak-index entry for a transaction that does not exist, paying
+/// `receiver` at the given `(vout, value)` positions (the i-th position gets
+/// the output for `k = i`). Anyone who knows the receiver's *address* can
+/// make one: it needs a made-up input key, not the receiver's secrets.
+///
+/// For tests of what a lying index can do to a client that trusts it.
+pub fn fabricated_index_entry(
+    txid: sync_core::bitcoin::Txid,
+    receiver: LabAddress,
+    outputs: &[(u32, u64)],
+) -> sync_core::source::IndexedTx {
+    let secp = Secp256k1::new();
+    let secret = SecretKey::from_slice(&[0x11; 32]).expect("valid key");
+    let p2wpkh =
+        ScriptBuf::new_p2wpkh(&CompressedPublicKey(secret.public_key(&secp)).wpubkey_hash());
+    let mut outpoint = [0u8; 36];
+    outpoint[..32].copy_from_slice(&[0x99; 32]);
+    let partial =
+        create_silentpayment_partial_secret(&outpoint, &[(p2wpkh, secret)]).expect("secret");
+    let code = upstream_code(receiver);
+    let codes = vec![code.clone(); outputs.len()];
+    let keys = create_silentpayment_scriptpubkeys(partial, &codes)
+        .remove(&code)
+        .expect("keys for the receiver");
+    sync_core::source::IndexedTx {
+        txid,
+        // The public tweak data that goes with it: partial_secret · G.
+        tweak: partial.public_key(&secp),
+        outputs: outputs
+            .iter()
+            .zip(keys)
+            .map(
+                |(&(vout, value_sats), key)| sync_core::source::IndexedOutput {
+                    vout,
+                    value_sats,
+                    output_key: key.serialize(),
+                },
+            )
+            .collect(),
+    }
+}
+
 /// What [`long_scenario`] put on chain.
 #[derive(Debug, Clone)]
 pub struct LongScenario {

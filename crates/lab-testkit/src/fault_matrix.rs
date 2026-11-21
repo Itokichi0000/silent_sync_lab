@@ -712,6 +712,28 @@ pub fn run() -> Vec<Row> {
             })
         }),
     );
+    add(
+        "I17",
+        "T11",
+        TweakIndex,
+        "the amount of a paying output is set above the total supply",
+        oracle_fault(&|oracle, _| {
+            edit_oracle_block(oracle, PAYMENT_HEIGHT, &|v| {
+                entries(v)[0]["utxos"][0]["amount"] = serde_json::json!(2_100_000_000_000_001u64);
+            })
+        }),
+    );
+    add(
+        "I18",
+        "T11",
+        TweakIndex,
+        "an index entry lists no outputs",
+        oracle_fault(&|oracle, _| {
+            edit_oracle_block(oracle, 3, &|v| {
+                entries(v)[1]["utxos"] = serde_json::json!([]);
+            })
+        }),
+    );
 
     // ---- batches handed to the engine ----
     add(
