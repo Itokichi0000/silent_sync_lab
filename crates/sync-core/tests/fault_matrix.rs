@@ -34,6 +34,9 @@ fn every_fault_has_the_documented_verdict() {
         ("F09", Refused),
         ("F10", Refused),
         ("F11", Refused),
+        // A different chain that is consistent in itself is a valid chain as
+        // far as one source can tell (proof of work is trivial on regtest).
+        ("F12", SilentAloneShownByCrossCheck),
         // A tweak index: omissions, alterations and inventions are silent.
         ("I01", SilentAloneShownByCrossCheck),
         ("I02", SilentAloneShownByCrossCheck),
@@ -54,6 +57,8 @@ fn every_fault_has_the_documented_verdict() {
         // Claims no block can satisfy are refused, whoever they concern.
         ("I17", Refused),
         ("I18", Refused),
+        // A lie told once: the later cross-check gets the honest answer.
+        ("I19", NotDetected),
         // Structure of a response.
         ("B01", Refused),
         ("B02", Refused),
@@ -64,8 +69,15 @@ fn every_fault_has_the_documented_verdict() {
     let actual: Vec<(&str, Verdict)> = rows.iter().map(|r| (r.id, r.verdict)).collect();
     assert_eq!(actual, expected);
 
-    // No fault leaves a wrong result that the cross-check does not show.
-    assert!(rows.iter().all(|r| r.verdict != NotDetected));
+    // Exactly one fault leaves a wrong result that a later cross-check does
+    // not show: the one where the source no longer lies when asked again.
+    assert_eq!(
+        rows.iter()
+            .filter(|r| r.verdict == NotDetected)
+            .map(|r| r.id)
+            .collect::<Vec<_>>(),
+        vec!["I19"]
+    );
     // The precise shape of the silent failures.
     let alone = |id: &str| rows.iter().find(|r| r.id == id).unwrap().alone.clone();
     let wrong = |missing, invented, altered| Alone::WrongResult {
@@ -79,7 +91,29 @@ fn every_fault_has_the_documented_verdict() {
     assert_eq!(alone("I04"), wrong(0, 0, 1));
     assert_eq!(alone("I06"), wrong(0, 1, 0));
 
-    // The document shows exactly this table.
+    assert!(matches!(
+        alone("F12"),
+        Alone::WrongResult { missing, invented, .. } if missing > 0 && invented > 0
+    ));
+    assert_eq!(alone("I19"), wrong(1, 0, 0));
+
+    // The document shows exactly this table, and counts its rows correctly.
+    assert!(
+        DOC.contains(&format!("注入したのは {} 種類", rows.len())),
+        "docs/FAULT_INJECTION.md states another number of faults than {}",
+        rows.len()
+    );
+    let is_fault_row = |line: &str| {
+        let id = line.strip_prefix("| ").and_then(|rest| rest.get(..3));
+        id.is_some_and(|id| {
+            id.starts_with(['F', 'I', 'B']) && id[1..].bytes().all(|b| b.is_ascii_digit())
+        })
+    };
+    assert_eq!(
+        DOC.lines().filter(|l| is_fault_row(l)).count(),
+        rows.len(),
+        "docs/FAULT_INJECTION.md has rows the matrix does not produce"
+    );
     let table = fault_matrix::render_markdown(&rows);
     assert!(
         DOC.contains(&table),

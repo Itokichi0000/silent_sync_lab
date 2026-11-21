@@ -114,7 +114,7 @@ impl Verdict {
             Verdict::Refused => "refused (fail-closed)",
             Verdict::NoEffect => "no effect",
             Verdict::SilentAloneShownByCrossCheck => "NOT detected alone; shown by a cross-check",
-            Verdict::NotDetected => "NOT detected",
+            Verdict::NotDetected => "NOT detected (neither alone nor by a later cross-check)",
         }
     }
 }
@@ -270,6 +270,8 @@ fn verdict(alone: &Alone, cross: &CrossChecked) -> Verdict {
         (Alone::WrongResult { .. }, CrossChecked::Differences { .. }) => {
             Verdict::SilentAloneShownByCrossCheck
         }
+        // The cross-check asks the source again: a source that lied before
+        // and answers honestly now is not exposed by it.
         (Alone::WrongResult { .. }, CrossChecked::Identical) => Verdict::NotDetected,
     }
 }
@@ -538,6 +540,16 @@ pub fn run() -> Vec<Row> {
         "the node announces another network (signet) for the chain it serves",
         core_fault(&|node| node.set_chain_info("signet", TIP, node.hashes[TIP as usize])),
     );
+    add(
+        "F12",
+        "T11",
+        FullBlocks,
+        "the node consistently serves another chain built on the same genesis block (another fork, or an impostor on the port)",
+        {
+            let node = FakeCoreRest::serve(&fixture_gen::generate_fork());
+            observe(core(&node))
+        },
+    );
 
     // ---- tweak index from an oracle ----
     add(
@@ -733,6 +745,36 @@ pub fn run() -> Vec<Row> {
                 entries(v)[1]["utxos"] = serde_json::json!([]);
             })
         }),
+    );
+    add(
+        "I19",
+        "T10",
+        TweakIndex,
+        "the index omits a paying entry only the first time the block is requested (injected into a locally computed index)",
+        {
+            let index = LocalTweakIndex::new(
+                FixtureSource::from_file(fixture()).expect("fixture"),
+                IndexPolicy::Bip352,
+            );
+            let asked_before = std::cell::Cell::new(false);
+            observe(Ok(Box::new(Tamper::new(
+                index,
+                move |batch: &mut ScanBatch| {
+                    for block in &mut batch.blocks {
+                        if block.block.height != PAYMENT_HEIGHT {
+                            continue;
+                        }
+                        if let sync_core::source::Evidence::TweakIndex(entries) =
+                            &mut block.evidence
+                        {
+                            if !asked_before.replace(true) {
+                                entries.clear();
+                            }
+                        }
+                    }
+                },
+            ))))
+        },
     );
 
     // ---- batches handed to the engine ----

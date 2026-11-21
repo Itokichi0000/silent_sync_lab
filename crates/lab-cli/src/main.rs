@@ -850,17 +850,19 @@ fn bench_command(network: LabNetwork, args: BenchArgs) -> Result<(), Failure> {
         })
         .collect();
 
-    // The range is fixed once, from the first backend, and is the same for all.
-    let first = openers
-        .first()
-        .ok_or_else(|| Failure::error("no backend given"))?()
-    .map_err(Failure::error)?;
+    // The range is fixed once and is the same for all backends. The first
+    // backend is asked for its tip only when `--to` is not given.
     let from = args.from.unwrap_or(1);
     let to = match args.to {
         Some(to) => to,
-        None => first.tip().map_err(fail)?.height,
+        None => {
+            let first = openers
+                .first()
+                .ok_or_else(|| Failure::error("no backend given"))?()
+            .map_err(Failure::error)?;
+            first.tip().map_err(fail)?.height
+        }
     };
-    drop(first);
     if from == 0 || from > to {
         return Err(Failure::error(format!("invalid range {from}..={to}")));
     }
@@ -884,11 +886,8 @@ fn bench_command(network: LabNetwork, args: BenchArgs) -> Result<(), Failure> {
         plan.modes.len(),
         plan.repeat
     );
-    let runs = bench::run_plan(
-        &plan,
-        &scanner,
-        &wallet_id,
-        &mut |record| match &record.error {
+    let runs = bench::run_plan(&plan, &scanner, &wallet_id, &mut |record, detail| {
+        match &record.error {
             None => eprintln!(
                 "  #{:<3} {:<12} {:<11} repeat {}: {:.2} ms, {} bytes, {} detected",
                 record.order,
@@ -899,15 +898,18 @@ fn bench_command(network: LabNetwork, args: BenchArgs) -> Result<(), Failure> {
                 record.downloaded_bytes,
                 record.detected_count
             ),
-            Some(error) => eprintln!(
-                "  #{:<3} {:<12} {:<11} repeat {}: FAILED: {error}",
+            // The full text is shown here and nowhere else: it may quote a
+            // transaction id, a path or a URL, which the results must not hold.
+            Some(class) => eprintln!(
+                "  #{:<3} {:<12} {:<11} repeat {}: FAILED ({class}): {}",
                 record.order,
                 record.backend,
                 record.mode.as_str(),
-                record.repeat
+                record.repeat,
+                detail.unwrap_or("no further detail")
             ),
-        },
-    );
+        }
+    });
 
     let file = bench::BenchFile {
         format: bench::FORMAT.to_string(),

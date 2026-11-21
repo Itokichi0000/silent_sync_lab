@@ -212,7 +212,7 @@ impl CoreRestSource {
             }
             if headers.len() == 1 {
                 return Err(SourceError::RangeUnavailable {
-                    from: height,
+                    from: from.max(1),
                     to: height,
                     available_from: 1,
                     available_to: top_height as u32,

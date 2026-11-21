@@ -11,6 +11,7 @@ Usage (never run it against the working tree itself):
     rm -rf /tmp/ssl-mut && mkdir -p /tmp/ssl-mut/repo
     git ls-files -co --exclude-standard | tar cf - -T - | tar xf - -C /tmp/ssl-mut/repo
     python3 scripts/mutation_check.py /tmp/ssl-mut/repo
+    python3 scripts/mutation_check.py /tmp/ssl-mut/repo "sync:,bench:"   # only these groups
 
 The slow K_max tests are skipped (`--skip k_max`); the K_max correction is
 covered by `crates/sync-core/tests/bip352_vectors.rs` instead. Exit status is
@@ -22,8 +23,11 @@ import os
 import subprocess
 import sys
 
-if len(sys.argv) != 2 or not os.path.isfile(os.path.join(sys.argv[1], "Cargo.toml")):
+if len(sys.argv) not in (2, 3) or not os.path.isfile(os.path.join(sys.argv[1], "Cargo.toml")):
     sys.exit(__doc__)
+# Optional second argument: comma-separated prefixes; only entries whose name
+# starts with one of them are run (to re-check a part after changing it).
+only = [p for p in sys.argv[2].split(",") if p] if len(sys.argv) == 3 else []
 root = os.path.abspath(sys.argv[1])
 if os.path.isdir(os.path.join(root, ".git")):
     sys.exit("refusing to mutate a git working tree; use a scratch copy (see usage)")
@@ -45,6 +49,7 @@ S = "crates/sync-core/src/sync.rs"
 T = "crates/sync-core/src/store.rs"
 Q = "crates/lab-storage/src/lib.rs"
 M = "crates/lab-cli/src/main.rs"
+K = "crates/lab-cli/src/bench.rs"
 muts = [
     # --- block structure checks shared by the fixture and Core backends ---
     ("pow check removed", B, "    header.validate_pow(target).map_err(|e| e.to_string())", "    Ok(header.block_hash())"),
@@ -134,7 +139,7 @@ muts = [
     ("verify: reference batch not checked", V, "check_batch(&reference_id, &reference_batch.blocks, next, last)?;", "let _ = (&reference_id, check_batch);"),
     ("verify: candidate chunks not linked", V, "previous_c = linked(&candidate_id, previous_c, &candidate_batch.blocks)?;", "previous_c = linked(&candidate_id, None, &candidate_batch.blocks)?;"),
     ("verify: reference chunks not linked", V, "previous_r = linked(&reference_id, previous_r, &reference_batch.blocks)?;", "previous_r = linked(&reference_id, None, &reference_batch.blocks)?;"),
-    ("verify: duplicates only checked per block", V, "let found_c = scan_one(&candidate_id, c_block, &mut seen_c)?;", "let found_c = scan_one(&candidate_id, c_block, &mut BTreeSet::new())?;"),
+    ("verify: duplicates only checked per block", V, "let found_c = scan_one(&candidate_id, c_block, &mut seen_c)?;", "let found_c = scan_one(&candidate_id, c_block, {\n                seen_c.clear();\n                &mut seen_c\n            })?;"),
     ("verify: identical despite different block hashes", V, "report.identical = report.differences.is_empty() && report.block_hash_mismatches.is_empty();", "report.identical = report.differences.is_empty();"),
     ("oracle: tweaks_only may be absent", O, "    // Required: an answer without it is not from an oracle this adapter knows.\n    tweaks_only: bool,", "    #[serde(default)]\n    tweaks_only: bool,"),
     ("oracle: error text from /info unbounded", O, 'SourceError::InvalidData(format!("oracle /info: {}", printable(&e.to_string())))', 'SourceError::InvalidData(format!("oracle /info: {}", e))'),
@@ -159,6 +164,7 @@ muts = [
     ("sync: birthday above tip not named", S, "if meta.birthday > report.source_tip.height {", "if false {"),
     ("sync: target below tip not named", S, "return Ok(if target < report.source_tip.height {", "return Ok(if false {"),
     ("sync: max blocks ignored", S, ".is_some_and(|max| report.blocks_scanned >= max)", ".is_some_and(|_| false)"),
+    ("sync: checkpoint not advanced after a commit", S, "            report.checkpoint = Some(*last);\n", ""),
     ("sync: progress callback not called", S, "on_commit(*last);", "let _ = (last, &on_commit);"),
     # --- store invariants ---
     ("store: append need not extend checkpoint", T, "if u64::from(first.height) != u64::from(cp.height) + 1 || first.prev_hash != cp.hash {", "if false {"),
@@ -188,6 +194,8 @@ muts = [
     ("sqlite: gap in the stored chain accepted", Q, "if min != i64::from(meta.birthday) || max - min + 1 != count {", "if min != i64::from(meta.birthday) {"),
     ("sqlite: broken hash link accepted", Q, "if broken != 0 || self_parent != 0 {", "if self_parent != 0 {"),
     ("sqlite: self-parent block accepted on open", Q, "if broken != 0 || self_parent != 0 {", "if broken != 0 {"),
+    ("sqlite: detections without their block accepted", Q, "if orphans != 0 {", "if false {"),
+    ("sqlite: detections of another backend accepted", Q, "if foreign != 0 {", "if false {"),
     ("sqlite: blocks without a binding accepted", Q, "return if count == 0 {", "return if true {"),
     ("sqlite: binding with birthday 0 read", Q, "if meta.as_ref().is_some_and(|m| m.birthday == 0) {", "if false {"),
     ("sqlite: unreadable binding treated as none", Q, '        .map(|j| serde_json::from_str(&j).map_err(|_| corrupt("binding")))\n        .transpose()?;', "        .and_then(|j| serde_json::from_str(&j).ok());"),
@@ -197,6 +205,15 @@ muts = [
     ("sqlite: negative vout wrapped", Q, 'vout: u32::try_from(vout).map_err(|_| corrupt("vout"))?,', "vout: vout as u32,"),
     ("sqlite: negative value wrapped", Q, 'value_sats: u64::try_from(value).map_err(|_| corrupt("value"))?,', "value_sats: value as u64,"),
     ("sqlite: negative label wrapped", Q, '                        .map(|m| u32::try_from(m).map_err(|_| corrupt("label")))\n                        .transpose()?,', "                        .map(|m| m as u32),"),
+    # --- benchmark records ---
+    ("bench: restore mismatch not flagged", K, "mode_check_passed: original.is_none_or(|held| held == detections),", "mode_check_passed: true,"),
+    ("bench: failed runs counted in the statistics", K, "                .filter(|r| r.error.is_none())\n", "                .filter(|_| true)\n"),
+    ("bench: differing runs not counted", K, ".filter(|r| r.verification_status == Verification::DiffersFromReference)", ".filter(|_| false)"),
+    ("bench: cpu time read from the wrong fields", K, ".skip(11);", ".skip(9);"),
+    ("bench: results of other builds merged", K, "if environment != base {", "if false {"),
+    ("bench: error text recorded instead of its class", K, "record.error = Some(e.class.to_string());", "record.error = Some(e.detail.clone());"),
+    ("bench: same-result column always yes", K, "if s.mismatches == 0 && s.errors == 0 {", "if true {"),
+    ("cli: bench succeeds despite failed or differing runs", M, "if failed > 0 || differing > 0 {", "if false {"),
     # --- CLI ---
     ("cli: interrupted sync hides what it changed", M, "            show(&partial)?;\n", ""),
     ("cli: control characters in the birthday basis accepted", M, "if birthday_basis.chars().any(char::is_control) || birthday_basis.chars().count() > 500 {", "if birthday_basis.chars().count() > 500 {"),
@@ -208,6 +225,9 @@ muts = [
     ("cli: doctor succeeds with an unusable backend", M, "    if usable {\n        Ok(())", "    if true {\n        Ok(())"),
 ]
 survived = []
+if only:
+    muts = [m for m in muts if any(m[0].startswith(prefix) for prefix in only)]
+    print(f"running {len(muts)} selected entries: {only}")
 for name, path, old, new in muts:
     full = os.path.join(root, path)
     src = open(full).read()

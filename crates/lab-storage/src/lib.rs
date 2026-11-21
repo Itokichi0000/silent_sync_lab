@@ -16,9 +16,11 @@
 //! write lock up front and wait a few seconds for it, so a second process
 //! either waits or fails with a clean error; it cannot interleave a commit.
 //!
-//! A file is checked when it is opened: a binding that cannot be read, or a
-//! block chain that is not contiguous and hash-linked from the birthday, is
-//! refused rather than synced on top of.
+//! A file is checked when it is opened: a binding that cannot be read, a
+//! block chain that is not contiguous and hash-linked from the birthday, or
+//! detections without their block or from another backend, are refused
+//! rather than synced on top of. This detects damage, not tampering: nothing
+//! protects the file against someone who can write to it.
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::{path::Path, time::Duration};
@@ -180,6 +182,38 @@ impl SqliteStore {
             return Err(StoreError::Invariant(
                 "stored chain is not hash-linked".to_string(),
             ));
+        }
+        // Every stored detection belongs to a stored block and came from the
+        // backend the store is bound to (what `check_append` enforced when it
+        // was written). A detection without its block would otherwise simply
+        // not be listed.
+        let orphans: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM detected_outputs d \
+                 WHERE NOT EXISTS (SELECT 1 FROM blocks b WHERE b.height = d.height)",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(backend)?;
+        if orphans != 0 {
+            return Err(StoreError::Invariant(format!(
+                "{orphans} stored detection(s) refer to blocks that are not stored"
+            )));
+        }
+        let foreign: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM detected_outputs WHERE backend_id != ?1",
+                params![meta.backend_id],
+                |r| r.get(0),
+            )
+            .map_err(backend)?;
+        if foreign != 0 {
+            return Err(StoreError::Invariant(format!(
+                "{foreign} stored detection(s) are from another backend than `{}`",
+                meta.backend_id
+            )));
         }
         Ok(())
     }

@@ -303,7 +303,7 @@ fn damaged_stores_are_refused_on_open() {
             Ok(_) => panic!("{name}: a damaged store was opened"),
         }
     };
-    // Foreign keys are off on the raw connection, so rows can be removed freely.
+    // Rows are removed children first (foreign keys are enforced by default).
     refused(
         "gap",
         "DELETE FROM detected_outputs WHERE height = 4; DELETE FROM blocks WHERE height = 4;",
@@ -338,6 +338,18 @@ fn damaged_stores_are_refused_on_open() {
         "birthday-zero",
         "UPDATE meta SET value = replace(value, '\"birthday\":1', '\"birthday\":0') WHERE key = 'store_meta';",
         "stored binding (birthday 0) is not valid",
+    );
+    refused(
+        "orphan-detection",
+        "PRAGMA foreign_keys = OFF; \
+         INSERT INTO detected_outputs (txid, vout, height, value_sats, label, backend_id, evidence_kind) \
+         SELECT txid, 7, 9999, value_sats, label, backend_id, evidence_kind FROM detected_outputs LIMIT 1;",
+        "refer to blocks that are not stored",
+    );
+    refused(
+        "foreign-backend",
+        "UPDATE detected_outputs SET backend_id = 'somebody_else' WHERE height = 2;",
+        "from another backend than `fixture`",
     );
     refused(
         "no-binding",

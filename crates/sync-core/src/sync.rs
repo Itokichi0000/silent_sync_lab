@@ -239,14 +239,19 @@ fn check_binding(
 }
 
 /// Rolls the store back to the fork point if its checkpoint is not on the
-/// source's chain.
+/// source's chain. Returns the report together with the checkpoint the store
+/// has afterwards.
+///
+/// Everything that can fail is done *before* the rollback; once the store has
+/// been changed this function only builds its report, so a rollback can never
+/// happen without being returned.
 fn resolve_reorg(
     source: &dyn ScanSource,
     store: &mut dyn SyncStore,
     meta: &StoreMeta,
     checkpoint: BlockRef,
     source_tip: BlockRef,
-) -> Result<Option<ReorgReport>, SyncError> {
+) -> Result<Option<(ReorgReport, Option<BlockRef>)>, SyncError> {
     let on_chain = |height: u32, stored: BlockRef| -> Result<bool, SyncError> {
         Ok(source.block_ref(height)?.hash == stored.hash)
     };
@@ -287,15 +292,26 @@ fn resolve_reorg(
         height -= 1;
     };
 
-    let before = store.block_count()?;
+    // The block the store will be at afterwards (none if nothing is shared).
+    let new_checkpoint = if fork_height >= meta.birthday {
+        Some(store.block_at(fork_height)?.ok_or_else(|| {
+            StoreError::Invariant(format!("no stored block at the fork height {fork_height}"))
+        })?)
+    } else {
+        None
+    };
     let detections_removed = store.rollback_to(fork_height)?;
-    let blocks_rolled_back = before - store.block_count()?;
-    Ok(Some(ReorgReport {
-        abandoned_checkpoint: checkpoint,
-        fork_height,
-        blocks_rolled_back,
-        detections_removed,
-    }))
+    // Stored blocks are contiguous, so this is how many were above the fork.
+    let blocks_rolled_back = u64::from(checkpoint.height - fork_height);
+    Ok(Some((
+        ReorgReport {
+            abandoned_checkpoint: checkpoint,
+            fork_height,
+            blocks_rolled_back,
+            detections_removed,
+        },
+        new_checkpoint,
+    )))
 }
 
 /// Brings `store` up to the source's tip (or to the limits in `options`).
@@ -345,9 +361,14 @@ pub fn sync_with_progress(
         None => source_tip.height,
     };
     let resumed_from = store.checkpoint()?;
-    let reorg = match resumed_from {
-        Some(checkpoint) => resolve_reorg(source, store, &meta, checkpoint, source_tip)?,
-        None => None,
+    // From here on the checkpoint is tracked in memory: after the store has
+    // been changed, nothing below depends on reading it back.
+    let (reorg, checkpoint) = match resumed_from {
+        Some(stored) => match resolve_reorg(source, store, &meta, stored, source_tip)? {
+            Some((reorg, after)) => (Some(reorg), after),
+            None => (None, Some(stored)),
+        },
+        None => (None, None),
     };
 
     let mut report = SyncReport {
@@ -364,7 +385,7 @@ pub fn sync_with_progress(
         txs_scanned: 0,
         txs_skipped: BTreeMap::new(),
         new_detections: Vec::new(),
-        checkpoint: None,
+        checkpoint,
         source_tip,
         caught_up: false,
         stopped_because: StopReason::CaughtUp,
@@ -381,12 +402,10 @@ pub fn sync_with_progress(
         &mut report,
         on_commit,
     );
-    // The checkpoint as it now is, whatever happened.
-    let checkpoint = store.checkpoint();
-    match (outcome, checkpoint) {
-        (Ok(reason), Ok(checkpoint)) => {
-            report.checkpoint = checkpoint;
-            report.caught_up = checkpoint
+    match outcome {
+        Ok(reason) => {
+            report.caught_up = report
+                .checkpoint
                 .is_some_and(|cp| cp.height == source_tip.height && cp.hash == source_tip.hash);
             report.stopped_because = if report.caught_up {
                 StopReason::CaughtUp
@@ -398,19 +417,17 @@ pub fn sync_with_progress(
             };
             Ok(report)
         }
-        (Err(cause), checkpoint) => {
+        Err(cause) => {
             let changed = report.reorg.is_some() || report.blocks_scanned > 0;
             if !changed {
                 return Err(cause);
             }
-            report.checkpoint = checkpoint.ok().flatten();
             report.stopped_because = StopReason::Error;
             Err(SyncError::Interrupted {
                 cause: Box::new(cause),
                 partial: Box::new(report),
             })
         }
-        (Ok(_), Err(e)) => Err(e.into()),
     }
 }
 
@@ -431,7 +448,7 @@ fn advance(
         return Ok(StopReason::BirthdayAboveTip);
     }
     loop {
-        let checkpoint = store.checkpoint()?;
+        let checkpoint = report.checkpoint;
         let next = match checkpoint {
             Some(cp) => match cp.height.checked_add(1) {
                 Some(next) => next,
@@ -482,6 +499,7 @@ fn advance(
         }
         report.new_detections.extend(detections);
         if let Some(last) = blocks.last() {
+            report.checkpoint = Some(*last);
             on_commit(*last);
         }
     }

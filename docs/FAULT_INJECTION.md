@@ -18,11 +18,12 @@ EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
   `scan fails` は範囲全体が失敗し、何も「スキャン済み」と報告されないこと（fail-closed）。
   **`scan succeeds`** は、誤った結果が成功として報告されたこと。
 - **Cross-check**: 同じ範囲を、正直なフルブロック型ソース（自分のノードに相当）と `verify` で突き合わせた結果。
+  `verify` は両方のソースに**もう一度問い合わせて**比べる。保存済みの検出結果と比べるのではない。
 - **Verdict**:
   - `refused (fail-closed)`: 単独で検出できる。
   - `no effect`: 結果は正しいまま。
   - `NOT detected alone; shown by a cross-check`: **単独では検出できない**。正直なフルブロック型ソースとの突き合わせで初めて分かる。
-  - `NOT detected`: 突き合わせても分からない（今回の表には該当なし。ただし下の「この表が示さないこと」を参照）。
+  - `NOT detected (neither alone nor by a later cross-check)`: 単独でも、後から行う突き合わせでも分からない（I19）。
 
 ## 結果
 
@@ -40,6 +41,7 @@ EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
 | F09 | T12 | full blocks (Bitcoin Core REST) | the node stops answering (connection refused) | scan fails (source unavailable) | fails (source unavailable) | refused (fail-closed) |
 | F10 | T11 | full blocks (Bitcoin Core REST) | the node says it is on mainnet | scan fails (network refused) | fails (network refused) | refused (fail-closed) |
 | F11 | T11 | full blocks (Bitcoin Core REST) | the node announces another network (signet) for the chain it serves | scan fails (network refused) | fails (network refused) | refused (fail-closed) |
+| F12 | T11 | full blocks (Bitcoin Core REST) | the node consistently serves another chain built on the same genesis block (another fork, or an impostor on the port) | **scan succeeds**: 1 payment(s) missing, 1 non-existent payment(s) reported | differences: `block_hash_differs` | NOT detected alone; shown by a cross-check |
 | I01 | T10 | tweak index (BlindBit Oracle HTTP) | the index entry of a paying transaction is removed | **scan succeeds**: 1 payment(s) missing | differences: `candidate_omitted_transaction` | NOT detected alone; shown by a cross-check |
 | I02 | T10 | tweak index (BlindBit Oracle HTTP) | the paying output is removed from its index entry | **scan succeeds**: 1 payment(s) missing | differences: `candidate_omitted_output` | NOT detected alone; shown by a cross-check |
 | I03 | T10 | tweak index (BlindBit Oracle HTTP) | the tweak of a paying transaction is replaced by another transaction's tweak | **scan succeeds**: 1 payment(s) missing | differences: `candidate_tweak_differs` | NOT detected alone; shown by a cross-check |
@@ -58,6 +60,7 @@ EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
 | I16 | T11 | tweak index (BlindBit Oracle HTTP) | a tweak is not a point on the curve | scan fails (invalid data) | fails (invalid data) | refused (fail-closed) |
 | I17 | T11 | tweak index (BlindBit Oracle HTTP) | the amount of a paying output is set above the total supply | scan fails (inconsistent batch) | fails (inconsistent batch) | refused (fail-closed) |
 | I18 | T11 | tweak index (BlindBit Oracle HTTP) | an index entry lists no outputs | scan fails (inconsistent batch) | fails (inconsistent batch) | refused (fail-closed) |
+| I19 | T10 | tweak index (BlindBit Oracle HTTP) | the index omits a paying entry only the first time the block is requested (injected into a locally computed index) | **scan succeeds**: 1 payment(s) missing | identical | NOT detected (neither alone nor by a later cross-check) |
 | B01 | T11 | any source (batch handed to the engine) | the blocks of a response are in the wrong order | scan fails (inconsistent batch) | fails (inconsistent batch) | refused (fail-closed) |
 | B02 | T11 | any source (batch handed to the engine) | a block appears twice in a response | scan fails (inconsistent batch) | fails (inconsistent batch) | refused (fail-closed) |
 | B03 | T11 | any source (batch handed to the engine) | the last block of a response is missing (partial response) | scan fails (inconsistent batch) | fails (inconsistent batch) | refused (fail-closed) |
@@ -66,9 +69,14 @@ EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
 
 ## 読み取れること
 
-1. **フルブロック型（自分のノード）は、ブロックがコミットしている内容の改変をすべて単独で拒否する**（F01〜F04、F07〜F11）。
+1. **フルブロック型は、「ノードが示すヘッダ鎖」と食い違う内容をすべて単独で拒否する**（F01〜F04、F07〜F11）。
    ヘッダ鎖・PoW・merkle root・witness commitment・件数の検査による。
-2. **フルブロック型でも単独で検出できないものが 2 つある。**
+   F02（別の有効なブロックへの差し替え）が拒否されるのも、ヘッダ鎖が元のハッシュを示しているからである。
+2. **フルブロック型でも単独で検出できないものが 3 つある。**
+   - F12: **ヘッダ鎖ごと一貫して別のチェーンを出すノードは、単独では正しいノードと区別できない。** regtest の PoW は無意味で、signet もブロック署名を検査していないため、
+     genesis から連結した「それらしいチェーン」は誰でも作れる。入金の見逃しも、存在しない入金の検出も起きる。
+     つまりフルブロック型の保証は「**接続先が自分のノードである限り**」のもので、ループバックのポートを奪った別プロセスには及ばない（`THREAT_MODEL.md` §4.4）。
+     mainnet では PoW がこの攻撃を高価にするが、この実験は mainnet を扱わない。
    - F05: スキャン範囲より前に作られた prevout を偽られると、入金を黙って見逃す。prevout は何にもコミットされていないため、原理的に検査できない。
      自分のノードはコンセンサス検証済みのデータを返すので、これは「ノードを信用する」という前提そのもの。
    - F06: 最新ブロックを隠すノードは「短いチェーン」と区別できない。報告された先端までの結果は正しいが、その先の入金は見えない。
@@ -79,10 +87,12 @@ EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
      捏造に受信者の秘密は要らない。**受信者のアドレスを知っている者なら誰でも**、存在しない tx に対する「正しくマッチする」項目を作れる（テスト `an_index_can_fabricate_a_payment_and_only_a_cross_check_shows_it`）。アドレスは支払いを受けるために公開するものなので、これはインデックスサーバにとって現実的に可能な嘘である。
    - したがって **tweak インデックス由来の検出は「サーバがそう言った」以上の意味を持たない**。検出結果には証拠の種類（`tweak_index`）を必ず付けており、フルブロック由来の検出と同じ確度として扱ってはならない。
 4. **インデックス型でも、ブロックの同一性に関わる不正は拒否する**（I11〜I15）。ブロックの高さとハッシュは自分のノードのヘッダから取り、Oracle の申告と一致しなければ失敗にする。Oracle が遅れている・停止している場合も「空のブロック」とは扱わない。
-5. **応答の構造の乱れ（順序違い・重複・欠落・部分応答）はすべて拒否する**（B01〜B04、I07、I08）。
+5. **突き合わせで分かるのは、ソースが「いま」も同じ嘘をついている場合だけである**（I19）。
+   スキャン時だけ項目を省き、後の問い合わせには正直に答えるサーバは、`verify` では見つからない。保存済みの検出結果を参照ソースと比べる機能は実装していない（DECISIONS O-017）。
+6. **応答の構造の乱れ（順序違い・重複・欠落・部分応答）はすべて拒否する**（B01〜B04、I07、I08）。
    どのブロックにも当てはまり得ない申告（総発行量を超える金額、出力を持たない項目、1 ブロックに入り切らない数の出力）も拒否する（I17、I18）。
    ただしこれは「あり得ない値」を落とすだけで、あり得る範囲の嘘（I04 の金額改変）は通る。
-6. 順序の入れ替え（I09）と、自分宛てでない項目の省略（I10）は結果に影響しない。I10 は「このウォレットにとっては」無害というだけで、サーバが正直である証拠にはならない。
+7. 順序の入れ替え（I09）と、自分宛てでない項目の省略（I10）は結果に影響しない。I10 は「このウォレットにとっては」無害というだけで、サーバが正直である証拠にはならない。
 
 ## 永続同期での挙動（同期スイートで検査）
 
@@ -98,10 +108,10 @@ EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.
 
 ## この表が示さないこと（限界）
 
-- **突き合わせ（cross-check）は、参照側が正直で完全であることを前提にしている。** 参照も同じ嘘をつけば差分は出ない。
+- **突き合わせ（cross-check）は、参照側が正直で完全であること、そして参照側が本当に自分のノードであることを前提にしている。** 参照も同じ嘘をつけば差分は出ない。
   自分で運用していない 2 つのサーバの一致は、独立した正しさの証明にならない（設計書 §5.6）。
 - 「範囲より前の prevout の嘘」（F05）は、参照側のノードが同じ嘘をつく場合は検出できない。表の F05 が「突き合わせで分かる」になっているのは、参照が正直な別ソースだからである。
-- ここで注入したのは 33 種類の不正だけで、網羅ではない。特に、時間的な攻撃（応答を遅らせて古い先端を見せ続ける等）、リソース枯渇、
+- ここで注入したのは 35 種類の不正だけで、網羅ではない。特に、時間的な攻撃（応答を遅らせて古い先端を見せ続ける等）、リソース枯渇、
   複数の不正の組み合わせは扱っていない。
 - 対象は 8 ブロックの fixture。規模に依存する不具合（チャンク境界など）は `crates/sync-core/tests/long_chain.rs` で別に検査している。
 - リモートのサーバに対するプライバシー上の露出（IP アドレス、接続時刻、要求範囲）は故障注入の対象外。`docs/THREAT_MODEL.md` を参照。

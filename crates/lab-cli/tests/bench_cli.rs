@@ -237,6 +237,11 @@ fn failed_and_differing_runs_are_recorded_and_fail_the_command() {
     ));
     assert_eq!(code, Some(1), "{stdout}");
     assert!(stderr.contains("2 run(s) failed"), "{stderr}");
+    // The reason itself is shown on the terminal.
+    assert!(
+        stderr.contains("FAILED (source could not be opened): source is unavailable"),
+        "{stderr}"
+    );
     let runs = read(&out)["runs"].as_array().unwrap().clone();
     assert_eq!(runs.len(), 4);
     for r in &runs[..2] {
@@ -245,13 +250,8 @@ fn failed_and_differing_runs_are_recorded_and_fail_the_command() {
     }
     for r in &runs[2..] {
         assert_eq!(r["backend"], "core");
-        assert!(
-            r["error"]
-                .as_str()
-                .unwrap()
-                .contains("source is unavailable"),
-            "{r}"
-        );
+        // The class of the failure, not its text.
+        assert_eq!(r["error"], "source could not be opened", "{r}");
         assert_eq!(r["verification_status"], "not_run");
         assert_eq!(r["detected_count"], 0);
         assert!(!r["error"].as_str().unwrap().contains('\n'));
@@ -420,4 +420,132 @@ fn export_converts_and_merges_results() {
     let (code, _, stderr) = run(&["export", "--input", &other]);
     assert_eq!(code, Some(1));
     assert!(stderr.contains("unsupported results format"), "{stderr}");
+}
+
+/// Failed runs must not smuggle what successful runs leave out: error text
+/// can quote a path, a URL or a transaction id, so only its class is kept.
+#[test]
+fn failed_runs_record_a_class_not_the_error_text() {
+    let temp = Temp::new("failure-privacy");
+    let out = temp.path("results.json");
+    let missing_dir = temp.path("alice-private-dir/does-not-exist");
+    let (code, _, stderr) = run(&[
+        "bench",
+        "--backends",
+        "fixture,core",
+        "--fixture",
+        FIXTURE,
+        "--core-rest-url",
+        "http://mynode.home.example:8332",
+        "--label",
+        "1",
+        "--repeat",
+        "1",
+        "--modes",
+        "scan,sync_cold",
+        "--to",
+        "8",
+        "--output",
+        &out,
+        "--work-dir",
+        &missing_dir,
+    ]);
+    assert_eq!(code, Some(1));
+    // The terminal shows the details ...
+    assert!(
+        stderr.contains("alice-private-dir") && stderr.contains("mynode.home.example"),
+        "{stderr}"
+    );
+    // ... the results and every export of them do not.
+    let csv = temp.path("results.csv");
+    let md = temp.path("results.md");
+    for (format, path) in [("csv", &csv), ("markdown", &md)] {
+        let (code, _, stderr) = run(&[
+            "export", "--input", &out, "--format", format, "--output", path,
+        ]);
+        assert_eq!(code, Some(0), "{stderr}");
+    }
+    for path in [&out, &csv, &md] {
+        let text = std::fs::read_to_string(path).unwrap();
+        for needle in [
+            "alice-private-dir",
+            "mynode",
+            "example",
+            "http://",
+            "sqlite3",
+        ] {
+            assert!(!text.contains(needle), "{path} contains `{needle}`");
+        }
+    }
+    let errors: Vec<Option<String>> = read(&out)["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["error"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        errors,
+        vec![
+            None,                                           // fixture scan needs no store
+            Some("store: backend error".to_string()),       // fixture sync_cold: no such directory
+            Some("source could not be opened".to_string()), // core: URL refused
+            Some("source could not be opened".to_string()),
+        ]
+    );
+}
+
+/// The request and byte counters cover everything the measured part sent and
+/// received, connecting included.
+#[test]
+fn transfer_counters_include_the_connection() {
+    use lab_testkit::fake_http::FakeCoreRest;
+    let temp = Temp::new("counters");
+    let out = temp.path("results.json");
+    let node = FakeCoreRest::serve(&fixture_gen::generate());
+    let (code, _, stderr) = run(&[
+        "bench",
+        "--backends",
+        "core",
+        "--core-rest-url",
+        &node.url(),
+        "--label",
+        "1",
+        "--repeat",
+        "1",
+        "--modes",
+        "scan",
+        "--from",
+        "1",
+        "--to",
+        "8",
+        "--output",
+        &out,
+        "--work-dir",
+        temp.0.to_str().unwrap(),
+    ]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let run = &read(&out)["runs"][0];
+    let served = node.http.requests();
+    // After the measured part, the range's first and last block hashes are
+    // looked up for the record: those two requests are not part of it.
+    let (measured, afterwards) = served.split_at(served.len() - 2);
+    assert!(
+        afterwards
+            .iter()
+            .all(|r| r.starts_with("/rest/blockhashbyheight/")),
+        "{afterwards:?}"
+    );
+    assert_eq!(
+        run["requests"].as_u64().unwrap(),
+        measured.len() as u64,
+        "every request of the measured part is counted: {measured:?}"
+    );
+    assert_eq!(
+        measured[0], "/rest/chaininfo.json",
+        "the connection's own requests are included"
+    );
+    // 8 blocks and their spent outputs, plus the connection and header checks.
+    assert!(served.len() > 16, "{served:?}");
+    assert!(run["downloaded_bytes"].as_u64().unwrap() > 1_000);
+    assert_eq!(run["detected_count"], 7);
 }
