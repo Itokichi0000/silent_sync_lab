@@ -58,4 +58,10 @@ grep -q "^identical: true$" <<<"$out" || { echo "$out"; echo "unexpected example
 out="$(cargo run --quiet --locked -p silent-sync --example custom_store \
   --features fixture -- fixtures/local/regtest_basic_v1.json)"
 [ "$(grep -c "evidence FullBlockWithPrevouts" <<<"$out")" = 7 ] || { echo "$out"; echo "unexpected example output" >&2; exit 1; }
+out="$(cargo run --quiet --locked -p silent-sync --example audit_and_add_label \
+  --features fixture,local-index -- fixtures/local/regtest_basic_v1.json)"
+grep -q "^audit against full blocks: identical: true (7 agreed, 0 only in the store, 0 only in the blocks)$" <<<"$out" \
+  && grep -q "^rescan with labels \[0, 1, 5\]: 7 found again, 1 added$" <<<"$out" \
+  && grep -q "^audit after the rescan: identical: true (8 agreed)$" <<<"$out" \
+  || { echo "$out"; echo "unexpected example output" >&2; exit 1; }
 echo "ok"

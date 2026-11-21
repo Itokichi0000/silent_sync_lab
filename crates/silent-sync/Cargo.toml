@@ -46,5 +46,9 @@ required-features = ["fixture", "local-index"]
 name = "custom_store"
 required-features = ["fixture"]
 
+[[example]]
+name = "audit_and_add_label"
+required-features = ["fixture", "local-index"]
+
 [lints]
 workspace = true
