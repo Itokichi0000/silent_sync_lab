@@ -9,8 +9,8 @@
 | 2 | Bitcoin Core / regtest 統合 | **完了**（Gate 2 通過） |
 | 3 | 永続化・再開・復元 | **完了**（Gate 3 通過） |
 | 4 | 第二バックエンド | **完了**（Gate 4 通過） |
-| 5 | ベンチマーク・故障注入 | 未着手 |
-| 6 | 進路決定 | 未着手 |
+| 5 | ベンチマーク・故障注入 | **完了**（Gate 5 通過） |
+| 6 | 進路決定 | 判断材料を作成。**決定は所有者待ち**（`docs/PHASE6_DECISION_MATERIALS.md`） |
 
 ## Done
 
@@ -28,23 +28,33 @@
 - [x] `cargo fmt` / `cargo clippy -D warnings` / `cargo test` の結果を保存
 - [x] CI ワークフロー（`.github/workflows/ci.yml`）
 - [x] 独立レビューの実施と指摘への対応、検査の無効化チェック（`scripts/mutation_check.py`）
+- [x] Bitcoin Core REST バックエンド、実ノードでの「送信 → 採掘 → 検出」（Phase 2）
+- [x] 永続化・再開・reorg・復元（Phase 3）: `lab init` / `sync` / `status` / `received list`
+- [x] 第二バックエンド（BlindBit Oracle v2）と突き合わせ `verify`（Phase 4）
+- [x] ベンチマーク（`bench` / `export`）、故障注入マトリクス、`docs/THREAT_MODEL.md`、`docs/BENCHMARK_PROTOCOL.md`、`docs/BENCHMARK_REPORT.md`、`docs/FAULT_INJECTION.md`（Phase 5）
+- [x] 進路決定の判断材料（Phase 6。決定そのものは未了）
+- [x] GitHub Actions: 通常テストと、実ノード + 実 Oracle の E2E ジョブが成功していることを確認（直近のコミットまで）
 
-## Not done（このフェーズの対象外、または未実施）
+## Not done
 
-- [ ] ベンチマーク、故障注入レポート、`export` / `bench` / `status` / `received list` / `lab init` コマンド（Phase 3〜5）
-- [ ] `docs/THREAT_MODEL.md`, `docs/BENCHMARK_PROTOCOL.md`（Phase 4〜5 の前に作成）
-- [ ] 機密情報検出の pre-commit / CI ツール（DECISIONS O-009）
-- [ ] MSRV 1.85.0 でのテスト実行（`cargo +1.85.0 check --workspace --all-targets --locked` の成功までは確認済み。CI には未追加）
+- [ ] **進路の決定**（Phase 6）。材料は揃えたが、選ぶのは所有者。
+- [ ] ライセンスの決定（DECISIONS O-001）、上流への不具合報告（O-002）
+- [ ] 機密情報検出の pre-commit / CI ツール（O-009）。現状は `.gitignore` と、出力・DB・結果ファイルに鍵が現れないことのテスト
+- [ ] MSRV 1.85.0 でのテスト実行（`cargo check` までは Phase 1 で確認。CI には未追加）
 - [ ] property-based / fuzz テスト（設計書 §11 で初期 MVP では任意）
-- [ ] 上流への不具合報告（DECISIONS O-002）
+- [ ] gRPC（O-014）、リモートのサーバとの比較（O-015）、ヘッダ鎖の永続化（O-016）、reorg 深さの上限（O-013）、ラベル追加時の再スキャン（O-006）
+- [ ] 無効化チェックの CI での定期実行（ワークフロー `mutation.yml` は用意したが、GitHub 上での実行結果は未確認: UNVERIFIED）
 
 ## Blocked
 
-現時点でブロックされている作業はない。
+ブロックされている作業はない。
 
-Phase 2 以降の前提として未解決のもの:
-- この実行環境に `bitcoind` が無い。Bitcoin Core のバージョン選定と入手（DECISIONS O-003）が Phase 2 の最初の作業になる。
-- BlindBit Oracle v2 の gRPC スキーマと regtest での実動作が `UNVERIFIED`（RESEARCH §4）。確認できなければ Phase 4 は設計書どおり fixture ベースの `indexed_data` アダプタを先に作り、外部 Oracle 連携を `BLOCKED` と記録する。
+## Unverified（確認できていないこと）
+
+- 実際の signet での動作。インターネット越し・mainnet 規模での性能。
+- 非 Linux 環境（ファイル権限、CPU 時間の計測）。
+- BlindBit Oracle の他の構成（cut-through、dust フィルタ）、gRPC、ノードの reorg に対する実 Oracle の挙動。
+- Oracle が先端の高さを報告するまでの時間が、インデックス完了を正しく表すか（BENCHMARK_REPORT §5.2）。
 
 ---
 
@@ -296,7 +306,7 @@ Phase 2 以降の前提として未解決のもの:
   |---|---|
   | 通常テスト | 131 passed |
   | 実ノード + 実 Oracle の E2E（Bitcoin Core 32.1、BlindBit Oracle `f9ab7fd`） | 8 passed（3 回連続で実行し全て成功） |
-  | 検査の無効化チェック | 92 項目。結果は下の「追記」を参照 |
+  | 検査の無効化チェック | 92 項目: 検出 91、設定エラー 1（下の「追記」を参照） |
 - **出力証拠**: `docs/logs/phase4_cargo_fmt.log`, `phase4_cargo_clippy.log`, `phase4_cargo_test.log`, `phase4_e2e.log`, `phase4_mutation_check.log`
 - **調べた上流資料・commit SHA**: BlindBit Oracle v2 `f9ab7fd` を実際にビルドし regtest で動かして応答を確認（RESEARCH §4.1）。
 - **安全性で気をつけたこと**:
@@ -341,11 +351,114 @@ Phase 2 以降の前提として未解決のもの:
 4. 同一 tx 内で `k = 0` の出力を省かれると、`k = 1` 以降の出力も見えなくなる（ラベル欠落と同じ構造）。`verify` は省かれた出力は説明できるが、連鎖して見えなくなった出力は「説明不能」に分類される。
 5. Phase 2 のレビューで、Core 経路の mainnet 拒否が「申告の確認」にとどまっていたことが分かった。**ブロックが genesis に連結していること**を確かめて初めて、データそのものに対する拒否になる。
 
-### 追記: 無効化チェック
+### 追記: 無効化チェック（Phase 4）
 
-（Phase 4 のコミット時点で実行中。結果は次のコミットでここに記録する。）
+Phase 4 のコミット（`3319c3d`）に対する 92 項目の実行結果: **検出 91、設定エラー 1**（`docs/logs/phase4_mutation_check.log`）。
+設定エラーは「PoW 検査を外す」項目の置換パターンが、Phase 2 レビュー対応でのコード変更に追従していなかったもの（検査が外れたのに通ったのではなく、無効化そのものが適用されなかった）。パターンを直し、以後の実行で検出されることを確認した。
 
-## 次に取り組む最小タスク（Phase 1 完了時点の記録）
+### 独立レビューの結果と対応（Phase 4）
+
+別エージェントによる敵対的レビュー（対象 commit `bd2221e`）。**重大・高の欠陥の指摘は無し**。中〜低 13 件の指摘と対応は DECISIONS D-035。要点:
+
+- HTTP のヘッダ・ステータス行に上限が無かった → 16 KiB。
+- ノードが応答しないとき、検証済みヘッダのキャッシュを 1 件ずつ捨てながらタイムアウトを繰り返していた → 「無いと答えた」と「答えない」を区別。reorg の分岐点は二分探索。
+- `verify` が `scan` より弱かった（チャンク連結・範囲全体の重複を見ない）→ 同じ規則を適用。
+- CLI のテキスト出力がインデックス由来の検出を断りなく表示していた → 証拠種別と「UNVERIFIED index claim」を必ず表示。
+- インデックスの「あり得ない申告」（総発行量超の金額、出力の無い項目、多すぎる出力）を拒否。
+- ローカルインデックスのポリシーを backend id に含め、ストアで混ざらないようにした。
+- ヘッダ参照をブロックごとの 1 リクエストから、範囲ごとの 1 リクエストに。
+
+## Phase 5 Result
+
+### 独立レビューの結果と対応（Phase 5）
+
+別エージェントによる敵対的レビュー（対象 commit `d5c6149`）。指摘 9 件（うち重要度「高」1 件。「重大」は無し）と対応は DECISIONS D-037。要点:
+
+- **（高）ベンチマーク結果に txid・パス・URL が入り得た**（失敗した run のエラー文面を記録していた）→ エラーの分類だけを記録。置いてあった結果ファイルに漏れは無かった。
+- フルブロック型の保証を文書が強く書きすぎていた → 「接続先が自分のノードである限り」に訂正。一貫した別チェーンを出すノード（F12）を故障注入に追加。
+- 「突き合わせで分かる」は、ソースがいまも同じ嘘をつく場合だけ → 1 回だけ嘘をつくインデックス（I19、**検出不能**）を追加。
+- 変更後のストア読み出しが失敗すると、巻き戻しが報告されない経路があった → 変更後は読み返さない実装に。
+- リクエスト数・バイト数が接続時の分を含んでいなかった → 修正し、**計測を取り直した**。
+- レポートの文章にデータで裏付けられない記述があった → 派生値を `export` が生成し、文章はその表だけを引用。
+
+レビューはレポートの全数値を生データから再計算しており、表は `export` の出力と一致していた（食い違いは手書きの文章の 3 箇所で、いずれも書き直した）。
+
+- **実装したファイル**:
+  - `crates/lab-cli/src/bench.rs`（計測・集計・CSV / Markdown 出力）, `src/main.rs`（`bench` / `export` コマンド）, `build.rs`（コンパイラとターゲットを結果に記録）
+  - `crates/lab-testkit/src/fixture_gen.rs`（任意長の決定的チェーン `generate_long`）, `regtest_wallet.rs`（実ノード上の長いシナリオ `long_scenario`、`fund_many`、捏造項目の生成）, `fault_matrix.rs`（故障注入マトリクス）, `bin/{bench_node,fault_report}.rs`, `bin/gen_fixture.rs`（`--long`）
+  - テスト: `crates/sync-core/tests/{long_chain.rs,fault_matrix.rs}`, `crates/lab-cli/tests/bench_cli.rs`、既存テストへの追加
+  - 文書: `docs/BENCHMARK_PROTOCOL.md`, `docs/BENCHMARK_REPORT.md`, `docs/benchmarks/`（全試行の JSON / CSV / Markdown）, `docs/FAULT_INJECTION.md`, `docs/THREAT_MODEL.md`, `docs/PHASE6_DECISION_MATERIALS.md`
+  - Phase 3 / Phase 4 のレビュー対応（DECISIONS D-034 / D-035）
+- **実行したコマンド**: `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets --locked -- -D warnings` / `cargo test --workspace --locked` / `BITCOIND_EXE=… BLINDBIT_ORACLE_EXE=… cargo test --workspace --locked -- --ignored` / `python3 scripts/mutation_check.py <スクラッチコピー>` / `cargo build --release --locked -p lab-cli -p lab-testkit` / `gen_fixture --long N` / `bench_node 1000 10` / `silent-sync bench …`（6 回）/ `silent-sync export …` / `cargo run -p lab-testkit --bin fault_report`（手順の全文は `docs/BENCHMARK_PROTOCOL.md` §5）
+- **テスト結果**: **成功**
+  | 対象 | 件数 |
+  |---|---|
+  | 通常テスト（K_max の 2 件を含む） | 179 passed, 0 failed |
+  | 実ノード + 実 Oracle の E2E（Bitcoin Core 32.1、BlindBit Oracle `f9ab7fd`） | 9 passed, 0 failed |
+  | 検査の無効化チェック（最終コード） | 158 項目すべて検出（生存 0、設定エラー 0）。レビュー前のコードでの 147 項目の実行は検出 146・無効化の書き方の誤り 1（`phase5_mutation_check_before_review.log`） |
+  | ベンチマーク | 300 試行、失敗 0、結果の食い違い 0（レビュー対応後に取り直したもの） |
+  | 故障注入 | 35 種: 単独で拒否 23、影響なし 2、単独では検出不能で突き合わせで判明 9、検出不能 1 |
+  | GitHub Actions | 通常テストと E2E の両ジョブが成功（コミット `8dfbc3b` まで確認） |
+- **出力証拠**: `docs/logs/phase5_cargo_fmt.log`, `phase5_cargo_clippy.log`, `phase5_cargo_test.log`, `phase5_e2e.log`, `phase5_mutation_check.log`（いずれも最終コードで取り直したもの）、`docs/benchmarks/all_runs.{json,csv,md}`, `bench_node.{json,log}`
+- **調べた上流資料・commit SHA**: BlindBit Oracle `f9ab7fd` の `internal/server/handler.go`（`GetFullBlock`: 項目は出力を持つ tx についてのみ作られ、使用済みの出力も除かれない）、`internal/database/dbpebble/read.go`（`FetchOutputsAll`）。minreq 2.14.1 の `with_max_headers_size` / `with_max_status_line_length`。
+- **安全性で気をつけたこと**:
+  - 計測結果のファイルに txid・ウォレット識別子・パス・URL・鍵を入れない（テストで検査）。既存の結果ファイルは上書きしない。
+  - 計測値を手で書かない。レポートの表は `export` の出力で、引用した比率も同じ結果ファイルから計算した。
+  - サーバ側の前処理時間は取得できないので `null` のまま（推定値を入れていない）。
+  - 故障注入で「検出できない」と分かったものを、検出できるかのように書かない。判定はテストで固定し、文書の表は生成物と一致することを検査。
+  - インデックス由来の検出は「サーバの申告」であることを、CLI の全出力に表示。
+- **未完成 / ブロッカー**: ループバック・小さなブロック・最大 1000 ブロックでの計測に限られる（`BENCHMARK_REPORT.md` §6）。サーバ側の費用は未計測。ブロッカーは無い。
+
+### Gate 5 判定: 通過
+
+| 条件（再現コマンド、構成、バージョン、全試行結果、限界が揃っている） | 根拠 |
+|---|---|
+| 再現コマンド | `docs/BENCHMARK_PROTOCOL.md` §5 |
+| 構成 | 同 §2〜§4（モード、同条件の定義、測定対象のチェーン） |
+| バージョン | 結果ファイルの `environment`（ツール、スキャナ + 上流 rev、コンパイラ、ターゲット、ビルド種別）と `note`（Bitcoin Core 32.1、BlindBit Oracle `f9ab7fd`） |
+| 全試行結果 | `docs/benchmarks/all_runs.json` / `.csv`（300 試行。中央値・最小・最大・ばらつきは `BENCHMARK_REPORT.md` §3） |
+| 限界 | `BENCHMARK_REPORT.md` §6、`BENCHMARK_PROTOCOL.md` §7、`FAULT_INJECTION.md`「この表が示さないこと」 |
+
+### 設計書のテストケースとの対応（Phase 5 時点の全体）
+
+| ID | 状態 | 根拠 |
+|---|---|---|
+| T01 公式 vectors | 済 | `bip352_vectors.rs` |
+| T02 1 件の受信 / T03 複数送金・複数入力 / T04 同一 tx 内の複数出力 / T05 ラベル | 済 | `fixture_scan.rs`、実ノード `regtest_e2e.rs` |
+| T06 10 / 100 / 1000 ブロック | **済** | `BENCHMARK_REPORT.md`、`long_chain.rs`（チャンク境界）、実ノード `long_scenario_is_detected_exactly` |
+| T07 中断 → 再開 / T08 復元 / T09 再編成 | 済 | 同期スイート、CLI（SIGKILL）、実ノードの reorg。計測は `sync_resume` / `restore` |
+| T10 tweak 1 件を削除 | **済** | `FAULT_INJECTION.md` I01〜I03、I19 |
+| T11 不正データ・重複・順序変更 | **済** | 同 F01〜F05、F10〜F12、I04〜I11、I15〜I18、B01〜B04 |
+| T12 ノード・Oracle 停止 | **済** | 同 F06〜F09、I12〜I14、同期スイート（障害・遅延）、タイムアウト |
+
+### Phase 5 で分かったこと
+
+1. **この条件（ループバック、1 KB 未満のブロック）では、インデックス方式は速くならなかった。** クライアントの CPU は減る（0.6 倍前後）が、wall は 1.07〜1.34 倍で、同じ日の 2 回の計測でも比が変わった。時間の内訳は分離して測っておらず、インデックス方式の利点が出るはずの条件も測れていない。
+2. **「genesis からヘッダ鎖を検証する」ことには、チェーン長に比例する固定費がある**（1116 ブロックで約 90 KB / 接続）。安全性のために入れた検査の費用が、計測して初めて数字になった（O-016）。
+3. **tweak インデックス型は、見逃しだけでなく「誤った金額」「存在しない入金」も成功として返す。** 捏造に必要なのは受信者のアドレスだけ。表示上の区別（証拠種別）が安全性の一部になる。
+4. **フルブロック型の保証も「接続先が自分のノードである限り」のものだった。** ヘッダごと一貫した偽のチェーンは、regtest / signet では誰でも作れる。レビューで指摘されるまで、文書はこれを書いていなかった。
+5. **突き合わせは「いまの答え」を比べるだけ**で、過去のスキャン時の嘘は見つけられない。
+6. 「検出できる／できない」を文書に書くだけでは、コードの変更とずれていく。判定をテストで固定し、表を生成物と突き合わせて初めて維持できる（実際、`verify` を直したときにテストが文書の更新を要求した）。
+7. 計測コード自体にも、測る区間の取り方（準備を含めない、接続を含める）やラウンドロビンの実行順など、結果を左右する決定が多い。手順書を先に書くと、何を測っていないかが明確になる。
+
+## Phase 6（進路決定）
+
+設計書は Phase 6 を「測定結果と実装体験にもとづき 3 択から選ぶ」と定めている。**選択は所有者の判断であり、行っていない。**
+判断材料を `docs/PHASE6_DECISION_MATERIALS.md` にまとめた（手元にある成果、測定と実装から分かった事実、3 つの進路それぞれに必要なもの、決める前に答える必要のある問い、実装者の所見）。
+
+UI の作り込み、Tauri、製品形態の決め打ちは行っていない（CLAUDE.md 規約 9）。
+
+## 所有者の確認・判断が必要なもの
+
+| 項目 | 内容 |
+|---|---|
+| 進路（Phase 6） | SDK 化／実験ウォレット／研究・インフラ。`docs/PHASE6_DECISION_MATERIALS.md` |
+| ライセンス（O-001） | 未設定。決まるまで第三者は利用できない |
+| 上流への報告（O-002） | bdk-sp の 2 点（K_max、SegWit v>1）、BlindBit Oracle の 1 点（SegWit v>1）。未報告 |
+| 人間レビュー対象の承認 | D-005・D-006（承認済みの方針に基づく補正の実装内容）、**D-030（tweak インデックスからのスキャン。未承認）** |
+| Bitcoin Core のバージョン（D-019） | 32.1 を選んだ。別のバージョンを望む場合は差し替え可能 |
+
+## 過去の記録: 次に取り組む最小タスク（Phase 1 完了時点）
 
 1. Bitcoin Core のバージョンと入手方法を決める（DECISIONS O-003。人間の判断が必要）。
 2. regtest ノードを localhost バインドで起動 / 停止するスクリプト。認証は cookie、`.gitignore` 済み。

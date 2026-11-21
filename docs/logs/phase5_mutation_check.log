@@ -1,0 +1,162 @@
+$ python3 scripts/mutation_check.py <scratch copy>   (commit 40917a7)
+killed       pow check removed  <- blocks_not_rooted_at_the_network_genesis_are_refused
+killed       pow: canonical bits check removed  <- fixture_adapter_checks_proof_of_work
+killed       pow: network limit check removed  <- fixture_adapter_checks_proof_of_work, |, |
+killed       bip34 mismatch accepted  <- fixture_adapter_checks_the_coinbase_height
+killed       bip34 missing accepted  <- fixture_adapter_checks_the_coinbase_height
+killed       coinbase-first (early) removed  <- fixture_adapter_checks_coinbase_position_and_duplicates
+killed       coinbase position (loop) removed  <- fixture_adapter_checks_coinbase_position_and_duplicates
+killed       duplicate txid in block removed  <- fixture_adapter_checks_coinbase_position_and_duplicates
+killed       link of block 1 to genesis removed  <- fixture_adapter_requires_block_one_to_build_on_the_network_genesis
+killed       parent link removed  <- inconsistent_block_responses_are_refused
+killed       requested-hash check removed  <- inconsistent_block_responses_are_refused
+killed       witness commitment: mismatch accepted  <- witness_stripped_blocks_from_the_node_are_refused, |, |, |
+killed       witness commitment: reserved value not required  <- witness_stripped_blocks_from_the_node_are_refused
+killed       witness without commitment accepted  <- fixture_adapter_rejects_witness_stripped_blocks
+killed       merkle root check removed  <- inconsistent_block_responses_are_refused
+killed       prevout list count unchecked  <- inconsistent_spent_output_responses_are_refused
+killed       prevout count per tx unchecked  <- inconsistent_spent_output_responses_are_refused
+killed       witness commitment: first match used instead of last  <- witness_commitment_location_rules, {, }).is_ok()
+killed       witness commitment: longer scripts ignored  <- script.push(0x51);, witness_commitment_location_rules, {, }).is_ok()
+killed       witness commitment: extra reserved items accepted  <- witness_commitment_location_rules
+killed       prevouts not cross-checked within the range  <- source::block_check::tests::prevouts_are_cross_checked_against_outputs_created_in_the_range, |, |, |
+killed       http: non-loopback host accepted  <- core_backend_without_a_node_fails_closed
+killed       http: port not validated  <- source::http::tests::only_plain_http_to_an_ipv4_loopback_literal_with_port_is_accepted, |, |
+killed       http: credentials echoed in refusal  <- core_backend_without_a_node_fails_closed
+killed       http: redirects followed  <- redirects_and_non_200_statuses_are_errors
+killed       http: no timeout  <- source::http::tests::a_silent_server_times_out
+killed       http: header size unbounded  <- source::http::tests::response_headers_and_status_line_are_bounded
+killed       http: status line unbounded  <- source::http::tests::response_headers_and_status_line_are_bounded
+killed       http: any error status read as not found  <- an_unreachable_node_costs_one_request_and_keeps_the_verified_headers
+killed       http: non-200 success statuses accepted  <- redirects_and_non_200_statuses_are_errors
+killed       http: response size unbounded  <- source::http::tests::response_bodies_are_bounded
+killed       core: mainnet chain name accepted  <- core_backend_through_the_cli_matches_the_fixture_scan
+killed       core: node's block 0 not compared with genesis  <- mainnet_and_foreign_chains_are_refused_by_name
+killed       core: header chain links unchecked  <- blocks_not_rooted_at_the_network_genesis_are_refused
+killed       core: header proof of work unchecked  <- blocks_not_rooted_at_the_network_genesis_are_refused, |, |
+killed       core: header response need not start at the anchor  <- blocks_not_rooted_at_the_network_genesis_are_refused
+killed       core: stale header anchor kept after a reorg  <- deep_reorgs_and_range_lookups_cost_few_requests, the_header_anchor_follows_a_reorg_on_the_node
+killed       core: reorg fork point not bisected  <- deep_reorgs_and_range_lookups_cost_few_requests
+killed       core: trailing bytes after block accepted  <- inconsistent_block_responses_are_refused
+killed       core: trailing bytes after spent outputs accepted  <- source::bitcoin_core::tests::spent_outputs_decoding_is_strict
+killed       core: spent-output transaction count unbounded  <- source::bitcoin_core::tests::spent_outputs_transaction_count_is_bounded
+killed       core: range beyond tip not refused  <- Err(ScanError::Source(SourceError::RangeUnavailable, ranges_outside_the_node_s_chain_are_refused, the_tip_is_bound_to_the_verified_header_chain
+killed       core: chain switch at tip() unnoticed  <- mainnet_and_foreign_chains_are_refused_by_name
+killed       core: tip not bound to the header chain  <- the_tip_is_bound_to_the_verified_header_chain
+killed       core: block not checked against requested hash  <- inconsistent_block_responses_are_refused
+killed       oracle: mainnet name accepted  <- oracle_backend_scan_verify_doctor_and_persistent_sync
+killed       oracle: network not compared with header source  <- an_oracle_on_another_chain_or_network_is_refused
+killed       oracle: tweaks_only accepted  <- an_oracle_on_another_chain_or_network_is_refused, m.contains("tweaks_only"))
+killed       oracle: block hash not compared with header source  <- every_fault_has_the_documented_verdict
+killed       oracle: range beyond the index not refused  <- oracle_backend_scan_verify_doctor_and_persistent_sync
+killed       index: duplicate output accepted  <- malformed_oracle_answers_are_refused
+killed       index: duplicate transaction accepted  <- every_fault_has_the_documented_verdict
+killed       verify: chain mismatch unchecked  <- cross_check_refuses_mismatched_chains_and_reports_block_hash_differences
+killed       verify: block hash differences ignored  <- every_fault_has_the_documented_verdict, |, |
+killed       verify: detail differences ignored  <- every_fault_has_the_documented_verdict, |, |, |
+killed       missing-witness check removed  <- engine_fails_the_range_when_a_source_serves_stripped_transactions, scanner_refuses_segwit_spends_without_witness
+killed       missing-witness: p2sh-wrapped dropped  <- scanner_refuses_segwit_spends_without_witness, |, |
+killed       missing-witness: any p2sh flagged  <- scanner_refuses_segwit_spends_without_witness
+killed       segwit>1 rule removed  <- every_run_is_recorded_and_compared, failed_and_differing_runs_are_recorded_and_fail_the_command, transfer_counters_include_the_connection
+killed       prevout count check removed  <- engine_propagates_transaction_errors_and_refuses_other_chains, missing_prevouts_are_an_error_not_a_silent_miss
+killed       engine: empty block accepted  <- engine_rejects_structurally_impossible_blocks
+killed       engine: coinbase position unchecked  <- engine_rejects_structurally_impossible_blocks
+killed       engine: duplicate txid unchecked  <- engine_rejects_structurally_impossible_blocks
+killed       engine: self-parent unchecked  <- engine_rejects_structurally_impossible_blocks
+killed       engine: hash link unchecked  <- engine_rejects_short_reordered_duplicated_or_unlinked_batches
+killed       engine: chain mismatch unchecked  <- engine_propagates_transaction_errors_and_refuses_other_chains
+killed       signet mapped to testnet  <- network::tests::networks_map_to_their_well_known_genesis_blocks
+killed       chain identity deserialize unverified  <- network::tests::chain_identity_cannot_be_deserialized_with_a_foreign_genesis
+killed       mainnet name accepted as regtest  <- failed_and_differing_runs_are_recorded_and_fail_the_command
+killed       index: entry without outputs accepted  <- every_fault_has_the_documented_verdict
+killed       index: impossible amount accepted  <- every_fault_has_the_documented_verdict, |, |
+killed       index: output count unbounded  <- impossible_index_claims_are_refused
+killed       index: detections not ordered by output index  <- detections_of_one_transaction_are_ordered_by_output_index, |, |
+killed       local index: non-taproot outputs listed  <- the_local_index_lists_only_taproot_outputs
+killed       local index: policy not part of the backend id  <- a_store_is_bound_to_the_index_policy
+killed       verify: candidate batch not checked  <- every_fault_has_the_documented_verdict
+killed       verify: reference batch not checked  <- cross_check_applies_the_range_rules_to_both_sides
+killed       verify: candidate chunks not linked  <- cross_check_applies_the_range_rules_to_both_sides, |, |, |, |
+killed       verify: reference chunks not linked  <- cross_check_applies_the_range_rules_to_both_sides, |, |, |, |
+killed       verify: duplicates only checked per block  <- every_fault_has_the_documented_verdict
+killed       verify: identical despite different block hashes  <- cross_check_applies_the_range_rules_to_both_sides
+killed       oracle: tweaks_only may be absent  <- m.contains("tweaks_only")), malformed_oracle_answers_are_refused
+killed       oracle: error text from /info unbounded  <- malformed_oracle_answers_are_refused
+killed       core: error text from chaininfo unbounded  <- malformed_oracle_answers_are_refused
+killed       core: range lookup validates per block  <- deep_reorgs_and_range_lookups_cost_few_requests
+killed       sync: zero chunk size accepted  <- the_store_is_protected_from_misuse
+killed       sync: binding chain unchecked  <- a_store_only_syncs_what_it_is_bound_to
+killed       sync: binding wallet unchecked  <- a_store_only_syncs_what_it_is_bound_to
+killed       sync: binding backend unchecked  <- the_store_is_protected_from_misuse
+killed       sync: binding labels unchecked  <- a_store_only_syncs_what_it_is_bound_to
+killed       sync: binding scanner version unchecked  <- a_store_only_syncs_what_it_is_bound_to
+killed       sync: reorg never detected  <- an_interrupted_sync_reports_what_it_changed, reorg_is_reported_and_resolved
+killed       sync: lagging source treated as reorg  <- a_source_behind_the_checkpoint_is_refused, |, |
+killed       sync: source below birthday treated as reorg  <- a_source_behind_the_checkpoint_is_refused
+killed       sync: target above tip accepted  <- the_store_is_protected_from_misuse
+killed       sync: chunk not linked to checkpoint  <- blocks_that_do_not_extend_the_checkpoint_are_refused, |, |, |
+killed       sync: batch not re-checked  <- short_batches_are_refused_by_sync
+killed       sync: rollback before a failure not reported  <- a_failure_after_a_reorg_rollback_still_reports_the_reorg
+killed       sync: commits before a failure not reported  <- source_outage_leaves_a_resumable_store
+killed       sync: tip on another block reported as caught up  <- the_reason_a_sync_stopped_is_reported
+killed       sync: birthday above tip not named  <- the_reason_for_stopping_is_shown
+killed       sync: target below tip not named  <- stopped_sync_resumes_from_the_checkpoint
+killed       sync: max blocks ignored  <- stopped_sync_resumes_from_the_checkpoint, the_reason_for_stopping_is_shown
+killed       sync: checkpoint not advanced after a commit  <- bench::tests::a_restore_that_differs_from_the_deleted_store_is_a_failed_run
+killed       sync: progress callback not called  <- killed_sync_resumes_without_loss_or_duplicates
+killed       store: append need not extend checkpoint  <- stores_reject_inconsistent_appends
+killed       store: first block need not be birthday  <- stores_reject_inconsistent_appends
+killed       store: blocks in a call need not link  <- stores_reject_inconsistent_appends
+killed       store: detection network unchecked  <- stores_reject_inconsistent_appends
+killed       store: detection block membership unchecked  <- stores_reject_inconsistent_appends
+killed       store: duplicate outputs accepted  <- stores_reject_inconsistent_appends
+killed       store: empty append accepted  <- stores_reject_inconsistent_appends
+killed       store: self-parent block accepted  <- stores_reject_inconsistent_appends
+killed       store: block hash repeated within a call accepted  <- stores_reject_inconsistent_appends
+killed       store: stored block hash accepted again  <- stores_reject_inconsistent_appends, |, |
+killed       store: unrepresentable value accepted  <- oracle_backend_fails_closed_without_services
+killed       store: detection from another backend accepted  <- stores_reject_inconsistent_appends
+killed       store: order ignores the txid  <- detections_come_back_in_the_canonical_order
+killed       store: order by txid hex text  <- detections_come_back_in_the_canonical_order
+killed       store: memory store lists detections uninitialized  <- stores_reject_inconsistent_appends
+killed       sqlite: existing file overwritten  <- the_store_is_protected_from_misuse
+killed       sqlite: schema version unchecked  <- files_are_never_overwritten_and_foreign_files_are_refused
+killed       sqlite: double initialize accepted  <- a_store_only_syncs_what_it_is_bound_to
+killed       sqlite: zero birthday accepted  <- the_store_is_protected_from_misuse
+killed       sqlite: file permissions not restricted  <- database_file_is_owner_only
+killed       sqlite: order by txid hex text  <- detections_come_back_in_the_canonical_order
+killed       sqlite: integrity not checked on open  <- damaged_stores_are_refused_on_open, |, |
+killed       sqlite: chain need not start at the birthday  <- damaged_stores_are_refused_on_open
+killed       sqlite: gap in the stored chain accepted  <- damaged_stores_are_refused_on_open
+killed       sqlite: broken hash link accepted  <- damaged_stores_are_refused_on_open, |, |
+killed       sqlite: self-parent block accepted on open  <- damaged_stores_are_refused_on_open, |, |
+killed       sqlite: detections without their block accepted  <- damaged_stores_are_refused_on_open
+killed       sqlite: detections of another backend accepted  <- damaged_stores_are_refused_on_open
+killed       sqlite: blocks without a binding accepted  <- damaged_stores_are_refused_on_open
+killed       sqlite: binding with birthday 0 read  <- damaged_stores_are_refused_on_open
+killed       sqlite: unreadable binding treated as none  <- damaged_stores_are_refused_on_open
+killed       sqlite: append does not take the write lock up front  <- a_briefly_locked_file_delays_the_commit
+killed       sqlite: no busy timeout  <- a_briefly_locked_file_delays_the_commit
+killed       sqlite: stored block hash not pre-checked  <- stores_reject_inconsistent_appends, |, |
+killed       sqlite: negative vout wrapped  <- rows_that_cannot_be_valid_are_errors_when_read
+killed       sqlite: negative value wrapped  <- rows_that_cannot_be_valid_are_errors_when_read
+killed       sqlite: negative label wrapped  <- rows_that_cannot_be_valid_are_errors_when_read
+killed       bench: restore mismatch not flagged  <- bench::tests::a_restore_that_differs_from_the_deleted_store_is_a_failed_run, |, |, |, |
+killed       bench: failed runs counted in the statistics  <- bench::tests::failed_and_differing_runs_are_not_counted_as_good
+killed       bench: differing runs not counted  <- bench::tests::failed_and_differing_runs_are_not_counted_as_good
+killed       bench: cpu time read from the wrong fields  <- bench::tests::cpu_ticks_are_the_14th_and_15th_fields_whatever_the_command_name
+killed       bench: results of other builds merged  <- bench::tests::results_of_different_builds_are_not_merged, other_build]).is_err_and(|e|
+killed       bench: error text recorded instead of its class  <- bench::tests::a_restore_that_differs_from_the_deleted_store_is_a_failed_run, |, |
+killed       bench: same-result column always yes  <- bench::tests::failed_and_differing_runs_are_not_counted_as_good
+killed       cli: bench succeeds despite failed or differing runs  <- failed_and_differing_runs_are_recorded_and_fail_the_command, failed_runs_record_a_class_not_the_error_text
+killed       cli: interrupted sync hides what it changed  <- an_interrupted_sync_reports_what_it_changed, |, |
+killed       cli: control characters in the birthday basis accepted  <- the_store_is_protected_from_misuse
+killed       cli: unbounded birthday basis accepted  <- the_store_is_protected_from_misuse
+killed       cli: source chain not compared with --network  <- scan_fails_closed, |, |
+killed       cli: store network unchecked  <- the_store_is_protected_from_misuse
+killed       cli: empty birthday basis accepted  <- the_store_is_protected_from_misuse
+killed       cli: verify succeeds despite differences  <- local_index_scan_and_verify_on_the_fixture, oracle_backend_scan_verify_doctor_and_persistent_sync
+killed       cli: doctor succeeds with an unusable backend  <- core_backend_through_the_cli_matches_the_fixture_scan, core_backend_without_a_node_fails_closed, |, |
+
+SURVIVORS: none
+exit=0
