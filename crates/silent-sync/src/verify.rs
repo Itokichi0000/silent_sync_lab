@@ -292,10 +292,22 @@ pub fn cross_check(
     loop {
         let last = to.min(next.saturating_add(SCAN_CHUNK_BLOCKS - 1));
         let candidate_batch = candidate.fetch_range(next, last)?;
-        check_batch(&candidate_id, &candidate_batch.blocks, next, last)?;
+        check_batch(
+            &candidate_id,
+            &candidate_batch.blocks,
+            next,
+            last,
+            candidate.capabilities().evidence_kind,
+        )?;
         previous_c = linked(&candidate_id, previous_c, &candidate_batch.blocks)?;
         let reference_batch = reference.fetch_range(next, last)?;
-        check_batch(&reference_id, &reference_batch.blocks, next, last)?;
+        check_batch(
+            &reference_id,
+            &reference_batch.blocks,
+            next,
+            last,
+            reference.capabilities().evidence_kind,
+        )?;
         previous_r = linked(&reference_id, previous_r, &reference_batch.blocks)?;
 
         for (c_block, r_block) in candidate_batch.blocks.iter().zip(&reference_batch.blocks) {

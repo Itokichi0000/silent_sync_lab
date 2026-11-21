@@ -18,9 +18,15 @@
 //! * the key derived for an input is the key of that input's output script;
 //! * every signature verifies against that key;
 //! * the fee is what the inputs leave after the outputs, and within limits;
-//! * the wallet's own scanner, given the finished transaction, finds the
-//!   change output with the expected amount — so change is never sent to a
-//!   key the wallet could not find again.
+//! * when there is change: the wallet's own scanner, given the finished
+//!   transaction, finds the change output with the expected amount — so
+//!   change is never sent to a key the wallet could not find again.
+//!
+//! What is **not** checked independently: that the key computed for someone
+//! else's silent payment address is the one that recipient will find (only
+//! their scan key could tell). That rests on the upstream sender, on this
+//! project's tests of it against its own scanner, and on a real node and a
+//! second wallet in the end-to-end test.
 //!
 //! Tweaks are derived when the transaction is built
 //! ([`silent_sync::spend::recover_spendable`]) and dropped when this
@@ -120,6 +126,8 @@ pub struct SendLimits {
     pub max_fee_sats: u64,
     /// Most inputs one transaction may spend.
     pub max_inputs: usize,
+    /// Highest fee accepted as a percentage of the total paid.
+    pub max_fee_percent: u64,
 }
 
 impl Default for SendLimits {
@@ -128,6 +136,7 @@ impl Default for SendLimits {
             max_fee_rate: 500,
             max_fee_sats: 100_000,
             max_inputs: 200,
+            max_fee_percent: 50,
         }
     }
 }
@@ -136,6 +145,12 @@ impl SendLimits {
     /// Highest total fee accepted, in satoshi.
     pub fn with_max_fee_sats(mut self, max_fee_sats: u64) -> Self {
         self.max_fee_sats = max_fee_sats;
+        self
+    }
+
+    /// Highest fee accepted as a percentage of the total paid.
+    pub fn with_max_fee_percent(mut self, max_fee_percent: u64) -> Self {
+        self.max_fee_percent = max_fee_percent;
         self
     }
 }
@@ -196,6 +211,32 @@ pub enum SendError {
         fee_sats: u64,
         /// The limit.
         max: u64,
+    },
+    #[error(
+        "the fee would be {fee_sats} sat for a payment of {paid_sats} sat: more than \
+         {max_percent}% of what is paid"
+    )]
+    /// The fee is large next to the payment.
+    FeeTooHighForAmount {
+        /// The fee the transaction would pay.
+        fee_sats: u64,
+        /// The total of the payments.
+        paid_sats: u64,
+        /// The limit, as a percentage of the total paid.
+        max_percent: u64,
+    },
+    #[error("an amount exceeds what can exist ({max} sat)")]
+    /// A payment, the payments together or the inputs exceed the total
+    /// supply: no real transaction has such amounts.
+    AmountTooLarge {
+        /// The largest amount that can exist.
+        max: u64,
+    },
+    #[error("the output {outpoint} was offered as an input more than once")]
+    /// The same output appears twice among the candidates.
+    DuplicateInput {
+        /// The output.
+        outpoint: OutPoint,
     },
     #[error(transparent)]
     /// An input could not be prepared for spending.
@@ -259,8 +300,11 @@ pub struct BuiltTransaction {
     pub payments: Vec<PaidOutput>,
     /// The change back to this wallet (label 0), if any.
     pub change: Option<ChangeOutput>,
-    /// The fee: inputs minus outputs.
+    /// The fee: inputs minus outputs. It can be more than size × rate by
+    /// less than one output's worth: what is too small to return as change.
     pub fee_sats: u64,
+    /// The fee rate that was asked for, in satoshi per virtual byte.
+    pub fee_rate_asked: u64,
     /// Virtual size in bytes.
     pub vsize: u64,
 }
@@ -281,7 +325,10 @@ fn unsigned(inputs: &[OutPoint], outputs: Vec<TxOut>) -> Transaction {
             .map(|outpoint| TxIn {
                 previous_output: *outpoint,
                 script_sig: ScriptBuf::new(),
-                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                // Does not ask to be replaceable: this wallet has no way to
+                // replace a transaction on purpose, and should not make it
+                // easier to do by accident.
+                sequence: Sequence::ENABLE_LOCKTIME_NO_RBF,
                 witness: Witness::new(),
             })
             .collect(),
@@ -358,50 +405,87 @@ pub fn build_and_sign(
             });
         }
     }
-    let total: u64 = payments
-        .iter()
-        .try_fold(0u64, |sum, p| sum.checked_add(p.amount_sats))
-        .ok_or(SendError::Check("the payments overflow"))?;
+    // No amount here may exceed what can exist, and nothing below may wrap:
+    // a sum that wrapped would pass every later comparison.
+    let max_money = Amount::MAX_MONEY.to_sat();
+    let too_large = || SendError::AmountTooLarge { max: max_money };
+    let add = |a: u64, b: u64| a.checked_add(b).filter(|sum| *sum <= max_money);
+    let mut total = 0u64;
+    for payment in payments {
+        total = add(total, payment.amount_sats).ok_or_else(too_large)?;
+    }
     let mut with_change = size_scripts.clone();
     with_change.push(placeholder_p2tr());
-    let fee_for = |inputs: usize, scripts: &[ScriptBuf]| signed_vsize(inputs, scripts) * fee_rate;
+    let fee_for = |inputs: usize, scripts: &[ScriptBuf]| {
+        signed_vsize(inputs, scripts).saturating_mul(fee_rate)
+    };
 
     // Take candidates in the order given until payments and fee are covered.
+    // An output worth no more than the fee for spending it is left alone, and
+    // no output is taken twice.
     let mut selected: Vec<&DetectedOutput> = Vec::new();
+    let mut taken = std::collections::BTreeSet::new();
     let mut gathered = 0u64;
-    let mut needed = total;
+    let mut needed = add(total, fee_for(1, &size_scripts)).ok_or_else(too_large)?;
+    let mut usable = (0u64, 0usize);
     for candidate in candidates {
+        let outpoint = OutPoint::new(candidate.txid, candidate.vout);
+        if !taken.insert(outpoint) {
+            return Err(SendError::DuplicateInput { outpoint });
+        }
+        let cost_of_adding = fee_for(selected.len() + 1, &size_scripts)
+            .saturating_sub(fee_for(selected.len(), &size_scripts));
+        if candidate.value_sats <= cost_of_adding {
+            continue;
+        }
+        usable = (
+            add(usable.0, candidate.value_sats).ok_or_else(too_large)?,
+            usable.1 + 1,
+        );
+        if gathered >= needed {
+            // Enough already; keep going only to report what is there and to
+            // find duplicates.
+            continue;
+        }
         if selected.len() == limits.max_inputs {
             return Err(SendError::TooManyInputs {
                 max: limits.max_inputs,
             });
         }
         selected.push(candidate);
-        gathered = gathered
-            .checked_add(candidate.value_sats)
-            .ok_or(SendError::Check("the inputs overflow"))?;
-        needed = total + fee_for(selected.len(), &size_scripts);
-        if gathered >= needed {
-            break;
-        }
+        gathered = add(gathered, candidate.value_sats).ok_or_else(too_large)?;
+        needed = add(total, fee_for(selected.len(), &size_scripts)).ok_or_else(too_large)?;
     }
     if selected.is_empty() || gathered < needed {
         return Err(SendError::InsufficientFunds {
-            available: candidates.iter().map(|c| c.value_sats).sum(),
-            outputs: candidates.len(),
-            needed: needed.max(total + fee_for(selected.len().max(1), &size_scripts)),
+            available: usable.0,
+            outputs: usable.1,
+            needed,
         });
     }
     // Change, if what is left after the fee of a transaction *with* a change
     // output is worth an output; otherwise the remainder is fee.
-    let after_fee_with_change = gathered.checked_sub(total + fee_for(selected.len(), &with_change));
-    let change_sats = after_fee_with_change
-        .filter(|left| *left >= placeholder_p2tr().minimal_non_dust().to_sat());
-    let fee_sats = gathered - total - change_sats.unwrap_or(0);
+    let dust = placeholder_p2tr().minimal_non_dust().to_sat();
+    let change_sats = add(total, fee_for(selected.len(), &with_change))
+        .and_then(|spent| gathered.checked_sub(spent))
+        .filter(|left| *left >= dust);
+    let fee_sats = gathered
+        .checked_sub(total)
+        .and_then(|left| left.checked_sub(change_sats.unwrap_or(0)))
+        .ok_or(SendError::Check("the fee is negative"))?;
     if fee_sats > limits.max_fee_sats {
         return Err(SendError::FeeTooHigh {
             fee_sats,
             max: limits.max_fee_sats,
+        });
+    }
+    // A fee that is large next to what is paid is more likely a mistake (a
+    // wrong rate, a tiny payment) than an intention.
+    if u128::from(fee_sats) * 100 > u128::from(total) * u128::from(limits.max_fee_percent) {
+        return Err(SendError::FeeTooHighForAmount {
+            fee_sats,
+            paid_sats: total,
+            max_percent: limits.max_fee_percent,
         });
     }
 
@@ -580,6 +664,7 @@ pub fn build_and_sign(
         payments: paid,
         change,
         fee_sats,
+        fee_rate_asked: fee_rate,
         vsize,
         transaction,
     })

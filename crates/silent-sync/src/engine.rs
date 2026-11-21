@@ -134,7 +134,13 @@ pub fn scan_range(
     loop {
         let last = to.min(next.saturating_add(SCAN_CHUNK_BLOCKS - 1));
         let batch = source.fetch_range(next, last)?;
-        check_batch(&backend_id, &batch.blocks, next, last)?;
+        check_batch(
+            &backend_id,
+            &batch.blocks,
+            next,
+            last,
+            source.capabilities().evidence_kind,
+        )?;
         if let (Some(prev), Some(first)) = (previous, batch.blocks.first()) {
             if first.block.prev_hash != prev.hash {
                 return Err(ScanError::InconsistentBatch {
@@ -409,17 +415,30 @@ pub(crate) fn spends_in_blocks(
     spends
 }
 
-/// Verifies that a batch is exactly `from..=to`, ascending and hash-linked.
+/// Verifies that a batch is exactly `from..=to`, ascending and hash-linked,
+/// and that every block carries the kind of evidence the source declares.
+///
+/// The last point matters beyond labelling: what a block's evidence can show
+/// depends on its kind (a tweak index shows no spends), so a block of
+/// another kind than declared would be reported as inspected in a way it
+/// was not.
 pub(crate) fn check_batch(
     backend_id: &str,
     blocks: &[BlockEvidence],
     from: u32,
     to: u32,
+    declared: EvidenceKind,
 ) -> Result<(), ScanError> {
     let inconsistent = |reason: String| ScanError::InconsistentBatch {
         backend_id: backend_id.to_string(),
         reason,
     };
+    if let Some(other) = blocks.iter().find(|b| b.evidence.kind() != declared) {
+        return Err(inconsistent(format!(
+            "block {} carries another kind of evidence than the source declares",
+            other.block.height
+        )));
+    }
 
     let expected_len = u64::from(to - from) + 1;
     if blocks.len() as u64 != expected_len {

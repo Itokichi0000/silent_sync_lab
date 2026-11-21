@@ -147,8 +147,9 @@ impl From<SourceError> for SpendError {
 /// its tweak.
 ///
 /// Fails unless everything matches what was detected: the block (same hash),
-/// the transaction, the output, its amount and its label. Both the detection
-/// and the source must rest on full blocks.
+/// the transaction, the output, its amount and its label. The detection must
+/// rest on full blocks, and what the source serves for that height must be a
+/// full block (of the kind the source declares).
 pub fn recover_spendable(
     source: &dyn ScanSource,
     scanner: &ReceiveScanner,
@@ -172,7 +173,13 @@ pub fn recover_spendable(
     }
     let height = detection.block.height;
     let batch = source.fetch_range(height, height)?;
-    check_batch(source.backend_id(), &batch.blocks, height, height)?;
+    check_batch(
+        source.backend_id(),
+        &batch.blocks,
+        height,
+        height,
+        source.capabilities().evidence_kind,
+    )?;
     let block = batch
         .blocks
         .first()

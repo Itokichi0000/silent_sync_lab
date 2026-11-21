@@ -725,7 +725,13 @@ fn advance(
         let last = target.min(next.saturating_add(options.chunk_size - 1));
 
         let batch = source.fetch_range(next, last)?;
-        check_batch(backend_id, &batch.blocks, next, last)?;
+        check_batch(
+            backend_id,
+            &batch.blocks,
+            next,
+            last,
+            source.capabilities().evidence_kind,
+        )?;
         if let (Some(cp), Some(first)) = (checkpoint, batch.blocks.first()) {
             if first.block.prev_hash != cp.hash {
                 return Err(SyncError::ChainMovedDuringSync { height: next });

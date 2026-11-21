@@ -297,7 +297,15 @@ pub fn audit_store(
     loop {
         let chunk_last = last.min(next.saturating_add(SCAN_CHUNK_BLOCKS - 1));
         let batch = reference.fetch_range(next, chunk_last)?;
-        check_batch(&reference_id, &batch.blocks, next, chunk_last)?;
+        // (This includes that every block carries the kind of evidence the
+        // report states the reference gave.)
+        check_batch(
+            &reference_id,
+            &batch.blocks,
+            next,
+            chunk_last,
+            report.reference_evidence,
+        )?;
         if let (Some(prev), Some(first_block)) = (previous, batch.blocks.first()) {
             if first_block.block.prev_hash != prev.hash {
                 return Err(AuditError::Scan(ScanError::InconsistentBatch {
@@ -313,16 +321,6 @@ pub fn audit_store(
 
         for r_block in &batch.blocks {
             let height = r_block.block.height;
-            // The report states which kind of evidence the reference gave;
-            // that must be what it actually served.
-            if r_block.evidence.kind() != report.reference_evidence {
-                return Err(AuditError::Scan(ScanError::InconsistentBatch {
-                    backend_id: reference_id,
-                    reason: format!(
-                        "block {height} carries another kind of evidence than the source declares"
-                    ),
-                }));
-            }
             let stored_block = store.block_at(height)?.ok_or_else(|| {
                 StoreError::Invariant(format!(
                     "no stored block at height {height} below the checkpoint"

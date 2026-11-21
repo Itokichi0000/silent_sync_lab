@@ -133,10 +133,14 @@ impl Wallet {
     }
 
     /// The address to hand out: unlabelled, or with label `m`. Label 0 is
-    /// the change label and is not handed out.
+    /// the change label, which BIP352 reserves for the wallet's own change:
+    /// asking for it is an error.
     pub fn address(&self, label: Option<u32>) -> Result<SilentPaymentAddress, ProtocolError> {
         match label {
             None => Ok(self.receiver().address(self.network)),
+            Some(0) => Err(ProtocolError::Address(
+                "label 0 is the change label; it is not handed out".to_string(),
+            )),
             Some(m) => self.receiver().labelled_address(self.network, m),
         }
     }

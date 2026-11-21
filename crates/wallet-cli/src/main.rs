@@ -20,7 +20,7 @@ use silent_sync::{
 use silent_sync_sqlite::SqliteStore;
 use silent_wallet::{
     build_and_sign, holdings, BuiltTransaction, CoreRpc, Destination, Holdings, Payment,
-    PendingSpends, PendingTransaction, SendLimits, Wallet, WalletKeys,
+    PendingSpends, PendingTransaction, SendLimits, Settlement, Wallet, WalletKeys,
 };
 use std::{
     fmt::Write as _,
@@ -151,6 +151,9 @@ struct SendArgs {
     /// Refuse a transaction whose fee exceeds this many satoshi.
     #[arg(long, default_value_t = 100_000)]
     max_fee: u64,
+    /// Refuse a transaction whose fee exceeds this percentage of the amount.
+    #[arg(long, default_value_t = 50)]
+    max_fee_percent: u64,
     /// Confirmations an output needs to be spent.
     #[arg(long, default_value_t = 1)]
     min_conf: u32,
@@ -162,7 +165,9 @@ struct SendArgs {
     /// the one call that sends the transaction. Never printed.
     #[arg(long, required_unless_present = "no_broadcast")]
     rpc_cookie_file: Option<PathBuf>,
-    /// Do not send: print the signed transaction and stop.
+    /// Do not send: print the signed transaction and stop. The printed
+    /// transaction is valid: whoever has it can send it. It is not recorded
+    /// as pending.
     #[arg(long)]
     no_broadcast: bool,
     /// Print the result as JSON on stdout.
@@ -317,15 +322,19 @@ fn run(cli: Cli) -> Result<(), Failure> {
             }
             let mut out = String::new();
             for t in pending.transactions() {
+                let state = match t.confirmed_at {
+                    Some(height) => format!("in a block at height {height}"),
+                    None => "waiting for a block".to_string(),
+                };
                 let _ = writeln!(
                     out,
-                    "{}  {} input(s), sent when the store was at height {}",
+                    "{}  {} input(s), sent when the store was at height {}, {state}",
                     t.txid,
                     t.inputs.len(),
                     t.sent_at_height
                 );
             }
-            if out.is_empty() {
+            if pending.inputs().is_empty() {
                 out.push_str("no transaction is waiting for a block\n");
             }
             emit(&out)
@@ -412,22 +421,29 @@ fn settle_pending(db: &Path, store: &SqliteStore) -> Result<Vec<String>, Failure
     if pending.transactions().is_empty() {
         return Ok(Vec::new());
     }
-    let settled = pending.settle(&store.spends().map_err(fail)?);
-    if !settled.is_empty() {
+    let before = pending.clone();
+    let checkpoint = store
+        .checkpoint()
+        .map_err(fail)?
+        .map_or(0, |block| block.height);
+    let changes = pending.settle(&store.spends().map_err(fail)?, checkpoint);
+    if pending != before {
         pending.save(&path).map_err(fail)?;
     }
-    Ok(settled
+    Ok(changes
         .into_iter()
-        .map(|(t, confirmed)| {
-            if confirmed {
-                format!("sent transaction {} is in a block", t.txid)
-            } else {
-                format!(
-                    "sent transaction {} can no longer confirm: another transaction spent one \
-                     of its inputs",
-                    t.txid
-                )
-            }
+        .map(|(t, change)| match change {
+            Settlement::Confirmed => format!("sent transaction {} is in a block", t.txid),
+            Settlement::Unconfirmed => format!(
+                "sent transaction {} is NOT in a block any more (the chain was reorganized); it \
+                 is waiting again and its inputs are not offered to another transaction",
+                t.txid
+            ),
+            Settlement::Conflicted => format!(
+                "sent transaction {} can no longer confirm: another transaction spent one of \
+                 its inputs",
+                t.txid
+            ),
         })
         .collect())
 }
@@ -571,11 +587,20 @@ fn render_built(built: &BuiltTransaction) -> String {
         None => line("change      : none".to_string()),
     }
     line(format!(
-        "fee         : {} sat ({} vB, {:.2} sat/vB)",
+        "fee         : {} sat ({} vB; {} sat/vB asked for, {:.2} sat/vB paid)",
         built.fee_sats,
         built.vsize,
+        built.fee_rate_asked,
         built.fee_sats as f64 / built.vsize as f64
     ));
+    let surplus = built
+        .fee_sats
+        .saturating_sub(built.vsize * built.fee_rate_asked);
+    if surplus > 0 {
+        line(format!(
+            "              (includes {surplus} sat that were too little to return as change)"
+        ));
+    }
     out
 }
 
@@ -599,13 +624,18 @@ fn send(network: Network, args: SendArgs) -> Result<(), Failure> {
     // should not be discovered after the confirmation.
     let rpc = match (&args.rpc_cookie_file, args.no_broadcast) {
         (_, true) => None,
-        (Some(cookie), false) => Some(
-            CoreRpc::new(
+        (Some(cookie), false) => {
+            let rpc = CoreRpc::new(
                 args.rpc_url.as_deref().unwrap_or(&args.node.core_rest_url),
                 cookie,
             )
-            .map_err(fail)?,
-        ),
+            .map_err(fail)?;
+            // The node that will be handed the transaction must be on the
+            // store's chain — not, say, a mainnet node on that port.
+            rpc.check_chain(meta.chain.genesis_hash())
+                .map_err(|e| Failure(format!("{e}\nnothing was built or sent")))?;
+            Some(rpc)
+        }
         (None, false) => {
             return Err(Failure(
                 "--rpc-cookie-file is required to send (or use --no-broadcast)".to_string(),
@@ -624,10 +654,12 @@ fn send(network: Network, args: SendArgs) -> Result<(), Failure> {
         eprintln!("{text}");
     }
     let pending_file = pending_path(&args.db.db);
-    let mut pending = PendingSpends::load(&pending_file).map_err(fail)?;
+    let pending = PendingSpends::load(&pending_file).map_err(fail)?;
     let held = holdings(&store, args.min_conf, &pending).map_err(fail)?;
     let candidates: Vec<DetectedOutput> = held.unspent.iter().map(|h| h.output.clone()).collect();
-    let limits = SendLimits::default().with_max_fee_sats(args.max_fee);
+    let limits = SendLimits::default()
+        .with_max_fee_sats(args.max_fee)
+        .with_max_fee_percent(args.max_fee_percent);
     let built = build_and_sign(
         &wallet,
         &source,
@@ -662,7 +694,10 @@ fn send(network: Network, args: SendArgs) -> Result<(), Failure> {
     };
 
     let Some(rpc) = rpc else {
-        eprintln!("--no-broadcast: the transaction was signed and is printed, not sent");
+        eprintln!(
+            "--no-broadcast: the transaction was signed and is printed, not sent, and not \
+             recorded as pending. Whoever has this text can send it."
+        );
         return show(false);
     };
     // The decision to send is the user's, on what is shown here.
@@ -679,27 +714,47 @@ fn send(network: Network, args: SendArgs) -> Result<(), Failure> {
     }
     rpc.would_accept(&built.transaction)
         .map_err(|e| Failure(format!("{e}\nnothing was sent")))?;
-    rpc.send(&built.transaction)
-        .map_err(|e| Failure(format!("{e}\nthe node did not take the transaction")))?;
-    // Remember what was sent, so that its inputs are not offered again
-    // before a block shows them spent.
+
+    // Record the transaction as pending *before* it leaves: if the answer is
+    // lost, or this process dies, its inputs must not be offered again. The
+    // record is read afresh, in case something else changed it meanwhile.
+    let txid = built.txid;
+    let mut pending = PendingSpends::load(&pending_file).map_err(fail)?;
     pending.record(PendingTransaction {
-        txid: built.txid,
+        txid,
         inputs: built.inputs.iter().map(|i| i.outpoint).collect(),
         sent_at_height: held.as_of.map_or(0, |b| b.height),
+        confirmed_at: None,
     });
-    if let Err(e) = pending.save(&pending_file) {
-        eprintln!(
-            "warning: the transaction {} WAS sent, but could not be recorded as pending ({e}). \
-             Its inputs will look unspent until a block contains it: do not send again before \
-             that.",
-            built.txid
-        );
-    }
-    show(true).map_err(|Failure(message)| {
+    pending.save(&pending_file).map_err(|e| {
         Failure(format!(
-            "{message}\nthe transaction {} was sent",
-            built.txid
+            "{e}\nthe transaction could not be recorded as pending; nothing was sent"
         ))
-    })
+    })?;
+    match rpc.send(&built.transaction) {
+        Ok(_) => {}
+        // The node said no, or was never asked: take the record back.
+        Err(e) if e.means_not_done() => {
+            pending.forget(txid);
+            let note = match pending.save(&pending_file) {
+                Ok(()) => String::new(),
+                Err(save) => format!(
+                    "\n(it is still listed as pending: {save}; remove it with `pending --forget \
+                     {txid}`)"
+                ),
+            };
+            return Err(Failure(format!("{e}\nnothing was sent{note}")));
+        }
+        Err(e) => {
+            return Err(Failure(format!(
+                "{e}\nIT IS NOT KNOWN whether your node took transaction {txid}.\n\
+                 It stays recorded as pending, so its inputs are not offered again. Do NOT repeat \
+                 the payment until you know: look for it in the node's mempool, or run `sync` \
+                 after the next block. If it never appears, `silent-wallet pending --forget \
+                 {txid}` makes its inputs available again."
+            )))
+        }
+    }
+    show(true)
+        .map_err(|Failure(message)| Failure(format!("{message}\nthe transaction {txid} was sent")))
 }

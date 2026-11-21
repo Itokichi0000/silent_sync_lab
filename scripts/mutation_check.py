@@ -57,6 +57,7 @@ W = "crates/silent-wallet/src/send.rs"
 WH = "crates/silent-wallet/src/holdings.rs"
 WR = "crates/silent-wallet/src/rpc.rs"
 WK = "crates/silent-wallet/src/keys.rs"
+WP = "crates/silent-wallet/src/pending.rs"
 WC = "crates/wallet-cli/src/main.rs"
 muts = [
     # --- block structure checks shared by the fixture and Core backends ---
@@ -143,8 +144,8 @@ muts = [
     ("index: detections not ordered by output index", E, "                    })?;\n                    matches.sort_by_key(|m| m.outpoint.vout);", "                    })?;"),
     ("local index: non-taproot outputs listed", L, "                    .filter(|(_, o)| o.script_pubkey.is_p2tr())\n", ""),
     ("local index: policy not part of the backend id", L, "IndexPolicy::IgnoreSegwitVersionRule => LOCAL_INDEX_LENIENT_BACKEND_ID,", "IndexPolicy::IgnoreSegwitVersionRule => LOCAL_INDEX_BACKEND_ID,"),
-    ("verify: candidate batch not checked", V, "check_batch(&candidate_id, &candidate_batch.blocks, next, last)?;", "let _ = (&candidate_id, check_batch);"),
-    ("verify: reference batch not checked", V, "check_batch(&reference_id, &reference_batch.blocks, next, last)?;", "let _ = (&reference_id, check_batch);"),
+    ("verify: candidate batch not checked", V, "        check_batch(\n            &candidate_id,\n            &candidate_batch.blocks,\n            next,\n            last,\n            candidate.capabilities().evidence_kind,\n        )?;", "        let _ = (&candidate_id, check_batch);"),
+    ("verify: reference batch not checked", V, "        check_batch(\n            &reference_id,\n            &reference_batch.blocks,\n            next,\n            last,\n            reference.capabilities().evidence_kind,\n        )?;", "        let _ = (&reference_id, check_batch);"),
     ("verify: candidate chunks not linked", V, "previous_c = linked(&candidate_id, previous_c, &candidate_batch.blocks)?;", "previous_c = linked(&candidate_id, None, &candidate_batch.blocks)?;"),
     ("verify: reference chunks not linked", V, "previous_r = linked(&reference_id, previous_r, &reference_batch.blocks)?;", "previous_r = linked(&reference_id, None, &reference_batch.blocks)?;"),
     ("verify: duplicates only checked per block", V, "let found_c = scan_one(&candidate_id, c_block, &mut seen_c)?;", "let found_c = scan_one(&candidate_id, c_block, {\n                seen_c.clear();\n                &mut seen_c\n            })?;"),
@@ -159,14 +160,14 @@ muts = [
     ("audit: empty range accepted", A, "if first > last || first < meta.birthday || last > checkpoint.height {", "if first < meta.birthday || last > checkpoint.height {"),
     ("audit: range below the birthday accepted", A, "if first > last || first < meta.birthday || last > checkpoint.height {", "if first > last || last > checkpoint.height {"),
     ("audit: range above the checkpoint accepted", A, "if first > last || first < meta.birthday || last > checkpoint.height {", "if first > last || first < meta.birthday {"),
-    ("audit: reference batch not checked", A, "check_batch(&reference_id, &batch.blocks, next, chunk_last)?;", "let _ = check_batch;"),
+    ("audit: reference batch not checked", A, "        check_batch(\n            &reference_id,\n            &batch.blocks,\n            next,\n            chunk_last,\n            report.reference_evidence,\n        )?;", "        let _ = check_batch;"),
     ("audit: reference chunks not linked", A, "if first_block.block.prev_hash != prev.hash {", "if false {"),
     ("audit: duplicates only checked per block", A, "                &mut seen,\n            )?;", "                {\n                    seen.clear();\n                    &mut seen\n                },\n            )?;"),
     ("audit: detection of another block accepted", A, "if let Some(d) = stored.iter().find(|d| d.block != stored_block) {", "if let Some(d) = stored.iter().find(|_| false) {"),
     ("audit: stored block hash not compared", A, "let same_block = stored_block == r_block.block;", "let same_block = true;"),
     ("audit: detections outside the stored blocks accepted", A, "if !(meta.birthday..=checkpoint.height).contains(&d.block.height) {", "if false {"),
     ("audit: output listed twice accepted", A, "if !listed.insert(key(&d)) {", "if !listed.insert(key(&d)) && false {"),
-    ("audit: served evidence kind not checked", A, "if r_block.evidence.kind() != report.reference_evidence {", "if false {"),
+    ("engine: evidence of another kind than declared accepted", E, "    if let Some(other) = blocks.iter().find(|b| b.evidence.kind() != declared) {", "    if let Some(other) = blocks.iter().find(|_| false) {"),
     ("audit: value differences ignored", A, "} else if s.value_sats != r.value_sats || s.label != r.label {", "} else if s.label != r.label {"),
     ("audit: label differences ignored", A, "} else if s.value_sats != r.value_sats || s.label != r.label {", "} else if s.value_sats != r.value_sats {"),
     ("audit: identical despite different block hashes", A, "\n        && report.block_hash_mismatches.is_empty()", ""),
@@ -209,11 +210,14 @@ muts = [
     ("spend: amount not compared", SP, ".filter(|m| m.amount.to_sat() == detection.value_sats && m.label == detection.label)", ".filter(|m| m.label == detection.label)"),
     ("spend: label not compared", SP, ".filter(|m| m.amount.to_sat() == detection.value_sats && m.label == detection.label)", ".filter(|m| m.amount.to_sat() == detection.value_sats)"),
     # --- wallet ---
-    # Three checks in the signing module cannot be made to fail by a test
-    # without breaking the libraries they guard against (derived key against
-    # the input's script, signature verification, the wallet's own scanner
-    # finding the change), and the typed confirmation of the CLI is only
-    # reached with funds, on a real node. They are not listed here.
+    # Not listed, because no fast test can make them fail: in the signing
+    # module, the derived key against the input's script, the signature
+    # verification and the two fee re-checks (they guard against the
+    # libraries being wrong); in the CLI, everything that is only reached
+    # with funds on a real node (the typed confirmation, the "caught up"
+    # requirement, asking the node first, recording before sending). The
+    # node-backed tests in crates/wallet-cli/tests/regtest_wallet.rs cover
+    # the latter.
     ("wallet: payment below the relay minimum accepted", W, "        if payment.amount_sats < dust {", "        if false {"),
     ("wallet: zero fee rate accepted", W, "    if fee_rate == 0 || fee_rate > limits.max_fee_rate {", "    if fee_rate > limits.max_fee_rate {"),
     ("wallet: fee rate above the limit accepted", W, "    if fee_rate == 0 || fee_rate > limits.max_fee_rate {", "    if fee_rate == 0 {"),
@@ -221,6 +225,25 @@ muts = [
     ("wallet: input limit ignored", W, "        if selected.len() == limits.max_inputs {", "        if false {"),
     ("wallet: payment without enough inputs built", W, "    if selected.is_empty() || gathered < needed {", "    if selected.is_empty() {"),
     ("wallet: address of another network accepted", W, "            .require_network(network.to_bitcoin())\n            .map_err(|_| SendError::Destination(format!(\"not a {network} address\")))?;", "            .assume_checked();"),
+    ("wallet: amount above the total supply accepted", W, "    let add = |a: u64, b: u64| a.checked_add(b).filter(|sum| *sum <= max_money);", "    let add = |a: u64, b: u64| a.checked_add(b).filter(|_| true);"),
+    ("wallet: the same output taken twice", W, "        if !taken.insert(outpoint) {", "        if !taken.insert(outpoint) && false {"),
+    ("wallet: outputs worth less than their fee spent", W, "        if candidate.value_sats <= cost_of_adding {", "        if false {"),
+    ("wallet: fee large next to the payment accepted", W, "    if u128::from(fee_sats) * 100 > u128::from(total) * u128::from(limits.max_fee_percent) {", "    if false {"),
+    ("wallet: change of exactly the relay minimum dropped", W, "        .filter(|left| *left >= dust);", "        .filter(|left| *left > dust);"),
+    ("wallet: change the wallet cannot find is sent", W, "        if !detected {", "        if false {"),
+    ("wallet: change label handed out as an address", WK, "            Some(0) => Err(ProtocolError::Address(\n                \"label 0 is the change label; it is not handed out\".to_string(),\n            )),\n", ""),
+    ("wallet: refused credentials not recognised", WR, "        if status == 401 || status == 403 {", "        if false {"),
+    ("wallet: error answer of the node ignored", WR, "        if !answer[\"error\"].is_null() {", "        if false {"),
+    ("wallet: answer under a failure status accepted", WR, "        if status != 200 {", "        if false {"),
+    ("wallet: verdict of the node on a transaction ignored", WR, "        if verdict[\"allowed\"].as_bool() == Some(true) {", "        if true {"),
+    ("wallet: transaction id reported by the node not compared", WR, "        if reported != transaction.compute_txid() {", "        if false {"),
+    ("wallet: cookie file that is not a cookie accepted", WR, "        if !contents.contains(':') || contents.contains(['\\n', '\\r']) || contents.len() > 512 {", "        if false {"),
+    ("wallet: node on another chain accepted", WR, "        if reported == genesis {", "        if true {"),
+    ("wallet: lost answer treated as not sent", WR, "                | RpcError::WrongChain\n        )", "                | RpcError::WrongChain\n                | RpcError::NoAnswer(_)\n                | RpcError::Malformed(_)\n        )"),
+    ("wallet: confirmed transaction forgotten at once", WP, "                    if checkpoint.saturating_sub(height) >= KEEP_CONFIRMED_FOR {", "                    if true {"),
+    ("wallet: transaction of an abandoned block not put back on hold", WP, "                (Some(_), None) => {\n                    t.confirmed_at = None;", "                (Some(_), None) => {"),
+    ("wallet: input spent by another transaction not noticed", WP, "            if recorded.iter().any(|s| s.spending_txid != t.txid) {", "            if false {"),
+    ("wallet cli: store for another network than the node's created", WC, "    if source.chain().network() != network {", "    if false {"),
     ("wallet: index claims counted as unspent", WH, "        if output.provenance.evidence_kind != EvidenceKind::FullBlockWithPrevouts {", "        if false {"),
     ("wallet: spent outputs counted as unspent", WH, "        if spent.contains(&outpoint) {", "        if false {"),
     ("wallet: inputs of pending transactions counted as unspent", WH, "        if waiting.contains(&outpoint) {", "        if false {"),
@@ -243,7 +266,7 @@ muts = [
     ("sync: birthday 0 accepted", T, "    let meta = store.meta()?.ok_or(StoreError::NotInitialized)?;\n    if meta.birthday == 0 {", "    let meta = store.meta()?.ok_or(StoreError::NotInitialized)?;\n    if false {"),
     ("sync: target above tip accepted", S, "Some(target) if target > source_tip.height => {", "Some(target) if false && target > source_tip.height => {"),
     ("sync: chunk not linked to checkpoint", S, "if first.block.prev_hash != cp.hash {", "if false {"),
-    ("sync: batch not re-checked", S, "check_batch(backend_id, &batch.blocks, next, last)?;", "let _ = check_batch;"),
+    ("sync: batch not re-checked", S, "        check_batch(\n            backend_id,\n            &batch.blocks,\n            next,\n            last,\n            source.capabilities().evidence_kind,\n        )?;", "        let _ = check_batch;"),
     ("sync: rollback before a failure not reported", S, "let changed = report.reorg.is_some() || report.blocks_scanned > 0;", "let changed = report.blocks_scanned > 0;"),
     ("sync: commits before a failure not reported", S, "let changed = report.reorg.is_some() || report.blocks_scanned > 0;", "let changed = report.reorg.is_some();"),
     ("sync: tip on another block reported as caught up", S, ".is_some_and(|cp| cp.height == source_tip.height && cp.hash == source_tip.hash);", ".is_some_and(|cp| cp.height == source_tip.height);"),

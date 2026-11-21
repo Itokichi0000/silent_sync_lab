@@ -39,3 +39,8 @@ unwrap_used = "deny"
 # takes minutes unoptimized.
 [profile.dev.package."*"]
 opt-level = 3
+
+# Arithmetic that wraps silently has no place next to amounts of money: an
+# overflow aborts in release builds too.
+[profile.release]
+overflow-checks = true

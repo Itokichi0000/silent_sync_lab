@@ -914,3 +914,25 @@ fn recorded_spends_are_kept_checked_and_never_dropped_by_a_replacement() {
         ));
     }
 }
+
+/// A store written before spent outputs were recorded (schema version 1) is
+/// not opened, and the message says why it cannot simply be upgraded.
+#[test]
+fn a_store_from_before_spends_were_recorded_is_not_upgraded_in_place() {
+    let db = TempDb::new("schema-v1");
+    drop(synced_store(&db));
+    raw(
+        &db,
+        "DROP TABLE spent_outputs; \
+         UPDATE meta SET value = '1' WHERE key = 'schema_version';",
+    );
+    match SqliteStore::open(&db.path) {
+        Err(StoreError::Backend(reason)) => assert!(
+            reason.contains("unsupported store schema version Some(\"1\")")
+                && reason.contains("cannot be upgraded in place")
+                && reason.contains("Create a new store"),
+            "{reason}"
+        ),
+        other => panic!("{:?}", other.map(|_| ())),
+    }
+}

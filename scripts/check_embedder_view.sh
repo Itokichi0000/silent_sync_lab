@@ -51,6 +51,17 @@ out="$("$target/debug/silent-sync" verify --backend local-index \
   --fixture fixtures/local/regtest_basic_v1.json --reference fixture --label 1 2>/dev/null)"
 grep -q "identical" <<<"$out" || { echo "$out"; echo "unexpected verify result" >&2; exit 1; }
 
+# The wallet with the features it really gets (`spend`, `low-level`,
+# `core-rest`; not the test-only ones a workspace build adds).
+echo "== wallet CLI built on its own"
+cargo build -p wallet-cli --locked --quiet --target-dir "$target"
+seed="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+out="$(SILENT_WALLET_SEED="$seed" "$target/debug/silent-wallet" address 2>/dev/null)"
+grep -q "^sprt1" <<<"$out" || { echo "unexpected wallet address output" >&2; exit 1; }
+if "$target/debug/silent-wallet" --network mainnet address >/dev/null 2>&1; then
+  echo "the wallet accepted mainnet" >&2; exit 1
+fi
+
 echo "== examples"
 out="$(cargo run --quiet --locked -p silent-sync --example cross_check_index \
   --features fixture,local-index -- fixtures/local/regtest_basic_v1.json)"

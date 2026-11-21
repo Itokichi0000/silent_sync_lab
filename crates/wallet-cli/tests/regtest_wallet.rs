@@ -329,3 +329,325 @@ fn receive_then_send_between_two_wallets() {
     assert_ne!(mainnet.code, Some(0));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A wallet with a fresh seed and store on `node`, and `outputs` payments of
+/// 99,000 sat to it, each in its own block, scanned.
+fn funded_wallet(node: &Node, faucet: &mut Faucet<'_>, db: &str, outputs: usize) -> String {
+    let seed = random_seed();
+    let url = node.rest_url();
+    let address = ok(&seed, &["address"]).trim().to_string();
+    ok(&seed, &["init", "--db", db, "--core-rest-url", &url]);
+    let to = SilentPaymentAddress::parse(&address, Network::Regtest).unwrap();
+    for funded in faucet.fund(&vec![InputKind::P2wpkh; outputs]) {
+        let amount = funded.prevout.value.to_sat() - 1_000;
+        let scripts = silent_payment_scripts(std::slice::from_ref(&funded), &[to]);
+        let tx = signed_transaction(
+            std::slice::from_ref(&funded),
+            vec![(amount, scripts[0].clone())],
+        );
+        faucet.broadcast_and_mine(&tx);
+    }
+    ok(&seed, &["sync", "--db", db, "--core-rest-url", &url]);
+    seed
+}
+
+/// Forwards every request to the node. For `sendrawtransaction` the node's
+/// answer is thrown away and the connection closed: the node has the
+/// transaction, the caller never learns it.
+fn proxy_that_loses_the_answer_to_a_send(node_port: u16) -> u16 {
+    use std::{
+        io::Read as _,
+        net::{TcpListener, TcpStream},
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for client in listener.incoming() {
+            let Ok(mut client) = client else { return };
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 65536];
+            loop {
+                let n = client.read(&mut buffer).unwrap_or(0);
+                request.extend_from_slice(&buffer[..n]);
+                let text = String::from_utf8_lossy(&request);
+                let complete = text.split_once("\r\n\r\n").is_some_and(|(head, body)| {
+                    head.lines()
+                        .find_map(|l| l.strip_prefix("Content-Length: "))
+                        .and_then(|l| l.trim().parse::<usize>().ok())
+                        .is_some_and(|len| body.len() >= len)
+                });
+                if complete || n == 0 {
+                    break;
+                }
+            }
+            let mut upstream = TcpStream::connect(("127.0.0.1", node_port)).unwrap();
+            upstream.write_all(&request).unwrap();
+            let mut response = Vec::new();
+            upstream.read_to_end(&mut response).unwrap();
+            if !String::from_utf8_lossy(&request).contains("sendrawtransaction") {
+                let _ = client.write_all(&response);
+            }
+        }
+    });
+    port
+}
+
+/// Found by review: when the answer to the send is lost, the node has the
+/// transaction while the wallet reported a failure, and a repeated command
+/// paid a second time. Now the outcome is called unknown, the transaction is
+/// on record before it leaves, and its inputs are not offered again.
+#[test]
+#[ignore = "needs BITCOIND_EXE (Bitcoin Core >= 30)"]
+fn a_lost_answer_is_not_reported_as_a_failed_send() {
+    let node = Node::regtest();
+    let mut faucet = Faucet::new(&node);
+    let url = node.rest_url();
+    let cookie = node.cookie_file().display().to_string();
+    let dir = std::env::temp_dir().join(format!("silent-wallet-lost-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("alice.sqlite3").display().to_string();
+    // Two outputs: enough to pay twice, if the wallet let it happen.
+    let alice = funded_wallet(&node, &mut faucet, &db, 2);
+    let recipient = node.cli(&["getnewaddress", "", "bech32m"]);
+    let node_port: u16 = url.rsplit(':').next().unwrap().parse().unwrap();
+    let lossy = format!(
+        "http://127.0.0.1:{}",
+        proxy_that_loses_the_answer_to_a_send(node_port)
+    );
+    let send = |rpc_url: &str| {
+        wallet(
+            &alice,
+            &[
+                "send",
+                "--db",
+                &db,
+                "--core-rest-url",
+                &url,
+                "--to",
+                &recipient,
+                "--amount",
+                "20000",
+                "--fee-rate",
+                "1",
+                "--rpc-url",
+                rpc_url,
+                "--rpc-cookie-file",
+                &cookie,
+            ],
+            "SEND\n",
+        )
+    };
+
+    let lost = send(&lossy);
+    assert_eq!(lost.code, Some(1));
+    assert!(
+        lost.stdout.is_empty()
+            && lost
+                .stderr
+                .contains("IT IS NOT KNOWN whether your node took transaction")
+            && lost.stderr.contains("Do NOT repeat the payment")
+            && !lost.stderr.contains("nothing was sent"),
+        "{}",
+        lost.stderr
+    );
+    // The node does have it ...
+    let mempool = node.cli_json(&["getrawmempool"]);
+    let in_mempool = mempool.as_array().unwrap();
+    assert_eq!(in_mempool.len(), 1);
+    let txid = in_mempool[0].as_str().unwrap().to_string();
+    assert!(lost.stderr.contains(&txid));
+    // ... and the wallet holds its input back.
+    assert!(ok(&alice, &["pending", "--db", &db]).contains(&txid));
+    let status = json(&alice, &["status", "--db", &db, "--json"]);
+    assert_eq!(status["spent_by_pending"].as_array().unwrap().len(), 1);
+    assert_eq!(status["unspent"].as_array().unwrap().len(), 1);
+
+    // After the block, the wallet knows.
+    node.generate_to(1, faucet.miner_address());
+    let synced = ok(&alice, &["sync", "--db", &db, "--core-rest-url", &url]);
+    assert!(
+        synced.contains(&format!("sent transaction {txid} is in a block")),
+        "{synced}"
+    );
+    // The recipient was paid once.
+    let received = node.cli(&["getreceivedbyaddress", &recipient, "1"]);
+    assert_eq!(received.parse::<f64>().unwrap(), 0.0002, "{received}");
+
+    // A node that says no is a definite failure: nothing stays on record.
+    // (The same payment again spends the change and the other output; ask
+    // for more than there is left to be refused by the wallet instead, and
+    // use a dead port for "never asked".)
+    let dead = send("http://127.0.0.1:9");
+    assert_eq!(dead.code, Some(1));
+    assert!(
+        dead.stderr.contains("the node is unavailable") && dead.stderr.contains("nothing was"),
+        "{}",
+        dead.stderr
+    );
+    assert!(ok(&alice, &["pending", "--db", &db]).contains("no transaction is waiting"));
+    assert_eq!(
+        node.cli_json(&["getrawmempool"]).as_array().unwrap().len(),
+        0
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Found by review: after the block with a sent transaction was abandoned,
+/// its input looked unspent again while the transaction sat in the mempool,
+/// and the next payment replaced it. Now the transaction goes back on hold.
+#[test]
+#[ignore = "needs BITCOIND_EXE (Bitcoin Core >= 30)"]
+fn a_reorganization_puts_a_sent_transaction_back_on_hold() {
+    let node = Node::regtest();
+    let mut faucet = Faucet::new(&node);
+    let url = node.rest_url();
+    let cookie = node.cookie_file().display().to_string();
+    let dir = std::env::temp_dir().join(format!("silent-wallet-reorg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("alice.sqlite3").display().to_string();
+    let alice = funded_wallet(&node, &mut faucet, &db, 1);
+    let send = |to: &str, amount: &str, rate: &str| {
+        wallet(
+            &alice,
+            &[
+                "send",
+                "--db",
+                &db,
+                "--core-rest-url",
+                &url,
+                "--to",
+                to,
+                "--amount",
+                amount,
+                "--fee-rate",
+                rate,
+                "--rpc-cookie-file",
+                &cookie,
+                "--json",
+            ],
+            "SEND\n",
+        )
+    };
+    let first_recipient = node.cli(&["getnewaddress", "", "bech32m"]);
+    let first = send(&first_recipient, "20000", "1");
+    assert_eq!(first.code, Some(0), "{}", first.stderr);
+    let txid = serde_json::from_str::<serde_json::Value>(&first.stdout).unwrap()["txid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let hashes = node.generate_to(1, faucet.miner_address());
+    let confirmed = ok(&alice, &["sync", "--db", &db, "--core-rest-url", &url]);
+    assert!(confirmed.contains(&format!("sent transaction {txid} is in a block")));
+    // Still on record: its block is not deep.
+    assert!(ok(&alice, &["pending", "--db", &db]).contains(&format!("{txid}  1 input(s)")));
+
+    // The block is abandoned for a competing one without the payment.
+    node.cli(&["invalidateblock", &hashes[0]]);
+    node.generate_block_with(faucet.miner_address(), &[]);
+    assert_eq!(node.cli_json(&["getrawmempool"]), serde_json::json!([txid]));
+    let reorged = ok(&alice, &["sync", "--db", &db, "--core-rest-url", &url]);
+    assert!(
+        reorged.contains("REORG")
+            && reorged.contains("1 spends reverted")
+            && reorged.contains(&format!(
+                "sent transaction {txid} is NOT in a block any more"
+            )),
+        "{reorged}"
+    );
+    let status = json(&alice, &["status", "--db", &db, "--json"]);
+    assert_eq!(status["unspent"].as_array().unwrap().len(), 0);
+    assert_eq!(status["spent_by_pending"].as_array().unwrap().len(), 1);
+
+    // Another payment cannot take the same input: the first one stands.
+    let other = node.cli(&["getnewaddress", "", "bech32m"]);
+    let second = send(&other, "30000", "3");
+    assert_eq!(second.code, Some(1));
+    assert!(
+        second.stderr.contains("not enough unspent outputs"),
+        "{}",
+        second.stderr
+    );
+    assert_eq!(node.cli_json(&["getrawmempool"]), serde_json::json!([txid]));
+
+    // It confirms again.
+    node.generate_to(1, faucet.miner_address());
+    let again = ok(&alice, &["sync", "--db", &db, "--core-rest-url", &url]);
+    assert!(
+        again.contains(&format!("sent transaction {txid} is in a block")),
+        "{again}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Found by review: only the REST endpoint's chain was checked. A node on
+/// another chain at the RPC address — mainnet here — is refused before a
+/// transaction is built, let alone shown for confirmation.
+#[test]
+#[ignore = "needs BITCOIND_EXE (Bitcoin Core >= 30)"]
+fn a_transaction_is_never_handed_to_a_node_on_another_chain() {
+    use lab_testkit::regtest_node::NodeChain;
+    let node = Node::regtest();
+    let mut faucet = Faucet::new(&node);
+    let mainnet = Node::start(NodeChain::OfflineMainnet);
+    let url = node.rest_url();
+    let dir = std::env::temp_dir().join(format!("silent-wallet-chain-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("alice.sqlite3").display().to_string();
+    let alice = funded_wallet(&node, &mut faucet, &db, 1);
+    let recipient = node.cli(&["getnewaddress", "", "bech32m"]);
+    let send = |rpc_url: &str, cookie: &str| {
+        wallet(
+            &alice,
+            &[
+                "send",
+                "--db",
+                &db,
+                "--core-rest-url",
+                &url,
+                "--to",
+                &recipient,
+                "--amount",
+                "20000",
+                "--fee-rate",
+                "1",
+                "--rpc-url",
+                rpc_url,
+                "--rpc-cookie-file",
+                cookie,
+            ],
+            "SEND\n",
+        )
+    };
+    let refused = send(
+        &mainnet.rest_url(),
+        &mainnet.cookie_file().display().to_string(),
+    );
+    assert_eq!(refused.code, Some(1));
+    assert!(
+        refused.stdout.is_empty()
+            && refused
+                .stderr
+                .contains("on another chain than the wallet's store")
+            && refused.stderr.contains("nothing was built or sent")
+            && !refused.stderr.contains("Type SEND"),
+        "{}",
+        refused.stderr
+    );
+    // Credentials typed into the URL are refused without being repeated.
+    let with_credentials = send(
+        "http://rpcuser:hunter2secret@127.0.0.1:18443",
+        &node.cookie_file().display().to_string(),
+    );
+    assert_eq!(with_credentials.code, Some(1));
+    assert!(
+        with_credentials.stderr.contains("refusing the RPC URL")
+            && !with_credentials.stderr.contains("hunter2secret"),
+        "{}",
+        with_credentials.stderr
+    );
+    assert!(ok(&alice, &["pending", "--db", &db]).contains("no transaction is waiting"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

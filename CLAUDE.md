@@ -10,7 +10,7 @@
 3. **秘密を出さない。** scan 秘密鍵・spend 秘密鍵・シード・出力ごとの tweak・RPC 認証情報を、stdout / ログ / JSON / `Debug` / panic / テスト成果物 / コミットに書かない。新しい秘密鍵をリポジトリに追加しない（テスト鍵は BIP352 公式ベクトルの公開値のみ。テストが使う使い捨ての鍵は実行時に作る）。鍵とシードはファイルに保存しない（起動時に受け取る）。出力ごとの tweak は保存せず、支出するときにだけフルブロックから再計算して使う。
 4. **fail-closed。** 部分応答・順序違い・重複・ハッシュ不連続・ネットワーク不一致・tx 単位のエラーは、範囲全体の失敗にする。静かに「同期済み」としない。
 5. **検出は残高ではない。** 受信専用の部分（`silent-sync`、`lab-cli`）の表示は `detected_received_outputs`。「未使用」と呼んでよいのは、**フルブロック由来の検出のうち、使用済みの記録が無いもの**だけで、根拠（自分のノードで確認）と条件（承認数）を必ず添える。インデックス由来の検出は合計に入れない。根拠を添えずに「残高」「利用可能額」と書かない。
-6. **送金・署名は `crates/silent-wallet` と `crates/wallet-cli` だけ。** `silent-sync`・`silent-sync-sqlite`・`lab-cli` には置かない（上流の送信関数と tx の署名を使ってよいのは、この 2 つとテスト専用の `crates/lab-testkit` だけ）。regtest と signet のみ。送信の前に必ず内容を表示して確認を求める。通常の依存に `lab-testkit` を入れない（`dev-dependencies` のみ）。
+6. **送金・署名は `crates/silent-wallet` と `crates/wallet-cli` だけ。** `silent-sync`・`silent-sync-sqlite`・`lab-cli` には置かない（上流の送信関数と tx の署名を使ってよいのは、この 2 つとテスト専用の `crates/lab-testkit` だけ）。regtest と signet のみ。送信の前に必ず内容を表示し、標準入力からの確認語を待つ（確認を省くフラグを作らない）。送信の結果が分からないときは「送られなかった」と言わない。通常の依存に `lab-testkit` を入れない（`dev-dependencies` のみ）。
 7. **嘘をつかない。** テスト未実行で「完成」と言わない。未実装は `NOT IMPLEMENTED`、未確認は `UNVERIFIED`、外部要因で進めないものは `BLOCKED` と書く。計測値を捏造しない。モックで成功を装わない。
 8. **API を記憶から推測しない。** 上流の実コードを読んで確認し、commit SHA を `docs/RESEARCH.md` に残す。
 9. **Phase Gate を飛ばさない。** UI の作り込み、Tauri、製品形態（SDK / ウォレット）の決め打ちは Phase 6 まで行わない。

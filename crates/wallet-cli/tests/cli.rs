@@ -2,14 +2,22 @@
 //! refusals, and an empty wallet against an in-process fake of Core's REST
 //! interface. Sending is covered against a real node in `regtest_wallet.rs`.
 #![allow(clippy::unwrap_used)] // test code: a panic is the failure report
+#![allow(non_snake_case)] // `SEED` is a per-test value used like a constant
 
 use lab_testkit::{fake_http::FakeCoreRest, fixture_gen};
 use std::process::{Command, Stdio};
 
 const BIN: &str = env!("CARGO_BIN_EXE_silent-wallet");
-/// A seed that is public by being written here: for a wallet that never
-/// receives anything.
-const SEED: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+/// A seed made when the test runs: nothing that could be a key is kept in
+/// the repository.
+fn random_seed() -> String {
+    use std::io::Read as _;
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut bytes))
+        .expect("a source of randomness");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 fn run(seed: Option<&str>, args: &[&str]) -> (Option<i32>, String, String) {
     let mut command = Command::new(BIN);
@@ -34,6 +42,8 @@ fn run(seed: Option<&str>, args: &[&str]) -> (Option<i32>, String, String) {
 
 #[test]
 fn the_address_comes_from_the_seed_in_the_environment() {
+    let seed = random_seed();
+    let SEED = seed.as_str();
     let (code, regtest, _) = run(Some(SEED), &["address"]);
     assert_eq!(code, Some(0));
     assert!(regtest.starts_with("sprt1"), "{regtest}");
@@ -48,8 +58,7 @@ fn the_address_comes_from_the_seed_in_the_environment() {
     assert_eq!(code, Some(0));
     assert_ne!(labelled, regtest);
     assert!(stderr.contains("only found by a store that scans for label 3"));
-    let other = "ff0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-    assert_ne!(run(Some(other), &["address"]).1, regtest);
+    assert_ne!(run(Some(&random_seed()), &["address"]).1, regtest);
 
     // No seed, or something that is not one: an error that says what is
     // expected and repeats nothing of what was given.
@@ -98,6 +107,8 @@ fn the_address_comes_from_the_seed_in_the_environment() {
 
 #[test]
 fn a_store_is_bound_to_the_seed_and_shows_nothing_it_did_not_scan() {
+    let seed = random_seed();
+    let SEED = seed.as_str();
     let dir = std::env::temp_dir().join(format!("silent-wallet-cli-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -112,6 +123,26 @@ fn a_store_is_bound_to_the_seed_and_shows_nothing_it_did_not_scan() {
         stderr.contains("create it with `silent-wallet init`"),
         "{stderr}"
     );
+
+    // The node is a regtest node: a store for another network is not made.
+    let (code, stdout, stderr) = run(
+        Some(SEED),
+        &[
+            "--network",
+            "signet",
+            "init",
+            "--db",
+            &db,
+            "--core-rest-url",
+            &url,
+        ],
+    );
+    assert_eq!(code, Some(1));
+    assert!(
+        stdout.is_empty() && stderr.to_lowercase().contains("regtest"),
+        "{stderr}"
+    );
+    assert!(!std::path::Path::new(&db).exists());
 
     let (code, stdout, stderr) = run(
         Some(SEED),
@@ -164,7 +195,8 @@ fn a_store_is_bound_to_the_seed_and_shows_nothing_it_did_not_scan() {
     assert!(stdout.contains("no transaction is waiting for a block"));
 
     // Another seed is another wallet: the store refuses it.
-    let other = "ff0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    let other_seed = random_seed();
+    let other = other_seed.as_str();
     let before = std::fs::read(&db).unwrap();
     for args in [
         vec!["sync", "--db", &db, "--core-rest-url", &url],

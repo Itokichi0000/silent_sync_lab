@@ -5,7 +5,7 @@
 //! the connection is set up, sent to a loopback address only, and never
 //! printed, stored or put into an error.
 
-use bdk_sp::bitcoin::{consensus::encode::serialize_hex, Transaction, Txid};
+use bdk_sp::bitcoin::{consensus::encode::serialize_hex, BlockHash, Transaction, Txid};
 use std::{
     fmt,
     io::{Read as _, Write as _},
@@ -22,9 +22,13 @@ const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum RpcError {
-    #[error("refusing RPC URL `{0}`: expected http://127.0.0.1:<port> (loopback only)")]
-    /// The URL is not a loopback IPv4 address with a port.
-    Url(String),
+    #[error(
+        "refusing the RPC URL: expected http://127.0.0.1:<port> (loopback only, and without \
+         credentials in the URL — they come from the cookie file)"
+    )]
+    /// The URL is not a loopback IPv4 address with a port. The URL is not
+    /// repeated: it may contain credentials.
+    Url,
     #[error("cannot read the cookie file {path}: {reason}")]
     /// The cookie file could not be read or is not a cookie.
     Cookie {
@@ -34,8 +38,17 @@ pub enum RpcError {
         reason: String,
     },
     #[error("the node is unavailable: {0}")]
-    /// The node could not be reached or did not answer in time.
+    /// The node could not be reached: no request was sent.
     Unavailable(String),
+    #[error("no usable answer from the node: {0}")]
+    /// The request was sent (at least in part) and no answer was read: the
+    /// connection broke or timed out. **Whether the node acted on the
+    /// request is not known.**
+    NoAnswer(String),
+    #[error("the node at the RPC address is on another chain than the wallet's store")]
+    /// The node's genesis block is not the one of the store's chain (for
+    /// example a mainnet node on that port).
+    WrongChain,
     #[error("the node refused the credentials")]
     /// HTTP 401/403.
     Unauthorized,
@@ -44,8 +57,27 @@ pub enum RpcError {
     /// accepted).
     Rejected(String),
     #[error("unexpected answer from the node: {0}")]
-    /// The answer was not what the protocol prescribes.
+    /// The answer was not what the protocol prescribes. Whether the node
+    /// acted on the request is not known.
     Malformed(String),
+}
+
+impl RpcError {
+    /// Whether this error means the node certainly did **not** act on the
+    /// request: it was never sent, or the node said no. For every other
+    /// error the outcome is unknown, and a transaction that was being sent
+    /// must be treated as possibly sent.
+    pub fn means_not_done(&self) -> bool {
+        matches!(
+            self,
+            RpcError::Url
+                | RpcError::Cookie { .. }
+                | RpcError::Unavailable(_)
+                | RpcError::Unauthorized
+                | RpcError::Rejected(_)
+                | RpcError::WrongChain
+        )
+    }
 }
 
 /// A connection description for the JSON-RPC interface of a local node.
@@ -96,12 +128,16 @@ impl CoreRpc {
             .map(|rest| rest.trim_end_matches('/'))
             .and_then(|host| SocketAddrV4::from_str(host).ok())
             .filter(|address| address.ip().is_loopback() && *address.ip() != Ipv4Addr::UNSPECIFIED)
-            .ok_or_else(|| RpcError::Url(url.to_string()))?;
+            .ok_or(RpcError::Url)?;
         let cookie = |reason: &str| RpcError::Cookie {
             path: cookie_file.display().to_string(),
             reason: reason.to_string(),
         };
-        let contents = std::fs::read_to_string(cookie_file).map_err(|e| cookie(&e.to_string()))?;
+        // A cookie is a short line; never read more than that.
+        let mut contents = String::new();
+        std::fs::File::open(cookie_file)
+            .and_then(|file| file.take(1024).read_to_string(&mut contents))
+            .map_err(|e| cookie(&e.to_string()))?;
         let contents = contents.trim();
         if !contents.contains(':') || contents.contains(['\n', '\r']) || contents.len() > 512 {
             return Err(cookie("not a `user:password` cookie"));
@@ -114,6 +150,8 @@ impl CoreRpc {
 
     fn call(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, RpcError> {
         let unavailable = |e: std::io::Error| RpcError::Unavailable(e.to_string());
+        // Once bytes have gone out, a failure no longer means "not done".
+        let no_answer = |e: std::io::Error| RpcError::NoAnswer(e.to_string());
         let body = serde_json::json!({
             "jsonrpc": "1.0",
             "id": "silent-wallet",
@@ -135,12 +173,12 @@ impl CoreRpc {
             body.len(),
             body
         );
-        stream.write_all(request.as_bytes()).map_err(unavailable)?;
+        stream.write_all(request.as_bytes()).map_err(no_answer)?;
         let mut response = Vec::new();
         stream
             .take(MAX_RESPONSE_BYTES + 1)
             .read_to_end(&mut response)
-            .map_err(unavailable)?;
+            .map_err(no_answer)?;
         if response.len() as u64 > MAX_RESPONSE_BYTES {
             return Err(RpcError::Malformed("the answer is too large".to_string()));
         }
@@ -173,6 +211,22 @@ impl CoreRpc {
         Ok(answer["result"].clone())
     }
 
+    /// Checks that the node is on the chain whose genesis block is
+    /// `genesis`. To be called before anything is sent: a node on another
+    /// chain (mainnet on that port, say) must not be handed a transaction.
+    pub fn check_chain(&self, genesis: BlockHash) -> Result<(), RpcError> {
+        let result = self.call("getblockhash", serde_json::json!([0]))?;
+        let reported = result
+            .as_str()
+            .and_then(|text| text.parse::<BlockHash>().ok())
+            .ok_or_else(|| RpcError::Malformed("no genesis block hash".to_string()))?;
+        if reported == genesis {
+            Ok(())
+        } else {
+            Err(RpcError::WrongChain)
+        }
+    }
+
     /// Asks the node whether it would accept the transaction, without
     /// sending it. `Ok(())` if it would.
     pub fn would_accept(&self, transaction: &Transaction) -> Result<(), RpcError> {
@@ -195,6 +249,9 @@ impl CoreRpc {
 
     /// Hands the transaction to the node for relay. Returns its id as the
     /// node reports it, which must be the transaction's own.
+    ///
+    /// On an error, ask [`RpcError::means_not_done`]: unless it says so, the
+    /// node may have taken the transaction.
     pub fn send(&self, transaction: &Transaction) -> Result<Txid, RpcError> {
         let result = self.call(
             "sendrawtransaction",

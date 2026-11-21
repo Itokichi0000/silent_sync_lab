@@ -30,6 +30,6 @@ pub mod send;
 
 pub use holdings::{holdings, Held, Holdings};
 pub use keys::{KeyError, Wallet, WalletKeys};
-pub use pending::{PendingError, PendingSpends, PendingTransaction};
+pub use pending::{PendingError, PendingSpends, PendingTransaction, Settlement};
 pub use rpc::{CoreRpc, RpcError};
 pub use send::{build_and_sign, BuiltTransaction, Destination, Payment, SendError, SendLimits};

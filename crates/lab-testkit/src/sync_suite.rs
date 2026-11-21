@@ -2574,6 +2574,43 @@ pub fn spends_of_detected_outputs_are_recorded_and_reverted(new_store: StoreFact
     assert_store_matches(store.as_ref(), source.inner.fork_chain(), 1);
     source.inner.on_fork.set(false);
 
+    // A source that declares full blocks and serves one block — the one with
+    // a spend in it — as index evidence: that block would count as inspected
+    // for spends without having been. Refused, for a sync and a plain scan.
+    let (honest, _) = chain_with_spends();
+    let mislabelled = Tamper::new(honest, |batch: &mut ScanBatch| {
+        for block in &mut batch.blocks {
+            if block.block.height == 6 {
+                block.evidence = Evidence::TweakIndex(Vec::new());
+            }
+        }
+    });
+    let mut refused = new_store();
+    init(refused.as_mut(), &mislabelled, 1);
+    match sync(
+        &mislabelled,
+        &scanner(),
+        refused.as_mut(),
+        &SyncOptions::default(),
+    ) {
+        Err(SyncError::Scan(ScanError::InconsistentBatch { reason, .. })) => assert!(
+            reason.contains("block 6 carries another kind of evidence than the source declares"),
+            "{reason}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(refused.checkpoint().expect("c"), None);
+    assert!(matches!(
+        scan_range(
+            &mislabelled,
+            &scanner(),
+            ChainIdentity::for_network(Network::Regtest),
+            1,
+            MAIN_TIP
+        ),
+        Err(ScanError::InconsistentBatch { .. })
+    ));
+
     // An index does not show what transactions spend: nothing is recorded,
     // and that means "unknown".
     let (again, _) = chain_with_spends();
