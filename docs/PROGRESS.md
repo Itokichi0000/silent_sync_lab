@@ -300,7 +300,7 @@ Phase 2 以降の前提として未解決のもの:
 - **出力証拠**: `docs/logs/phase4_cargo_fmt.log`, `phase4_cargo_clippy.log`, `phase4_cargo_test.log`, `phase4_e2e.log`, `phase4_mutation_check.log`
 - **調べた上流資料・commit SHA**: BlindBit Oracle v2 `f9ab7fd` を実際にビルドし regtest で動かして応答を確認（RESEARCH §4.1）。
 - **安全性で気をつけたこと**:
-  - tweak インデックスのスキャンは上流の関数だけで構成（独自のマッチングなし）。公式ベクトル 29 件でフル tx 経路と一致。人間レビュー対象として D-030 に明記。
+  - tweak インデックスのスキャンは上流の関数だけで構成（独自のマッチングなし）。公式ベクトルのうち tweak データが定義される受信ケースすべてでフル tx 経路と一致。人間レビュー対象として D-030 に明記。
   - Oracle にはブロックの高さしか送らない。接続先はループバックの IPv4 リテラルに限定。mainnet を名乗る Oracle は拒否。
   - Oracle のブロックは、自分のノードの（genesis から検証した）ヘッダと照合する。追いついていない Oracle や別チェーンの Oracle は「入金なし」にならずエラーになる。
   - インデックスの中身は検証できないことを、型（`SourceCapabilities`）・ドキュメント・テストで明示。

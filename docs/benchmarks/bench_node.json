@@ -1,0 +1,9 @@
+{
+ "blocks": 1000,
+ "expected_detections": 100,
+ "from": 117,
+ "node_version": "/Satoshi:32.1.0/",
+ "oracle_indexing_seconds": 0.747169363,
+ "payment_every": 10,
+ "to": 1116
+}
