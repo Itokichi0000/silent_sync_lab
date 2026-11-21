@@ -1,5 +1,5 @@
 $ cargo clippy --workspace --all-targets --locked -- -D warnings
     Checking lab-storage v0.1.0 (/home/user/silent_sync_lab/crates/lab-storage)
     Checking lab-cli v0.1.0 (/home/user/silent_sync_lab/crates/lab-cli)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.13s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.09s
 exit=0
