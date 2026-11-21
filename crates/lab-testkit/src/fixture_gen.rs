@@ -783,3 +783,27 @@ pub fn same_counter_twice_tx() -> (Transaction, Vec<TxOut>) {
         inputs.iter().map(|i| i.prevout.clone()).collect(),
     )
 }
+
+/// A transaction that spends `outpoint`, whose output is `spent`, and pays
+/// an unrelated script. Returned with the outputs its inputs spend.
+///
+/// The witness is a placeholder: fixture sources do not verify signatures,
+/// they only show which outputs a block's transactions spend. `salt` makes
+/// transactions that spend different outputs pay different scripts.
+pub fn spending_tx(outpoint: OutPoint, spent: TxOut, salt: u32) -> (Transaction, Vec<TxOut>) {
+    let transaction = Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: outpoint,
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::from_slice(&[vec![0u8; 64]]),
+        }],
+        output: vec![TxOut {
+            value: spent.value,
+            script_pubkey: p2wpkh_script(&sender_key(salt)),
+        }],
+    };
+    (transaction, vec![spent])
+}

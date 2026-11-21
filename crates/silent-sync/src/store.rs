@@ -12,7 +12,7 @@
 
 use crate::{
     bitcoin::{BlockHash, OutPoint},
-    models::{BlockRef, DetectedOutput},
+    models::{BlockRef, DetectedOutput, SpentOutput},
     network::ChainIdentity,
 };
 use serde::{Deserialize, Serialize};
@@ -97,18 +97,24 @@ pub trait SyncStore {
     fn checkpoint(&self) -> Result<Option<BlockRef>, StoreError>;
     /// The stored block at `height`, used to locate a fork point.
     fn block_at(&self, height: u32) -> Result<Option<BlockRef>, StoreError>;
-    /// Atomically records that `blocks` were scanned and that `detections`
-    /// were found in them. Must enforce [`check_append`].
+    /// Atomically records that `blocks` were scanned, that `detections` were
+    /// found in them, and that the transactions in them spent the detected
+    /// outputs in `spends`. Must enforce [`check_append`].
     fn append(
         &mut self,
         blocks: &[BlockRef],
         detections: &[DetectedOutput],
+        spends: &[SpentOutput],
     ) -> Result<(), StoreError>;
-    /// Atomically forgets every block above `height` and the detections in
-    /// them; returns the removed detections, ascending.
+    /// Atomically forgets every block above `height`, the detections in them
+    /// and the spends recorded for them (an output spent in a forgotten
+    /// block is unspent again); returns the removed detections, ascending.
     fn rollback_to(&mut self, height: u32) -> Result<Vec<DetectedOutput>, StoreError>;
     /// All stored detections, ordered by (height, txid, vout).
     fn detections(&self) -> Result<Vec<DetectedOutput>, StoreError>;
+    /// All recorded spends of detected outputs, ordered by (height of the
+    /// spending block, txid, vout) of the spent output.
+    fn spends(&self) -> Result<Vec<SpentOutput>, StoreError>;
     /// Number of stored (scanned) blocks.
     fn block_count(&self) -> Result<u64, StoreError>;
 }
@@ -125,14 +131,21 @@ pub trait SyncStore {
 /// * every detection belongs to one of `blocks` (same height *and* hash), is
 ///   on the store's network, came from the store's backend and has a value
 ///   every store can represent;
-/// * no output is recorded twice, neither within the call nor against
-///   `already_stored`.
+/// * no output is recorded twice, neither within the call nor against the
+///   store (`stored_height` returns the height of a stored detection);
+/// * every spend is of a detected output — stored, or detected in this call
+///   at or below the spending block — by another transaction, in one of
+///   `blocks`, and no output is spent twice (within the call or against
+///   `already_spent`).
+#[allow(clippy::too_many_arguments)]
 pub fn check_append(
     meta: Option<&StoreMeta>,
     checkpoint: Option<BlockRef>,
     blocks: &[BlockRef],
     detections: &[DetectedOutput],
-    already_stored: &dyn Fn(OutPoint) -> bool,
+    spends: &[SpentOutput],
+    stored_height: &dyn Fn(OutPoint) -> Option<u32>,
+    already_spent: &dyn Fn(OutPoint) -> bool,
     block_hash_stored: &dyn Fn(BlockHash) -> bool,
 ) -> Result<(), StoreError> {
     let meta = meta.ok_or(StoreError::NotInitialized)?;
@@ -213,11 +226,56 @@ pub fn check_append(
             )));
         }
         let outpoint = OutPoint::new(d.txid, d.vout);
-        if !seen.insert(outpoint) || already_stored(outpoint) {
+        if !seen.insert(outpoint) || stored_height(outpoint).is_some() {
             return Err(invariant(format!("output {outpoint} recorded twice")));
         }
     }
+
+    let mut spent = BTreeSet::new();
+    for s in spends {
+        let outpoint = OutPoint::new(s.txid, s.vout);
+        if !blocks.contains(&s.spent_in) {
+            return Err(invariant(format!(
+                "spend of {outpoint} refers to block {} ({}) which is not being appended",
+                s.spent_in.height, s.spent_in.hash
+            )));
+        }
+        if s.spending_txid == s.txid {
+            return Err(invariant(format!(
+                "output {outpoint} is said to be spent by the transaction that created it"
+            )));
+        }
+        let created_at = detections
+            .iter()
+            .find(|d| OutPoint::new(d.txid, d.vout) == outpoint)
+            .map(|d| d.block.height)
+            .or_else(|| stored_height(outpoint));
+        match created_at {
+            None => {
+                return Err(invariant(format!(
+                    "spend of {outpoint}, which is not a detected output"
+                )))
+            }
+            Some(height) if height > s.spent_in.height => {
+                return Err(invariant(format!(
+                    "output {outpoint} is said to be spent at height {}, before the block that \
+                     created it ({height})",
+                    s.spent_in.height
+                )))
+            }
+            Some(_) => {}
+        }
+        if !spent.insert(outpoint) || already_spent(outpoint) {
+            return Err(invariant(format!("output {outpoint} spent twice")));
+        }
+    }
     Ok(())
+}
+
+/// Canonical order of spends in every store: by height of the spending
+/// block, then by the spent output (`Txid`'s own ordering, then index).
+pub fn sort_spends(spends: &mut [SpentOutput]) {
+    spends.sort_by_key(|s| (s.spent_in.height, s.txid, s.vout));
 }
 
 /// Largest output value a store accepts (what a signed 64-bit column holds;
@@ -239,6 +297,7 @@ pub struct MemoryStore {
     meta: Option<StoreMeta>,
     blocks: Vec<BlockRef>,
     detections: Vec<DetectedOutput>,
+    spends: Vec<SpentOutput>,
 }
 
 impl MemoryStore {
@@ -278,22 +337,32 @@ impl SyncStore for MemoryStore {
         &mut self,
         blocks: &[BlockRef],
         detections: &[DetectedOutput],
+        spends: &[SpentOutput],
     ) -> Result<(), StoreError> {
         check_append(
             self.meta.as_ref(),
             self.blocks.last().copied(),
             blocks,
             detections,
+            spends,
             &|outpoint| {
                 self.detections
                     .iter()
-                    .any(|d| OutPoint::new(d.txid, d.vout) == outpoint)
+                    .find(|d| OutPoint::new(d.txid, d.vout) == outpoint)
+                    .map(|d| d.block.height)
+            },
+            &|outpoint| {
+                self.spends
+                    .iter()
+                    .any(|s| OutPoint::new(s.txid, s.vout) == outpoint)
             },
             &|hash| self.blocks.iter().any(|b| b.hash == hash),
         )?;
         self.blocks.extend_from_slice(blocks);
         self.detections.extend_from_slice(detections);
         sort_detections(&mut self.detections);
+        self.spends.extend_from_slice(spends);
+        sort_spends(&mut self.spends);
         Ok(())
     }
 
@@ -302,6 +371,7 @@ impl SyncStore for MemoryStore {
             return Err(StoreError::NotInitialized);
         }
         self.blocks.retain(|b| b.height <= height);
+        self.spends.retain(|s| s.spent_in.height <= height);
         let (kept, mut removed): (Vec<_>, Vec<_>) = std::mem::take(&mut self.detections)
             .into_iter()
             .partition(|d| d.block.height <= height);
@@ -315,6 +385,13 @@ impl SyncStore for MemoryStore {
             return Err(StoreError::NotInitialized);
         }
         Ok(self.detections.clone())
+    }
+
+    fn spends(&self) -> Result<Vec<SpentOutput>, StoreError> {
+        if self.meta.is_none() {
+            return Err(StoreError::NotInitialized);
+        }
+        Ok(self.spends.clone())
     }
 
     fn block_count(&self) -> Result<u64, StoreError> {

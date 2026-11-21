@@ -67,3 +67,20 @@ pub struct DetectedOutput {
     /// Where the detection came from.
     pub provenance: MatchProvenance,
 }
+
+/// A detected output that a transaction in a scanned block spent.
+///
+/// Only full-block evidence can show this: a tweak index does not list the
+/// inputs of transactions, so a store filled from one records no spends, and
+/// "no spend recorded" then says nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SpentOutput {
+    /// Transaction that created the spent output.
+    pub txid: Txid,
+    /// Index of the spent output within that transaction.
+    pub vout: u32,
+    /// Block that contains the spending transaction.
+    pub spent_in: BlockRef,
+    /// Transaction that spent the output.
+    pub spending_txid: Txid,
+}

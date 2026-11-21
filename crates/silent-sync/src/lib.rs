@@ -152,9 +152,9 @@ pub mod verify;
 /// so downstream crates cannot accidentally mix incompatible versions.
 pub use bdk_sp::bitcoin;
 
-pub use audit::{audit_store, AuditError, AuditOptions, StoreAuditReport};
+pub use audit::{audit_store, AuditError, AuditOptions, SpendDifference, StoreAuditReport};
 pub use engine::{scan_range, ScanError, ScanReport};
-pub use models::{BlockRef, DetectedOutput, EvidenceKind, MatchProvenance};
+pub use models::{BlockRef, DetectedOutput, EvidenceKind, MatchProvenance, SpentOutput};
 pub use network::{ChainIdentity, Network, NetworkError};
 pub use protocol::{ProtocolError, ReceiveScanner, ReceiverKeys, SilentPaymentAddress};
 pub use rescan::{rescan_into, RescanError, RescanReport};

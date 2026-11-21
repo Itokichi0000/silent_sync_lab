@@ -14,7 +14,7 @@ use silent_sync::{
     audit::{audit_store, AuditError, AuditOptions, StoreAuditReport},
     bitcoin::{hashes::Hash as _, OutPoint, Txid},
     engine::{scan_range, ScanError},
-    models::{BlockRef, DetectedOutput, EvidenceKind},
+    models::{BlockRef, DetectedOutput, EvidenceKind, SpentOutput},
     network::{ChainIdentity, Network},
     protocol::{ReceiveScanner, TxScanOutcome},
     rescan::{rescan_into, RescanError},
@@ -484,6 +484,7 @@ pub fn detections_come_back_in_the_canonical_order(new_store: StoreFactory<'_>) 
                 made(2, low, 9),
                 made(1, low, 0),
             ],
+            &[],
         )
         .expect("append");
     let canonical = vec![
@@ -1028,7 +1029,7 @@ pub fn stores_reject_inconsistent_appends(new_store: StoreFactory<'_>) {
 
     let mut store = new_store();
     assert_eq!(
-        store.append(&[block(1)], &[]),
+        store.append(&[block(1)], &[], &[]),
         Err(StoreError::NotInitialized)
     );
     assert_eq!(store.rollback_to(0).err(), Some(StoreError::NotInitialized));
@@ -1040,94 +1041,109 @@ pub fn stores_reject_inconsistent_appends(new_store: StoreFactory<'_>) {
     store.initialize(&meta).expect("initialize");
 
     // The first block must be the birthday.
-    invariant(store.append(&[block(1)], &[]), "must be the birthday 2");
-    invariant(store.append(&[block(3)], &[]), "must be the birthday 2");
-    invariant(store.append(&[], &[]), "zero blocks");
+    invariant(
+        store.append(&[block(1)], &[], &[]),
+        "must be the birthday 2",
+    );
+    invariant(
+        store.append(&[block(3)], &[], &[]),
+        "must be the birthday 2",
+    );
+    invariant(store.append(&[], &[], &[]), "zero blocks");
     store
-        .append(&[block(2)], &at(2))
+        .append(&[block(2)], &at(2), &[])
         .expect("append birthday block");
 
     // Must extend the checkpoint: no gap, no repeat, no foreign parent.
     invariant(
-        store.append(&[block(4)], &[]),
+        store.append(&[block(4)], &[], &[]),
         "does not extend the checkpoint",
     );
     invariant(
-        store.append(&[block(2)], &[]),
+        store.append(&[block(2)], &[], &[]),
         "does not extend the checkpoint",
     );
     let fork_block = source.fork_chain().block_ref(6).expect("fork block");
     let mut wrong_parent = block(3);
     wrong_parent.prev_hash = fork_block.hash;
     invariant(
-        store.append(&[wrong_parent], &[]),
+        store.append(&[wrong_parent], &[], &[]),
         "does not extend the checkpoint",
     );
     // Blocks within one call must be contiguous and linked.
-    invariant(store.append(&[block(3), block(5)], &[]), "does not follow");
+    invariant(
+        store.append(&[block(3), block(5)], &[], &[]),
+        "does not follow",
+    );
     let mut unlinked = block(4);
     unlinked.prev_hash = fork_block.hash;
-    invariant(store.append(&[block(3), unlinked], &[]), "does not follow");
+    invariant(
+        store.append(&[block(3), unlinked], &[], &[]),
+        "does not follow",
+    );
 
     // A block hash is recorded once, and no block is its own parent.
     let mut own_parent = block(3);
     own_parent.hash = own_parent.prev_hash;
-    invariant(store.append(&[own_parent], &[]), "its own parent");
+    invariant(store.append(&[own_parent], &[], &[]), "its own parent");
     let mut stored_again = block(4);
     stored_again.hash = block(2).hash;
     invariant(
-        store.append(&[block(3), stored_again], &[]),
+        store.append(&[block(3), stored_again], &[], &[]),
         "is already recorded",
     );
     let mut repeated = block(5);
     repeated.hash = block(3).hash;
     invariant(
-        store.append(&[block(3), block(4), repeated], &[]),
+        store.append(&[block(3), block(4), repeated], &[], &[]),
         "is already recorded",
     );
 
     // Detections must belong to the appended blocks, once.
     invariant(
-        store.append(&[block(3)], &at(5)),
+        store.append(&[block(3)], &at(5), &[]),
         "which is not being appended",
     );
     // ... by hash, not just by height.
     let mut other_block = at(3);
     other_block[0].block.hash = fork_block.hash;
     invariant(
-        store.append(&[block(3)], &other_block),
+        store.append(&[block(3)], &other_block, &[]),
         "which is not being appended",
     );
     // A value no store can represent, and a detection from another backend.
     let mut huge = at(3);
     huge[0].value_sats = u64::MAX;
-    invariant(store.append(&[block(3)], &huge), "does not fit the store");
+    invariant(
+        store.append(&[block(3)], &huge, &[]),
+        "does not fit the store",
+    );
     let mut at_limit = at(3);
     at_limit[0].value_sats = silent_sync::store::MAX_STORABLE_SATS + 1;
     invariant(
-        store.append(&[block(3)], &at_limit),
+        store.append(&[block(3)], &at_limit, &[]),
         "does not fit the store",
     );
     let mut other_backend = at(3);
     other_backend[0].provenance.backend_id = "something_else".to_string();
     invariant(
-        store.append(&[block(3)], &other_backend),
+        store.append(&[block(3)], &other_backend, &[]),
         "detection from backend `something_else`",
     );
     let mut twice = at(3);
     twice.extend(at(3));
-    invariant(store.append(&[block(3)], &twice), "recorded twice");
+    invariant(store.append(&[block(3)], &twice, &[]), "recorded twice");
     let mut already = at(3);
     let mut relocated = at(2)[0].clone();
     relocated.block = block(3);
     already.push(relocated);
-    invariant(store.append(&[block(3)], &already), "recorded twice");
+    invariant(store.append(&[block(3)], &already, &[]), "recorded twice");
 
     // A detection that claims another network.
     let mut foreign = at(3);
     foreign[0].network = Network::Signet;
     invariant(
-        store.append(&[block(3)], &foreign),
+        store.append(&[block(3)], &foreign, &[]),
         "detection on signet in a regtest store",
     );
 
@@ -1138,7 +1154,11 @@ pub fn stores_reject_inconsistent_appends(new_store: StoreFactory<'_>) {
 
     // A valid multi-block append, then rollbacks.
     store
-        .append(&[block(3), block(4), block(5)], &[at(3), at(5)].concat())
+        .append(
+            &[block(3), block(4), block(5)],
+            &[at(3), at(5)].concat(),
+            &[],
+        )
         .expect("append");
     assert_eq!(store.block_count().expect("n"), 4);
     assert_eq!(store.block_at(4).expect("b"), Some(block(4)));
@@ -1161,11 +1181,14 @@ pub fn stores_reject_inconsistent_appends(new_store: StoreFactory<'_>) {
     assert_eq!(store.checkpoint().expect("c"), None);
     assert_eq!(store.block_count().expect("n"), 0);
     // After a full rollback the birthday rule applies again.
-    invariant(store.append(&[block(3)], &[]), "must be the birthday 2");
+    invariant(
+        store.append(&[block(3)], &[], &[]),
+        "must be the birthday 2",
+    );
     // The largest representable value is accepted and read back unchanged.
     let mut largest = at(2);
     largest[0].value_sats = silent_sync::store::MAX_STORABLE_SATS;
-    store.append(&[block(2)], &largest).expect("append");
+    store.append(&[block(2)], &largest, &[]).expect("append");
     assert_eq!(store.detections().expect("d"), largest);
 }
 
@@ -1202,7 +1225,7 @@ fn store_holding(
     let blocks = source.main_chain().block_refs(1, MAIN_TIP).expect("refs");
     let mut detections = reference(source.main_chain(), 1, MAIN_TIP);
     edit(&mut detections);
-    store.append(&blocks, &detections).expect("append");
+    store.append(&blocks, &detections, &[]).expect("append");
     store
 }
 
@@ -1216,6 +1239,8 @@ struct Misreporting<'a> {
     extra: Vec<DetectedOutput>,
     /// Report a birthday of 0, which no store may have.
     birthday_zero: bool,
+    /// Spends listed in addition to what the store records.
+    extra_spends: Vec<SpentOutput>,
 }
 
 impl SyncStore for Misreporting<'_> {
@@ -1238,7 +1263,12 @@ impl SyncStore for Misreporting<'_> {
         }
         self.inner.block_at(height)
     }
-    fn append(&mut self, _: &[BlockRef], _: &[DetectedOutput]) -> Result<(), StoreError> {
+    fn append(
+        &mut self,
+        _: &[BlockRef],
+        _: &[DetectedOutput],
+        _: &[SpentOutput],
+    ) -> Result<(), StoreError> {
         Err(StoreError::Backend("read-only view".to_string()))
     }
     fn rollback_to(&mut self, _: u32) -> Result<Vec<DetectedOutput>, StoreError> {
@@ -1252,6 +1282,11 @@ impl SyncStore for Misreporting<'_> {
             }
         }
         all.extend(self.extra.iter().cloned());
+        Ok(all)
+    }
+    fn spends(&self) -> Result<Vec<SpentOutput>, StoreError> {
+        let mut all = self.inner.spends()?;
+        all.extend(self.extra_spends.iter().copied());
         Ok(all)
     }
     fn block_count(&self) -> Result<u64, StoreError> {
@@ -1670,6 +1705,7 @@ pub fn audit_refuses_what_it_cannot_carry_out(new_store: StoreFactory<'_>) {
         missing_block: None,
         extra: Vec::new(),
         birthday_zero: false,
+        extra_spends: Vec::new(),
     };
     match audit(&source, &claims_other_blocks, &all) {
         Err(AuditError::Store(StoreError::Invariant(reason))) => {
@@ -1683,6 +1719,7 @@ pub fn audit_refuses_what_it_cannot_carry_out(new_store: StoreFactory<'_>) {
         missing_block: Some(5),
         extra: Vec::new(),
         birthday_zero: false,
+        extra_spends: Vec::new(),
     };
     match audit(&source, &lacks_a_block, &all) {
         Err(AuditError::Store(StoreError::Invariant(reason))) => {
@@ -1720,6 +1757,7 @@ pub fn audit_refuses_what_it_cannot_carry_out(new_store: StoreFactory<'_>) {
             missing_block: None,
             extra: vec![extra],
             birthday_zero: false,
+            extra_spends: Vec::new(),
         };
         for range in [&all, &part] {
             match audit(&source, &misreporting, range) {
@@ -1746,6 +1784,7 @@ pub fn audit_refuses_what_it_cannot_carry_out(new_store: StoreFactory<'_>) {
         missing_block: None,
         extra: Vec::new(),
         birthday_zero: true,
+        extra_spends: Vec::new(),
     };
     let is_refused = |reason: &str| reason.contains("birthday is 0");
     assert!(matches!(
@@ -2026,7 +2065,7 @@ pub fn a_rescan_with_more_labels_keeps_everything_and_adds_what_they_reveal(
         })
         .expect("initialize");
     outdated
-        .append(&block_refs(2, MAIN_TIP), &held)
+        .append(&block_refs(2, MAIN_TIP), &held, &[])
         .expect("append");
     assert!(matches!(
         sync(
@@ -2395,6 +2434,397 @@ pub fn a_rescan_that_could_lose_something_is_refused(new_store: StoreFactory<'_>
     assert_eq!(snapshot(current.as_ref()), before);
 }
 
+// ---------------------------------------------------------------------------
+// Spends of detected outputs (full-block evidence only)
+// ---------------------------------------------------------------------------
+
+/// The output `d` as it appears in the main fixture chain.
+fn output_of(source: &TestSource, d: &DetectedOutput) -> silent_sync::bitcoin::TxOut {
+    let batch = source
+        .main_chain()
+        .fetch_range(d.block.height, d.block.height)
+        .expect("block");
+    let Evidence::FullBlock(txs) = &batch.blocks[0].evidence else {
+        panic!("the fixture serves full blocks");
+    };
+    txs.iter()
+        .find(|t| t.tx.compute_txid() == d.txid)
+        .expect("transaction")
+        .tx
+        .output[d.vout as usize]
+        .clone()
+}
+
+/// The main fixture chain with two more transactions in it: one, in block 6,
+/// spends a detected output created earlier; the other spends a detected
+/// output in the very block that created it. The fork chain is served as it
+/// is. Returns the source and the two spends an honest scan must record.
+#[allow(clippy::type_complexity)]
+fn chain_with_spends() -> (
+    Tamper<TestSource, impl Fn(&mut ScanBatch)>,
+    Vec<SpentOutput>,
+) {
+    let plain = TestSource::new();
+    let honest = reference(plain.main_chain(), 1, MAIN_TIP);
+    let earlier = honest
+        .iter()
+        .find(|d| d.block.height < 6)
+        .expect("a detection below height 6")
+        .clone();
+    let same_block = honest
+        .iter()
+        .find(|d| d.block.height == 7)
+        .expect("a detection at height 7")
+        .clone();
+    let block_6 = plain.main_chain().block_ref(6).expect("block");
+    let (spend_a, prevouts_a) = fixture_gen::spending_tx(
+        OutPoint::new(earlier.txid, earlier.vout),
+        output_of(&plain, &earlier),
+        1,
+    );
+    let (spend_b, prevouts_b) = fixture_gen::spending_tx(
+        OutPoint::new(same_block.txid, same_block.vout),
+        output_of(&plain, &same_block),
+        2,
+    );
+    let expected = vec![
+        SpentOutput {
+            txid: earlier.txid,
+            vout: earlier.vout,
+            spent_in: block_6,
+            spending_txid: spend_a.compute_txid(),
+        },
+        SpentOutput {
+            txid: same_block.txid,
+            vout: same_block.vout,
+            spent_in: same_block.block,
+            spending_txid: spend_b.compute_txid(),
+        },
+    ];
+    let injected = [
+        (block_6, spend_a, prevouts_a),
+        (same_block.block, spend_b, prevouts_b),
+    ];
+    let source = Tamper::new(plain, move |batch: &mut ScanBatch| {
+        for block in &mut batch.blocks {
+            for (into, tx, prevouts) in &injected {
+                // Only the main chain's blocks: the fork is another chain.
+                if let (true, Evidence::FullBlock(txs)) =
+                    (block.block == *into, &mut block.evidence)
+                {
+                    txs.push(silent_sync::source::TxWithPrevouts {
+                        tx: tx.clone(),
+                        prevouts: prevouts.clone(),
+                    });
+                }
+            }
+        }
+    });
+    (source, expected)
+}
+
+/// A transaction that spends a detected output is recorded with the block it
+/// is in — whether the output was created earlier or in the same block, and
+/// however the range is cut into chunks. A reorganization that abandons the
+/// spending block makes the output unspent again, and says so.
+pub fn spends_of_detected_outputs_are_recorded_and_reverted(new_store: StoreFactory<'_>) {
+    let (source, expected) = chain_with_spends();
+    assert!(expected[0].spent_in.height < expected[1].spent_in.height);
+
+    for chunk in [1, 2, 100] {
+        let mut store = new_store();
+        init(store.as_mut(), &source, 1);
+        let report = run(&source, store.as_mut(), &options(chunk));
+        assert_eq!(report.new_spends, expected, "chunk size {chunk}");
+        assert_eq!(
+            store.spends().expect("spends"),
+            expected,
+            "chunk size {chunk}"
+        );
+        assert_eq!(report.new_detections.len(), 7, "detections are unaffected");
+        // Nothing more on a second call.
+        let again = run(&source, store.as_mut(), &options(chunk));
+        assert!(again.new_spends.is_empty());
+        assert_eq!(store.spends().expect("spends"), expected);
+    }
+
+    // A spend found after the output was stored by an earlier call.
+    let mut store = new_store();
+    init(store.as_mut(), &source, 1);
+    let first = run(
+        &source,
+        store.as_mut(),
+        &SyncOptions::default().with_target_height(Some(5)),
+    );
+    assert!(first.new_spends.is_empty());
+    assert!(store.spends().expect("spends").is_empty());
+    let second = run(&source, store.as_mut(), &SyncOptions::default());
+    assert_eq!(second.new_spends, expected);
+
+    // The fork abandons blocks 6 to 8: both spends were in them.
+    source.inner.on_fork.set(true);
+    let report = run(&source, store.as_mut(), &SyncOptions::default());
+    let reorg = report.reorg.expect("reorg");
+    assert_eq!(reorg.spends_reverted, expected);
+    assert!(
+        report.new_spends.is_empty(),
+        "the fork spends nothing of ours"
+    );
+    assert!(store.spends().expect("spends").is_empty());
+    assert_store_matches(store.as_ref(), source.inner.fork_chain(), 1);
+    source.inner.on_fork.set(false);
+
+    // An index does not show what transactions spend: nothing is recorded,
+    // and that means "unknown".
+    let (again, _) = chain_with_spends();
+    let index = LocalTweakIndex::new(again, IndexPolicy::Bip352);
+    let mut from_index = new_store();
+    init(from_index.as_mut(), &index, 1);
+    let report = run(&index, from_index.as_mut(), &SyncOptions::default());
+    assert_eq!(report.new_detections.len(), 7);
+    assert!(report.new_spends.is_empty());
+    assert!(from_index.spends().expect("spends").is_empty());
+}
+
+/// The audit compares recorded spends with what a full-block reference
+/// shows, and a rescan must find the same spends again.
+pub fn spends_are_audited_and_must_survive_a_rescan(new_store: StoreFactory<'_>) {
+    let (source, expected) = chain_with_spends();
+    let plain = TestSource::new();
+    let synced = |from: &dyn ScanSource| {
+        let mut store = new_store();
+        init(store.as_mut(), from, 1);
+        run(from, store.as_mut(), &SyncOptions::default());
+        store
+    };
+    let all = AuditOptions::default();
+
+    let with_spends = synced(&source);
+    let report = audit(&source, with_spends.as_ref(), &all).expect("audit");
+    assert!(report.identical);
+    assert!(report.spends_compared);
+    assert_eq!(report.spends_agreed, 2);
+    assert!(report.spend_differences.is_empty());
+
+    // The store says two outputs were spent; this reference shows no such
+    // transactions.
+    let report = audit(&plain, with_spends.as_ref(), &all).expect("audit");
+    assert!(!report.identical);
+    assert!(report.differences.is_empty(), "the detections agree");
+    assert_eq!(report.spends_agreed, 0);
+    let listed: Vec<(u32, Txid, u32, Option<Side>)> = report
+        .spend_differences
+        .iter()
+        .map(|d| (d.height, d.txid, d.vout, d.only_in))
+        .collect();
+    assert_eq!(
+        listed,
+        expected
+            .iter()
+            .map(|s| (s.spent_in.height, s.txid, s.vout, Some(Side::Candidate)))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(report.spend_differences[0].stored, Some(expected[0]));
+    assert_eq!(report.spend_differences[0].reference, None);
+
+    // The other way round: the reference shows spends the store lacks — a
+    // store that would call spent outputs unspent.
+    let without_spends = synced(&plain);
+    let report = audit(&source, without_spends.as_ref(), &all).expect("audit");
+    assert!(!report.identical);
+    assert_eq!(report.spend_differences.len(), 2);
+    assert!(report
+        .spend_differences
+        .iter()
+        .all(|d| d.only_in == Some(Side::Reference) && d.stored.is_none()));
+    assert_eq!(report.spend_differences[1].reference, Some(expected[1]));
+    // Outside the audited range nothing is said.
+    let below = AuditOptions::default().with_last_height(Some(5));
+    assert!(
+        audit(&source, without_spends.as_ref(), &below)
+            .expect("audit")
+            .identical
+    );
+
+    // An index reference cannot show spends: they are not compared, and the
+    // report says so instead of calling them equal.
+    let index = LocalTweakIndex::new(
+        FixtureSource::from_file(fixture_gen::generate()).expect("fixture"),
+        IndexPolicy::Bip352,
+    );
+    let report = audit(&index, with_spends.as_ref(), &all).expect("audit");
+    assert!(!report.spends_compared);
+    assert_eq!(
+        (report.spends_agreed, report.spend_differences.len()),
+        (0, 0)
+    );
+
+    // A store that lists a spend of something it did not detect, or the same
+    // spend twice, contradicts itself.
+    let mut stray = expected[0];
+    stray.txid = Txid::from_byte_array([5; 32]);
+    for (extra, needle) in [
+        (stray, "does not belong to a stored detection"),
+        (expected[0], "listed twice"),
+    ] {
+        let misreporting = Misreporting {
+            inner: with_spends.as_ref(),
+            detections_claim_another_block: false,
+            missing_block: None,
+            extra: Vec::new(),
+            birthday_zero: false,
+            extra_spends: vec![extra],
+        };
+        match audit(&source, &misreporting, &all) {
+            Err(AuditError::Store(StoreError::Invariant(reason))) => {
+                assert!(reason.contains(needle), "{reason}")
+            }
+            other => panic!("{needle}: {other:?}"),
+        }
+    }
+
+    // A rescan through the same source finds the same spends ...
+    let mut fresh = new_store();
+    let report = rescan_into(
+        &source,
+        &scanner(),
+        with_spends.as_ref(),
+        fresh.as_mut(),
+        &SyncOptions::default(),
+    )
+    .expect("rescan");
+    assert_eq!(report.reproduced, 7);
+    assert_eq!(fresh.spends().expect("spends"), expected);
+    // ... and one that does not is not a replacement: spent outputs would
+    // look unspent.
+    let mut fresh = new_store();
+    assert_eq!(
+        rescan_into(
+            &plain,
+            &scanner(),
+            with_spends.as_ref(),
+            fresh.as_mut(),
+            &SyncOptions::default(),
+        ),
+        Err(RescanError::SpendsNotReproduced {
+            spends: expected.clone()
+        })
+    );
+}
+
+/// What a store accepts as a spend: only of a detected output, by another
+/// transaction, in a block being appended that is not below the block that
+/// created the output, and once.
+pub fn stores_reject_inconsistent_spends(new_store: StoreFactory<'_>) {
+    let source = TestSource::new();
+    let honest = reference(source.main_chain(), 1, MAIN_TIP);
+    let at = |height: u32| source.main_chain().block_ref(height).expect("block");
+    let detections_up_to = |height: u32| -> Vec<DetectedOutput> {
+        honest
+            .iter()
+            .filter(|d| d.block.height <= height)
+            .cloned()
+            .collect()
+    };
+    let first = honest[0].clone();
+    assert!(first.block.height <= 4);
+    let later = honest
+        .iter()
+        .find(|d| d.block.height == 7)
+        .expect("a detection at height 7")
+        .clone();
+    let spend = |d: &DetectedOutput, height: u32, by: u8| SpentOutput {
+        txid: d.txid,
+        vout: d.vout,
+        spent_in: at(height),
+        spending_txid: Txid::from_byte_array([by; 32]),
+    };
+    // A store holding blocks 1..=4 and what was detected in them.
+    let prepared = || {
+        let mut store = new_store();
+        init(store.as_mut(), &source, 1);
+        store
+            .append(&block_refs(1, 4), &detections_up_to(4), &[])
+            .expect("append");
+        store
+    };
+    let next = block_refs(5, 8);
+    let found: Vec<DetectedOutput> = honest
+        .iter()
+        .filter(|d| d.block.height >= 5)
+        .cloned()
+        .collect();
+    let refused = |spends: &[SpentOutput], needle: &str| {
+        let mut store = prepared();
+        let before = snapshot(store.as_ref());
+        match store.append(&next, &found, spends) {
+            Err(StoreError::Invariant(reason)) => {
+                assert!(
+                    reason.contains(needle),
+                    "`{reason}` should mention `{needle}`"
+                )
+            }
+            other => panic!("expected `{needle}`, got {other:?}"),
+        }
+        assert_eq!(snapshot(store.as_ref()), before, "{needle}");
+        assert!(store.spends().expect("spends").is_empty(), "{needle}");
+    };
+
+    // Accepted: a stored output and one detected in this very call.
+    let mut store = prepared();
+    let good = [spend(&first, 6, 1), spend(&later, 7, 2)];
+    store.append(&next, &found, &good).expect("append");
+    assert_eq!(store.spends().expect("spends"), good);
+
+    let mut undetected = spend(&first, 6, 1);
+    undetected.vout += 40;
+    refused(&[undetected], "which is not a detected output");
+    let mut elsewhere = spend(&first, 6, 1);
+    elsewhere.spent_in = source.fork_chain().block_ref(6).expect("block");
+    refused(&[elsewhere], "which is not being appended");
+    refused(&[spend(&first, 4, 1)], "which is not being appended");
+    refused(&[spend(&first, 6, 1), spend(&first, 7, 2)], "spent twice");
+    refused(&[spend(&later, 6, 1)], "before the block that created it");
+    let mut by_itself = spend(&first, 6, 1);
+    by_itself.spending_txid = first.txid;
+    refused(&[by_itself], "by the transaction that created it");
+
+    // Spent twice across calls.
+    let mut store = prepared();
+    store
+        .append(
+            &block_refs(5, 6),
+            &detections_between(&honest, 5, 6),
+            &[spend(&first, 6, 1)],
+        )
+        .expect("append");
+    match store.append(
+        &block_refs(7, 8),
+        &detections_between(&honest, 7, 8),
+        &[spend(&first, 8, 3)],
+    ) {
+        Err(StoreError::Invariant(reason)) => assert!(reason.contains("spent twice"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(store.spends().expect("spends"), vec![spend(&first, 6, 1)]);
+    assert_eq!(store.checkpoint().expect("c").map(|c| c.height), Some(6));
+
+    // Rolling back forgets the spends of the removed blocks, and only those.
+    let mut store = prepared();
+    store.append(&next, &found, &good).expect("append");
+    store.rollback_to(6).expect("rollback");
+    assert_eq!(store.spends().expect("spends"), vec![good[0]]);
+    store.rollback_to(5).expect("rollback");
+    assert!(store.spends().expect("spends").is_empty());
+}
+
+fn detections_between(all: &[DetectedOutput], from: u32, to: u32) -> Vec<DetectedOutput> {
+    all.iter()
+        .filter(|d| (from..=to).contains(&d.block.height))
+        .cloned()
+        .collect()
+}
+
 /// Expands to one `#[test]` per suite case, each run against stores produced
 /// by `$factory` (an expression of type `fn() -> Box<dyn SyncStore>`).
 #[macro_export]
@@ -2429,6 +2859,9 @@ macro_rules! sync_store_suite {
             a_rescan_does_not_choose_between_two_outputs_for_one_counter,
             an_unfinished_rescan_is_an_error_and_can_be_continued,
             a_rescan_that_could_lose_something_is_refused,
+            spends_of_detected_outputs_are_recorded_and_reverted,
+            spends_are_audited_and_must_survive_a_rescan,
+            stores_reject_inconsistent_spends,
         );
     };
     (@cases $factory:expr; $($case:ident,)*) => {

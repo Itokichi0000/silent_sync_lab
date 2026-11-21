@@ -22,8 +22,9 @@
 //! before stays committed; nothing after it is recorded.
 
 use crate::{
-    engine::{check_batch, scan_blocks, ScanCounters, ScanError},
-    models::{BlockRef, DetectedOutput, EvidenceKind},
+    bitcoin::OutPoint,
+    engine::{check_batch, scan_blocks, spends_in_blocks, ScanCounters, ScanError},
+    models::{BlockRef, DetectedOutput, EvidenceKind, SpentOutput},
     network::ChainIdentity,
     protocol::ReceiveScanner,
     source::{ScanSource, SourceError},
@@ -241,6 +242,10 @@ pub struct ReorgReport {
     /// Detections that were in the abandoned blocks. They are re-detected if
     /// the same transactions confirm on the new chain.
     pub detections_removed: Vec<DetectedOutput>,
+    /// Spends that were recorded in the abandoned blocks: these outputs are
+    /// unspent again as far as the store knows, until the new chain spends
+    /// them.
+    pub spends_reverted: Vec<SpentOutput>,
 }
 
 /// Outcome of one [`sync`] call. Contains no key material.
@@ -274,6 +279,11 @@ pub struct SyncReport {
     pub txs_skipped: BTreeMap<&'static str, u64>,
     /// Detections committed by this call (not the whole history).
     pub new_detections: Vec<DetectedOutput>,
+    /// Detected outputs that transactions in the blocks committed by this
+    /// call spent. Always empty for a tweak index, which does not show what
+    /// transactions spend: there, an output without a recorded spend is not
+    /// known to be unspent.
+    pub new_spends: Vec<SpentOutput>,
     /// Checkpoint after the call.
     pub checkpoint: Option<BlockRef>,
     /// The source's tip when the call started.
@@ -517,6 +527,8 @@ fn resolve_reorg(
     } else {
         None
     };
+    let mut spends_reverted = store.spends()?;
+    spends_reverted.retain(|s| s.spent_in.height > fork_height);
     let detections_removed = store.rollback_to(fork_height)?;
     // Stored blocks are contiguous, so this is how many were above the fork.
     let blocks_rolled_back = u64::from(checkpoint.height - fork_height);
@@ -526,6 +538,7 @@ fn resolve_reorg(
             fork_height,
             blocks_rolled_back,
             detections_removed,
+            spends_reverted,
         },
         new_checkpoint,
     )))
@@ -576,8 +589,18 @@ pub fn sync_with_progress(
         None => source_tip.height,
     };
     let resumed_from = store.checkpoint()?;
-    // From here on the checkpoint is tracked in memory: after the store has
-    // been changed, nothing below depends on reading it back.
+    // The outputs detected so far, to recognise transactions that spend them.
+    let mut detected: BTreeSet<OutPoint> = match resumed_from {
+        Some(_) => store
+            .detections()?
+            .iter()
+            .map(|d| OutPoint::new(d.txid, d.vout))
+            .collect(),
+        None => BTreeSet::new(),
+    };
+    // From here on the checkpoint and the detected outputs are tracked in
+    // memory: after the store has been changed, nothing below depends on
+    // reading it back.
     let (reorg, checkpoint) = match resumed_from {
         Some(stored) => match resolve_reorg(
             source,
@@ -587,7 +610,12 @@ pub fn sync_with_progress(
             source_tip,
             options.max_reorg_depth,
         )? {
-            Some((reorg, after)) => (Some(reorg), after),
+            Some((reorg, after)) => {
+                for removed in &reorg.detections_removed {
+                    detected.remove(&OutPoint::new(removed.txid, removed.vout));
+                }
+                (Some(reorg), after)
+            }
             None => (None, Some(stored)),
         },
         None => (None, None),
@@ -607,6 +635,7 @@ pub fn sync_with_progress(
         txs_scanned: 0,
         txs_skipped: BTreeMap::new(),
         new_detections: Vec::new(),
+        new_spends: Vec::new(),
         checkpoint,
         source_tip,
         caught_up: false,
@@ -621,6 +650,7 @@ pub fn sync_with_progress(
         &meta,
         &backend_id,
         target,
+        &mut detected,
         &mut report,
         on_commit,
     );
@@ -663,6 +693,7 @@ fn advance(
     meta: &StoreMeta,
     backend_id: &str,
     target: u32,
+    detected: &mut BTreeSet<OutPoint>,
     report: &mut SyncReport,
     on_commit: &mut dyn FnMut(BlockRef),
 ) -> Result<StopReason, SyncError> {
@@ -710,8 +741,13 @@ fn advance(
             &mut counters,
             &mut BTreeSet::new(),
         )?;
+        // An output can be spent in the block that created it, or later in
+        // the same chunk: look for spends once the chunk's own detections
+        // are known.
+        detected.extend(detections.iter().map(|d| OutPoint::new(d.txid, d.vout)));
+        let spends = spends_in_blocks(&batch.blocks, &|outpoint| detected.contains(outpoint));
         let blocks: Vec<BlockRef> = batch.blocks.iter().map(|b| b.block).collect();
-        store.append(&blocks, &detections)?;
+        store.append(&blocks, &detections, &spends)?;
 
         report.blocks_scanned += blocks.len() as u64;
         report.txs_seen += counters.txs_seen;
@@ -720,6 +756,7 @@ fn advance(
             *report.txs_skipped.entry(reason).or_default() += count;
         }
         report.new_detections.extend(detections);
+        report.new_spends.extend(spends);
         if let Some(last) = blocks.last() {
             report.checkpoint = Some(*last);
             on_commit(*last);

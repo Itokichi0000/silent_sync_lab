@@ -2,7 +2,7 @@
 //! production store.
 
 use silent_sync::{
-    models::{BlockRef, DetectedOutput},
+    models::{BlockRef, DetectedOutput, SpentOutput},
     store::{StoreError, StoreMeta, SyncStore},
 };
 
@@ -50,6 +50,7 @@ impl<S: SyncStore> SyncStore for FailingAppends<S> {
         &mut self,
         blocks: &[BlockRef],
         detections: &[DetectedOutput],
+        spends: &[SpentOutput],
     ) -> Result<(), StoreError> {
         if let Some(remaining) = self.appends_before_failure.as_mut() {
             if *remaining == 0 {
@@ -57,13 +58,16 @@ impl<S: SyncStore> SyncStore for FailingAppends<S> {
             }
             *remaining -= 1;
         }
-        self.inner.append(blocks, detections)
+        self.inner.append(blocks, detections, spends)
     }
     fn rollback_to(&mut self, height: u32) -> Result<Vec<DetectedOutput>, StoreError> {
         self.inner.rollback_to(height)
     }
     fn detections(&self) -> Result<Vec<DetectedOutput>, StoreError> {
         self.inner.detections()
+    }
+    fn spends(&self) -> Result<Vec<SpentOutput>, StoreError> {
+        self.inner.spends()
     }
     fn block_count(&self) -> Result<u64, StoreError> {
         self.inner.block_count()

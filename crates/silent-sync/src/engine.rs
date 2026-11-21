@@ -10,8 +10,8 @@
 //! scanned unless every block of the requested range was processed.
 
 use crate::{
-    bitcoin::Txid,
-    models::{BlockRef, DetectedOutput, EvidenceKind, MatchProvenance},
+    bitcoin::{OutPoint, Txid},
+    models::{BlockRef, DetectedOutput, EvidenceKind, MatchProvenance, SpentOutput},
     network::ChainIdentity,
     protocol::{ProtocolError, ReceiveScanner, SkipReason, TxScanOutcome},
     source::{BlockEvidence, Evidence, ScanSource, SourceError},
@@ -377,6 +377,36 @@ fn check_full_block(
         }
     }
     Ok(())
+}
+
+/// The detected outputs that transactions in `blocks` spend: every input
+/// whose previous output `is_detected`. Only full-block evidence lists the
+/// inputs of transactions; a tweak index yields nothing here, which means
+/// "unknown", not "unspent".
+pub(crate) fn spends_in_blocks(
+    blocks: &[BlockEvidence],
+    is_detected: &dyn Fn(&OutPoint) -> bool,
+) -> Vec<SpentOutput> {
+    let mut spends = Vec::new();
+    for block in blocks {
+        let Evidence::FullBlock(txs) = &block.evidence else {
+            continue;
+        };
+        for entry in txs.iter().filter(|entry| !entry.tx.is_coinbase()) {
+            let spending_txid = entry.tx.compute_txid();
+            for input in &entry.tx.input {
+                if is_detected(&input.previous_output) {
+                    spends.push(SpentOutput {
+                        txid: input.previous_output.txid,
+                        vout: input.previous_output.vout,
+                        spent_in: block.block,
+                        spending_txid,
+                    });
+                }
+            }
+        }
+    }
+    spends
 }
 
 /// Verifies that a batch is exactly `from..=to`, ascending and hash-linked.

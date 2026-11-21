@@ -1,15 +1,16 @@
 # CLAUDE.md — Silent Sync Lab 運用規約
 
 要求仕様は `SILENT_SYNC_LAB_DESIGN.md`。現在地は `docs/PROGRESS.md`。迷ったら仕様書に戻る。
+ウォレット段階の範囲は `docs/WALLET_DESIGN_PROPOSAL.md`（所有者が 2026-11-21 に承認。DECISIONS D-046）。規約 3・5・6 は、その承認の範囲に限って改訂してある。
 
 ## 最重要ルール
 
 1. **EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.** mainnet 接続・実資金・本番運用はしない。`Network` に mainnet を足さない。
 2. **独自の暗号を書かない。** 楕円曲線演算・ハッシュ・BIP352 のマッチングは上流 `bdk_sp` を呼ぶ。`silent-sync` が足してよいのは script の検査、データの検証、エラー分類、オーケストレーションだけ。
-3. **秘密を出さない。** scan 秘密鍵・シード・出力ごとの tweak・RPC 認証情報を、stdout / ログ / JSON / `Debug` / panic / テスト成果物 / コミットに書かない。新しい秘密鍵をリポジトリに追加しない（テスト鍵は BIP352 公式ベクトルの公開値のみ）。
+3. **秘密を出さない。** scan 秘密鍵・spend 秘密鍵・シード・出力ごとの tweak・RPC 認証情報を、stdout / ログ / JSON / `Debug` / panic / テスト成果物 / コミットに書かない。新しい秘密鍵をリポジトリに追加しない（テスト鍵は BIP352 公式ベクトルの公開値のみ。テストが使う使い捨ての鍵は実行時に作る）。鍵とシードはファイルに保存しない（起動時に受け取る）。出力ごとの tweak は保存せず、支出するときにだけフルブロックから再計算して使う。
 4. **fail-closed。** 部分応答・順序違い・重複・ハッシュ不連続・ネットワーク不一致・tx 単位のエラーは、範囲全体の失敗にする。静かに「同期済み」としない。
-5. **検出は残高ではない。** 表示は `detected_received_outputs`。残高・利用可能額・支出可能性を示す語を使わない。
-6. **送金・署名機能を作らない。** 上流の送信関数と tx の署名は、テスト専用クレート `crates/lab-testkit` でのみ使う。`silent-sync` と `lab-cli` の通常の依存に `lab-testkit` を入れない（`dev-dependencies` のみ）。
+5. **検出は残高ではない。** 受信専用の部分（`silent-sync`、`lab-cli`）の表示は `detected_received_outputs`。「未使用」と呼んでよいのは、**フルブロック由来の検出のうち、使用済みの記録が無いもの**だけで、根拠（自分のノードで確認）と条件（承認数）を必ず添える。インデックス由来の検出は合計に入れない。根拠を添えずに「残高」「利用可能額」と書かない。
+6. **送金・署名は `crates/silent-wallet` と `crates/wallet-cli` だけ。** `silent-sync`・`silent-sync-sqlite`・`lab-cli` には置かない（上流の送信関数と tx の署名を使ってよいのは、この 2 つとテスト専用の `crates/lab-testkit` だけ）。regtest と signet のみ。送信の前に必ず内容を表示して確認を求める。通常の依存に `lab-testkit` を入れない（`dev-dependencies` のみ）。
 7. **嘘をつかない。** テスト未実行で「完成」と言わない。未実装は `NOT IMPLEMENTED`、未確認は `UNVERIFIED`、外部要因で進めないものは `BLOCKED` と書く。計測値を捏造しない。モックで成功を装わない。
 8. **API を記憶から推測しない。** 上流の実コードを読んで確認し、commit SHA を `docs/RESEARCH.md` に残す。
 9. **Phase Gate を飛ばさない。** UI の作り込み、Tauri、製品形態（SDK / ウォレット）の決め打ちは Phase 6 まで行わない。
@@ -37,7 +38,9 @@ crates/silent-sync/   同期コア（SDK 候補）。CLI・表示・ストレー
   src/source/blindbit.rs      BlindBit Oracle v2 HTTP バックエンド（feature `blindbit-http`）
   src/source/local_index.rs   フルブロックから手元で計算する tweak インデックス
 crates/silent-sync-sqlite/ SyncStore の SQLite 実装と、再スキャン後のファイル差し替え。依存方向は silent-sync-sqlite → silent-sync
-crates/lab-cli/     薄い CLI（バイナリ名 silent-sync）。依存方向は lab-cli → silent-sync, silent-sync-sqlite
+crates/silent-wallet/ ウォレットのライブラリ: 未使用の集計、コイン選択、送金 tx の組み立てと署名（上流の関数を呼ぶ）
+crates/wallet-cli/  ウォレットの CLI（バイナリ名 silent-wallet）。依存方向は wallet-cli → silent-wallet → silent-sync, silent-sync-sqlite
+crates/lab-cli/     薄い CLI（バイナリ名 silent-sync）。受信専用。依存方向は lab-cli → silent-sync, silent-sync-sqlite
   src/bench.rs        計測・集計・エクスポート（結果に個人データを入れない）
 crates/lab-testkit/ テスト専用。fixture / 長いチェーンの生成、regtest ノード・Oracle 操作、
                     署名付きテスト tx、偽 REST / 偽 Oracle、同期スイート、故障注入マトリクス
@@ -70,7 +73,7 @@ cargo test --workspace --locked -- --ignored
 - バックエンドやエンジンの挙動を変えたら `cargo run -p lab-testkit --bin fault_report` で故障注入の表を作り直す（`docs/FAULT_INJECTION.md` と一致しないとテストが失敗する）。
 - ベンチマークの数値を手で書かない。`silent-sync bench` → `export` の出力を使う（`docs/BENCHMARK_PROTOCOL.md`）。計測中は他の重い処理を動かさない。
 - インデックス由来（`tweak_index`）の検出を、フルブロック由来と同じ確度のものとして表示・記述しない。
-- 公開 API（`silent-sync`、`silent-sync-sqlite`）を変えるときは、`docs/api/` の一覧の差分を確認してコミットする。実験・診断用の機能は feature の下に置き、既定で有効にしない。出力ごとの tweak を公開 API から渡さない（D-039。変更は人間レビュー必須）。
+- 公開 API（`silent-sync`、`silent-sync-sqlite`）を変えるときは、`docs/api/` の一覧の差分を確認してコミットする。実験・診断用の機能は feature の下に置き、既定で有効にしない。出力ごとの tweak は、既定の公開 API からは渡さない。feature `spend` を有効にしたときだけ、支出のための狭い関数から渡す（D-039 を D-046 で改訂。これ以上広げる変更は人間レビュー必須）。
 - フェーズの終わりに、文脈を共有しない別エージェントへ敵対的レビューを依頼し、指摘は自分で再現してから対応する（DECISIONS D-018）。
 - 依存を追加・更新したら `docs/DEPENDENCIES.md` と `docs/DECISIONS.md` に理由を書く。`cargo update` を無指定で実行しない（暗号スタックが上がる。DECISIONS D-004）。
 - 本番コードで `unwrap()` は clippy が拒否する。エラーは型で分類する。

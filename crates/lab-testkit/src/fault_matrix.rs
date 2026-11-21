@@ -247,7 +247,7 @@ fn audit_of_stored_result(
         })
         .and_then(|blocks| {
             store
-                .append(&blocks, &report.detected_received_outputs)
+                .append(&blocks, &report.detected_received_outputs, &[])
                 .map_err(|_| "store refused the result")
         });
     if let Err(class) = stored {

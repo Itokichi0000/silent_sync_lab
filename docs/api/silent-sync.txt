@@ -52,8 +52,18 @@ impl From<SourceError> for AuditError
     pub reference_only: u64,
     pub differences: Vec<Difference>,
     pub block_hash_mismatches: Vec<u32>,
+    pub spends_compared: bool,
+    pub spends_agreed: u64,
+    pub spend_differences: Vec<SpendDifference>,
     pub identical: bool,
     pub unexplained: u64,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)] #[non_exhaustive] pub struct SpendDifference
+    pub height: u32,
+    pub txid: Txid,
+    pub vout: u32,
+    pub only_in: Option<Side>,
+    pub stored: Option<SpentOutput>,
+    pub reference: Option<SpentOutput>,
 pub fn audit_store( reference: &dyn ScanSource, scanner: &ReceiveScanner, store: &dyn SyncStore, options: &AuditOptions, ) -> Result<StoreAuditReport, AuditError>
 
 ## engine.rs
@@ -113,9 +123,9 @@ pub mod store;
 pub mod sync;
 pub mod verify;
 pub use bdk_sp::bitcoin;
-pub use audit::{audit_store, AuditError, AuditOptions, StoreAuditReport};
+pub use audit::{audit_store, AuditError, AuditOptions, SpendDifference, StoreAuditReport};
 pub use engine::{scan_range, ScanError, ScanReport};
-pub use models::{BlockRef, DetectedOutput, EvidenceKind, MatchProvenance};
+pub use models::{BlockRef, DetectedOutput, EvidenceKind, MatchProvenance, SpentOutput};
 pub use network::{ChainIdentity, Network, NetworkError};
 pub use protocol::{ProtocolError, ReceiveScanner, ReceiverKeys, SilentPaymentAddress};
 pub use rescan::{rescan_into, RescanError, RescanReport};
@@ -143,6 +153,11 @@ pub use verify::{cross_check, Difference, Explanation, Side, VerificationReport}
     pub value_sats: u64,
     pub label: Option<u32>,
     pub provenance: MatchProvenance,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)] pub struct SpentOutput
+    pub txid: Txid,
+    pub vout: u32,
+    pub spent_in: BlockRef,
+    pub spending_txid: Txid,
 
 ## network.rs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)] #[serde(try_from = "String", into = "String")] pub enum Network
@@ -327,6 +342,14 @@ impl fmt::Debug for ReceiveScanner
     NotReproduced {
         outputs: Vec<DetectedOutput>,
     },
+    #[error(
+        "the rescan did not reproduce {} spend(s) the store in use records; the two results \
+         disagree and the store was not replaced",
+        spends.len()
+    )]
+    SpendsNotReproduced {
+        spends: Vec<SpentOutput>,
+    },
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)] #[non_exhaustive] pub struct RescanReport
     pub previous_labels: Vec<u32>,
     pub labels: Vec<u32>,
@@ -504,14 +527,18 @@ pub trait SyncStore
         &mut self,
         blocks: &[BlockRef],
         detections: &[DetectedOutput],
+        spends: &[SpentOutput],
     ) -> Result<(), StoreError>;
     fn rollback_to(&mut self, height: u32) -> Result<Vec<DetectedOutput>, StoreError>;
     fn detections(&self) -> Result<Vec<DetectedOutput>, StoreError>;
+    fn spends(&self) -> Result<Vec<SpentOutput>, StoreError>;
     fn block_count(&self) -> Result<u64, StoreError>;
-pub fn check_append( meta: Option<&StoreMeta>, checkpoint: Option<BlockRef>, blocks: &[BlockRef], detections: &[DetectedOutput], already_stored: &dyn Fn(OutPoint) -> bool, block_hash_stored: &dyn Fn(BlockHash) -> bool, ) -> Result<(), StoreError>
+#[allow(clippy::too_many_arguments)] pub fn check_append( meta: Option<&StoreMeta>, checkpoint: Option<BlockRef>, blocks: &[BlockRef], detections: &[DetectedOutput], spends: &[SpentOutput], stored_height: &dyn Fn(OutPoint) -> Option<u32>, already_spent: &dyn Fn(OutPoint) -> bool, block_hash_stored: &dyn Fn(BlockHash) -> bool, ) -> Result<(), StoreError>
+pub fn sort_spends(spends: &mut [SpentOutput])
 pub const MAX_STORABLE_SATS: u64 = i64::MAX as u64;
 pub fn sort_detections(detections: &mut [DetectedOutput])
 #[derive(Debug, Clone, Default)] pub struct MemoryStore
+    <private field>
     <private field>
     <private field>
     <private field>
@@ -601,6 +628,7 @@ impl From<SourceError> for SyncError
     pub fork_height: u32,
     pub blocks_rolled_back: u64,
     pub detections_removed: Vec<DetectedOutput>,
+    pub spends_reverted: Vec<SpentOutput>,
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)] #[non_exhaustive] pub struct SyncReport
     pub chain: ChainIdentity,
     pub backend_id: String,
@@ -615,6 +643,7 @@ impl From<SourceError> for SyncError
     pub txs_scanned: u64,
     pub txs_skipped: BTreeMap<&'static str, u64>,
     pub new_detections: Vec<DetectedOutput>,
+    pub new_spends: Vec<SpentOutput>,
     pub checkpoint: Option<BlockRef>,
     pub source_tip: BlockRef,
     pub caught_up: bool,

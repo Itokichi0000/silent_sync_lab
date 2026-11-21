@@ -21,9 +21,9 @@ use silent_sync::{
     },
     new_store_meta,
     source::fixture::FixtureSource,
-    store::{check_append, sort_detections},
-    sync, BlockRef, DetectedOutput, ReceiveScanner, ReceiverKeys, StoreError, StoreMeta,
-    SyncOptions, SyncStore,
+    store::{check_append, sort_detections, sort_spends},
+    sync, BlockRef, DetectedOutput, ReceiveScanner, ReceiverKeys, SpentOutput, StoreError,
+    StoreMeta, SyncOptions, SyncStore,
 };
 use std::{error::Error, path::Path};
 
@@ -32,6 +32,7 @@ struct VecStore {
     meta: Option<StoreMeta>,
     blocks: Vec<BlockRef>,
     detections: Vec<DetectedOutput>,
+    spends: Vec<SpentOutput>,
 }
 
 impl SyncStore for VecStore {
@@ -62,25 +63,36 @@ impl SyncStore for VecStore {
         &mut self,
         blocks: &[BlockRef],
         detections: &[DetectedOutput],
+        spends: &[SpentOutput],
     ) -> Result<(), StoreError> {
         // The shared rules: linked to the checkpoint, nothing recorded twice,
-        // every detection in one of the appended blocks, ...
+        // every detection in one of the appended blocks, every spend of a
+        // detected output, ...
         check_append(
             self.meta.as_ref(),
             self.blocks.last().copied(),
             blocks,
             detections,
+            spends,
             &|outpoint| {
                 self.detections
                     .iter()
-                    .any(|d| OutPoint::new(d.txid, d.vout) == outpoint)
+                    .find(|d| OutPoint::new(d.txid, d.vout) == outpoint)
+                    .map(|d| d.block.height)
+            },
+            &|outpoint| {
+                self.spends
+                    .iter()
+                    .any(|s| OutPoint::new(s.txid, s.vout) == outpoint)
             },
             &|hash| self.blocks.iter().any(|b| b.hash == hash),
         )?;
-        // All or nothing: a real store commits both in one transaction.
+        // All or nothing: a real store commits everything in one transaction.
         self.blocks.extend_from_slice(blocks);
         self.detections.extend_from_slice(detections);
         sort_detections(&mut self.detections);
+        self.spends.extend_from_slice(spends);
+        sort_spends(&mut self.spends);
         Ok(())
     }
 
@@ -89,6 +101,8 @@ impl SyncStore for VecStore {
             return Err(StoreError::NotInitialized);
         }
         self.blocks.retain(|b| b.height <= height);
+        // An output spent in a forgotten block is unspent again.
+        self.spends.retain(|s| s.spent_in.height <= height);
         let (kept, mut removed): (Vec<_>, Vec<_>) = std::mem::take(&mut self.detections)
             .into_iter()
             .partition(|d| d.block.height <= height);
@@ -102,6 +116,13 @@ impl SyncStore for VecStore {
             return Err(StoreError::NotInitialized);
         }
         Ok(self.detections.clone())
+    }
+
+    fn spends(&self) -> Result<Vec<SpentOutput>, StoreError> {
+        if self.meta.is_none() {
+            return Err(StoreError::NotInitialized);
+        }
+        Ok(self.spends.clone())
     }
 
     fn block_count(&self) -> Result<u64, StoreError> {

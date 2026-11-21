@@ -26,14 +26,14 @@
 
 use crate::{
     bitcoin::OutPoint,
-    models::{BlockRef, DetectedOutput},
+    models::{BlockRef, DetectedOutput, SpentOutput},
     protocol::ReceiveScanner,
     source::ScanSource,
     store::{bound_meta, StoreError, StoreMeta, SyncStore, SCANNER_VERSION},
     sync::{binding_difference, sync, SyncError, SyncOptions, SyncReport},
 };
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 /// Why a rescan did not produce a store that can replace the current one.
 /// In every case the current store is unchanged. Unless stated otherwise the
@@ -129,6 +129,20 @@ pub enum RescanError {
         /// The detections of the current store that are not in the fresh
         /// store exactly as they are.
         outputs: Vec<DetectedOutput>,
+    },
+    #[error(
+        "the rescan did not reproduce {} spend(s) the store in use records; the two results \
+         disagree and the store was not replaced",
+        spends.len()
+    )]
+    /// The current store records that outputs were spent, and the rescan did
+    /// not find the same spends: the source answers differently than it did,
+    /// or one of the stores was altered. Replacing the store would make
+    /// spent outputs look unspent.
+    SpendsNotReproduced {
+        /// The spends of the current store that are not in the fresh store
+        /// exactly as they are.
+        spends: Vec<SpentOutput>,
     },
 }
 
@@ -252,6 +266,20 @@ pub fn rescan_into(
     if !not_reproduced.is_empty() {
         return Err(RescanError::NotReproduced {
             outputs: not_reproduced,
+        });
+    }
+
+    let rescanned_spends: HashSet<SpentOutput> =
+        fresh.spends().map_err(of_fresh)?.into_iter().collect();
+    let spends_lost: Vec<SpentOutput> = current
+        .spends()
+        .map_err(of_current)?
+        .into_iter()
+        .filter(|s| !rescanned_spends.contains(s))
+        .collect();
+    if !spends_lost.is_empty() {
+        return Err(RescanError::SpendsNotReproduced {
+            spends: spends_lost,
         });
     }
 

@@ -17,8 +17,10 @@
 
 use crate::{
     bitcoin::{OutPoint, Txid},
-    engine::{check_batch, scan_blocks, ScanCounters, ScanError, SCAN_CHUNK_BLOCKS},
-    models::{BlockRef, DetectedOutput, EvidenceKind},
+    engine::{
+        check_batch, scan_blocks, spends_in_blocks, ScanCounters, ScanError, SCAN_CHUNK_BLOCKS,
+    },
+    models::{BlockRef, DetectedOutput, EvidenceKind, SpentOutput},
     network::ChainIdentity,
     protocol::ReceiveScanner,
     source::{ScanSource, SourceError},
@@ -144,10 +146,42 @@ pub struct StoreAuditReport {
     /// Heights at which the stored block is not the reference's block (the
     /// store is on another chain there: sync it, then audit again).
     pub block_hash_mismatches: Vec<u32>,
-    /// No differences at all.
+    /// Whether spends were compared: only a full-block reference shows what
+    /// transactions spend. When `false`, the audit says nothing about which
+    /// outputs are spent.
+    pub spends_compared: bool,
+    /// Recorded spends the reference shows exactly as stored. Only outputs
+    /// the store detected through full blocks take part: for the others the
+    /// store never claimed to know.
+    pub spends_agreed: u64,
+    /// Outputs about whose spending the store and the reference disagree,
+    /// ascending by height of the spending block.
+    pub spend_differences: Vec<SpendDifference>,
+    /// No differences at all, in detections, blocks or spends.
     pub identical: bool,
     /// Differences without a specific explanation.
     pub unexplained: u64,
+}
+
+/// One output about whose spending the store and the reference disagree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct SpendDifference {
+    /// Height of the block in which the output was spent, according to the
+    /// side that says so.
+    pub height: u32,
+    /// Transaction of the output.
+    pub txid: Txid,
+    /// Index of the output.
+    pub vout: u32,
+    /// The side that says the output is spent, alone
+    /// ([`Side::Candidate`] is the store); `None` when both say so, by
+    /// different transactions.
+    pub only_in: Option<Side>,
+    /// The spend the store records.
+    pub stored: Option<SpentOutput>,
+    /// The spend the reference shows.
+    pub reference: Option<SpentOutput>,
 }
 
 fn key(d: &DetectedOutput) -> OutPoint {
@@ -208,6 +242,29 @@ pub fn audit_store(
         }
         stored_by_height.entry(d.block.height).or_default().push(d);
     }
+    // Outputs whose spending the store can know: those it saw in full blocks.
+    let tracked: BTreeSet<OutPoint> = stored_by_height
+        .values()
+        .flatten()
+        .filter(|d| d.provenance.evidence_kind == EvidenceKind::FullBlockWithPrevouts)
+        .map(key)
+        .collect();
+    let mut stored_spends: BTreeMap<u32, Vec<SpentOutput>> = BTreeMap::new();
+    let mut spent_once = BTreeSet::<OutPoint>::new();
+    for s in store.spends()? {
+        let outpoint = OutPoint::new(s.txid, s.vout);
+        if !listed.contains(&outpoint)
+            || !(meta.birthday..=checkpoint.height).contains(&s.spent_in.height)
+            || !spent_once.insert(outpoint)
+        {
+            return Err(AuditError::Store(StoreError::Invariant(format!(
+                "the recorded spend of {outpoint} at height {} does not belong to a stored \
+                 detection and block, or is listed twice",
+                s.spent_in.height
+            ))));
+        }
+        stored_spends.entry(s.spent_in.height).or_default().push(s);
+    }
 
     let mut report = StoreAuditReport {
         chain: meta.chain,
@@ -223,6 +280,10 @@ pub fn audit_store(
         reference_only: 0,
         differences: Vec::new(),
         block_hash_mismatches: Vec::new(),
+        spends_compared: reference.capabilities().evidence_kind
+            == EvidenceKind::FullBlockWithPrevouts,
+        spends_agreed: 0,
+        spend_differences: Vec::new(),
         identical: false,
         unexplained: 0,
     };
@@ -291,6 +352,44 @@ pub fn audit_store(
                 &mut ScanCounters::default(),
                 &mut seen,
             )?;
+            // Spends in this block, for the outputs whose spending the store
+            // tracks. A block the two sides do not share was reported above.
+            if report.spends_compared && same_block {
+                let shown = spends_in_blocks(std::slice::from_ref(r_block), &|outpoint| {
+                    tracked.contains(outpoint)
+                });
+                let recorded = stored_spends.remove(&height).unwrap_or_default();
+                let by_r: BTreeMap<OutPoint, SpentOutput> = shown
+                    .into_iter()
+                    .map(|s| (OutPoint::new(s.txid, s.vout), s))
+                    .collect();
+                let by_s: BTreeMap<OutPoint, SpentOutput> = recorded
+                    .into_iter()
+                    .map(|s| (OutPoint::new(s.txid, s.vout), s))
+                    .collect();
+                let all: BTreeSet<OutPoint> = by_s.keys().chain(by_r.keys()).copied().collect();
+                for outpoint in all {
+                    let (s, r) = (by_s.get(&outpoint).copied(), by_r.get(&outpoint).copied());
+                    let only_in = match (s, r) {
+                        (Some(s), Some(r)) if s == r => {
+                            report.spends_agreed += 1;
+                            continue;
+                        }
+                        (Some(_), Some(_)) => None,
+                        (Some(_), None) => Some(Side::Candidate),
+                        (None, _) => Some(Side::Reference),
+                    };
+                    report.spend_differences.push(SpendDifference {
+                        height,
+                        txid: outpoint.txid,
+                        vout: outpoint.vout,
+                        only_in,
+                        stored: s,
+                        reference: r,
+                    });
+                }
+            }
+
             let by_s: BTreeMap<OutPoint, &DetectedOutput> =
                 stored.iter().map(|d| (key(d), d)).collect();
             let by_r: BTreeMap<OutPoint, &DetectedOutput> =
@@ -350,6 +449,8 @@ pub fn audit_store(
         next = chunk_last + 1;
     }
 
-    report.identical = report.differences.is_empty() && report.block_hash_mismatches.is_empty();
+    report.identical = report.differences.is_empty()
+        && report.block_hash_mismatches.is_empty()
+        && report.spend_differences.is_empty();
     Ok(report)
 }

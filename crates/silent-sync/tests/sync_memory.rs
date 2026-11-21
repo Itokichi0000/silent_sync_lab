@@ -6,7 +6,7 @@ use lab_testkit::{
     fixture_gen, sync_store_suite, test_source::TestSource, test_store::FailingAppends,
 };
 use silent_sync::{
-    models::{BlockRef, DetectedOutput},
+    models::{BlockRef, DetectedOutput, SpentOutput},
     protocol::ReceiveScanner,
     source::ScanSource,
     store::{MemoryStore, StoreError, StoreMeta, SyncStore},
@@ -98,8 +98,9 @@ impl SyncStore for ReadsFailAfterAWrite {
         &mut self,
         blocks: &[BlockRef],
         detections: &[DetectedOutput],
+        spends: &[SpentOutput],
     ) -> Result<(), StoreError> {
-        self.inner.append(blocks, detections)?;
+        self.inner.append(blocks, detections, spends)?;
         self.written = true;
         Ok(())
     }
@@ -110,6 +111,9 @@ impl SyncStore for ReadsFailAfterAWrite {
     }
     fn detections(&self) -> Result<Vec<DetectedOutput>, StoreError> {
         self.read(self.inner.detections())
+    }
+    fn spends(&self) -> Result<Vec<SpentOutput>, StoreError> {
+        self.read(self.inner.spends())
     }
     fn block_count(&self) -> Result<u64, StoreError> {
         self.read(self.inner.block_count())

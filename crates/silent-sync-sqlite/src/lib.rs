@@ -36,13 +36,13 @@
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use silent_sync::{
     bitcoin::{BlockHash, OutPoint, Txid},
-    models::{BlockRef, DetectedOutput, EvidenceKind, MatchProvenance},
-    store::{check_append, sort_detections, StoreError, StoreMeta, SyncStore},
+    models::{BlockRef, DetectedOutput, EvidenceKind, MatchProvenance, SpentOutput},
+    store::{check_append, sort_detections, sort_spends, StoreError, StoreMeta, SyncStore},
 };
 use std::{collections::HashSet, path::Path, time::Duration};
 
 /// Bumped whenever the table layout changes. Older files are refused.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (
@@ -65,6 +65,15 @@ CREATE TABLE detected_outputs (
     PRIMARY KEY (txid, vout)
 ) STRICT;
 CREATE INDEX detected_outputs_by_height ON detected_outputs(height);
+CREATE TABLE spent_outputs (
+    txid          TEXT NOT NULL,
+    vout          INTEGER NOT NULL,
+    spent_height  INTEGER NOT NULL REFERENCES blocks(height),
+    spending_txid TEXT NOT NULL,
+    PRIMARY KEY (txid, vout),
+    FOREIGN KEY (txid, vout) REFERENCES detected_outputs(txid, vout)
+) STRICT;
+CREATE INDEX spent_outputs_by_height ON spent_outputs(spent_height);
 ";
 
 /// A [`SyncStore`] kept in one SQLite file. See the crate documentation for
@@ -238,6 +247,25 @@ impl SqliteStore {
                 meta.backend_id
             )));
         }
+        // Every recorded spend is of a stored detection, in a stored block
+        // that is not below the block that created the output.
+        let stray_spends: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM spent_outputs s WHERE \
+                 NOT EXISTS (SELECT 1 FROM blocks b WHERE b.height = s.spent_height) \
+                 OR NOT EXISTS (SELECT 1 FROM detected_outputs d \
+                                WHERE d.txid = s.txid AND d.vout = s.vout \
+                                  AND d.height <= s.spent_height)",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(backend)?;
+        if stray_spends != 0 {
+            return Err(StoreError::Invariant(format!(
+                "{stray_spends} recorded spend(s) do not belong to a stored detection and block"
+            )));
+        }
         Ok(())
     }
 
@@ -254,7 +282,10 @@ impl SqliteStore {
         match version.as_deref() {
             Some(v) if v == SCHEMA_VERSION.to_string() => Ok(()),
             other => Err(StoreError::Backend(format!(
-                "unsupported store schema version {other:?} (this build reads version {SCHEMA_VERSION})"
+                "unsupported store schema version {other:?} (this build reads version \
+                 {SCHEMA_VERSION}). A store written before spent outputs were recorded cannot \
+                 be upgraded in place: nothing in it says which outputs were spent. Create a \
+                 new store and sync it"
             ))),
         }
     }
@@ -433,6 +464,13 @@ pub fn replace_store_file(current: &Path, fresh: &Path) -> Result<(), StoreError
                 lost.txid, lost.vout
             )));
         }
+        let spent: HashSet<SpentOutput> = new.spends()?.into_iter().collect();
+        if let Some(lost) = old.spends()?.iter().find(|s| !spent.contains(s)) {
+            return Err(refuse(format!(
+                "the new store does not record that {}:{} was spent, as the old one does",
+                lost.txid, lost.vout
+            )));
+        }
         // Both connections are closed here, before the file is moved.
     }
     std::fs::rename(fresh, current).map_err(backend)?;
@@ -577,10 +615,54 @@ fn read_detections(
     Ok(detections)
 }
 
+fn read_spends(
+    conn: &Connection,
+    filter: &str,
+    bound: i64,
+) -> Result<Vec<SpentOutput>, StoreError> {
+    let sql = format!(
+        "SELECT s.txid, s.vout, s.spent_height, b.hash, b.prev_hash, s.spending_txid \
+         FROM spent_outputs s JOIN blocks b ON b.height = s.spent_height \
+         WHERE {filter}"
+    );
+    let mut statement = conn.prepare(&sql).map_err(backend)?;
+    type Row = (String, i64, i64, String, String, String);
+    let rows = statement
+        .query_map(params![bound], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })
+        .map_err(backend)?
+        .collect::<Result<Vec<Row>, _>>()
+        .map_err(backend)?;
+    let mut spends = rows
+        .into_iter()
+        .map(|(txid, vout, height, hash, prev_hash, spending_txid)| {
+            Ok(SpentOutput {
+                txid: txid.parse::<Txid>().map_err(|_| corrupt("txid"))?,
+                vout: u32::try_from(vout).map_err(|_| corrupt("vout"))?,
+                spent_in: block_from_row(height, hash, prev_hash)?,
+                spending_txid: spending_txid
+                    .parse::<Txid>()
+                    .map_err(|_| corrupt("spending txid"))?,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    sort_spends(&mut spends);
+    Ok(spends)
+}
+
 fn insert_all(
     tx: &Transaction<'_>,
     blocks: &[BlockRef],
     detections: &[DetectedOutput],
+    spends: &[SpentOutput],
 ) -> Result<(), StoreError> {
     let mut insert_block = tx
         .prepare("INSERT INTO blocks (height, hash, prev_hash) VALUES (?1, ?2, ?3)")
@@ -613,6 +695,22 @@ fn insert_all(
                 d.label.map(i64::from),
                 d.provenance.backend_id,
                 evidence_kind_to_text(d.provenance.evidence_kind)?,
+            ])
+            .map_err(backend)?;
+    }
+    let mut insert_spend = tx
+        .prepare(
+            "INSERT INTO spent_outputs (txid, vout, spent_height, spending_txid) \
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .map_err(backend)?;
+    for s in spends {
+        insert_spend
+            .execute(params![
+                s.txid.to_string(),
+                i64::from(s.vout),
+                i64::from(s.spent_in.height),
+                s.spending_txid.to_string(),
             ])
             .map_err(backend)?;
     }
@@ -673,6 +771,7 @@ impl SyncStore for SqliteStore {
         &mut self,
         blocks: &[BlockRef],
         detections: &[DetectedOutput],
+        spends: &[SpentOutput],
     ) -> Result<(), StoreError> {
         let tx = self
             .conn
@@ -680,19 +779,42 @@ impl SyncStore for SqliteStore {
             .map_err(backend)?;
         let meta = read_meta(&tx)?;
         let checkpoint = read_checkpoint(&tx)?;
-        // Collected up front so the closure below cannot fail.
-        let mut stored = std::collections::BTreeSet::new();
-        for d in detections {
+        // Collected up front so the closures below cannot fail: the stored
+        // height of every output this call mentions, and which of the
+        // outputs it spends are already recorded as spent.
+        let mut stored = std::collections::BTreeMap::new();
+        let mentioned = detections
+            .iter()
+            .map(|d| OutPoint::new(d.txid, d.vout))
+            .chain(spends.iter().map(|s| OutPoint::new(s.txid, s.vout)));
+        for outpoint in mentioned {
+            let height: Option<i64> = tx
+                .query_row(
+                    "SELECT height FROM detected_outputs WHERE txid = ?1 AND vout = ?2",
+                    params![outpoint.txid.to_string(), i64::from(outpoint.vout)],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(backend)?;
+            if let Some(height) = height {
+                stored.insert(
+                    outpoint,
+                    u32::try_from(height).map_err(|_| corrupt("height"))?,
+                );
+            }
+        }
+        let mut spent = std::collections::BTreeSet::new();
+        for s in spends {
             let exists: Option<i64> = tx
                 .query_row(
-                    "SELECT 1 FROM detected_outputs WHERE txid = ?1 AND vout = ?2",
-                    params![d.txid.to_string(), i64::from(d.vout)],
+                    "SELECT 1 FROM spent_outputs WHERE txid = ?1 AND vout = ?2",
+                    params![s.txid.to_string(), i64::from(s.vout)],
                     |r| r.get(0),
                 )
                 .optional()
                 .map_err(backend)?;
             if exists.is_some() {
-                stored.insert(OutPoint::new(d.txid, d.vout));
+                spent.insert(OutPoint::new(s.txid, s.vout));
             }
         }
         let mut stored_hashes = std::collections::BTreeSet::new();
@@ -714,10 +836,12 @@ impl SyncStore for SqliteStore {
             checkpoint,
             blocks,
             detections,
-            &|outpoint| stored.contains(&outpoint),
+            spends,
+            &|outpoint| stored.get(&outpoint).copied(),
+            &|outpoint| spent.contains(&outpoint),
             &|hash| stored_hashes.contains(&hash),
         )?;
-        insert_all(&tx, blocks, detections)?;
+        insert_all(&tx, blocks, detections, spends)?;
         tx.commit().map_err(backend)
     }
 
@@ -728,6 +852,12 @@ impl SyncStore for SqliteStore {
             .map_err(backend)?;
         let meta = read_meta(&tx)?.ok_or(StoreError::NotInitialized)?;
         let removed = read_detections(&tx, "d.height > ?1", i64::from(height), &meta)?;
+        // Spends first: they refer to the detections and blocks below.
+        tx.execute(
+            "DELETE FROM spent_outputs WHERE spent_height > ?1",
+            params![i64::from(height)],
+        )
+        .map_err(backend)?;
         tx.execute(
             "DELETE FROM detected_outputs WHERE height > ?1",
             params![i64::from(height)],
@@ -745,6 +875,11 @@ impl SyncStore for SqliteStore {
     fn detections(&self) -> Result<Vec<DetectedOutput>, StoreError> {
         let meta = read_meta(&self.conn)?.ok_or(StoreError::NotInitialized)?;
         read_detections(&self.conn, "d.height >= ?1", 0, &meta)
+    }
+
+    fn spends(&self) -> Result<Vec<SpentOutput>, StoreError> {
+        read_meta(&self.conn)?.ok_or(StoreError::NotInitialized)?;
+        read_spends(&self.conn, "s.spent_height >= ?1", 0)
     }
 
     fn block_count(&self) -> Result<u64, StoreError> {

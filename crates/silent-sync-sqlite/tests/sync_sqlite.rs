@@ -173,7 +173,7 @@ fn failed_append_is_rolled_back_entirely() {
         .initialize(&new_store_meta(&source, &scanner(), 1, "test"))
         .unwrap();
     let blocks = block_refs(1, 3);
-    store.append(&blocks[..1], &[]).unwrap();
+    store.append(&blocks[..1], &[], &[]).unwrap();
     let in_blocks: Vec<_> = detections
         .iter()
         .filter(|d| (2..=3).contains(&d.block.height))
@@ -193,7 +193,7 @@ fn failed_append_is_rolled_back_entirely() {
     // Blocks 2 and 3 and the detection at height 2 are written, then the
     // detection at height 3 aborts.
     assert!(matches!(
-        store.append(&blocks[1..], &in_blocks),
+        store.append(&blocks[1..], &in_blocks, &[]),
         Err(StoreError::Backend(m)) if m.contains("injected failure")
     ));
     assert_eq!(store.block_count().unwrap(), 1);
@@ -206,7 +206,7 @@ fn failed_append_is_rolled_back_entirely() {
     assert_eq!(store.block_count().unwrap(), 1);
     assert!(store.detections().unwrap().is_empty());
     raw(&db, "DROP TRIGGER injected_failure;");
-    store.append(&blocks[1..], &in_blocks).unwrap();
+    store.append(&blocks[1..], &in_blocks, &[]).unwrap();
     assert_eq!(store.detections().unwrap(), in_blocks);
 }
 
@@ -412,7 +412,7 @@ fn a_briefly_locked_file_delays_the_commit() {
         other.execute_batch("COMMIT;").unwrap();
     });
     let started = std::time::Instant::now();
-    store.append(&blocks, &[]).unwrap();
+    store.append(&blocks, &[], &[]).unwrap();
     assert!(
         started.elapsed() >= std::time::Duration::from_millis(300),
         "the commit must have waited for the lock"
@@ -613,7 +613,7 @@ fn a_rescanned_file_replaces_the_one_in_use_only_if_nothing_is_lost() {
                 let mut detections = old_detections.clone();
                 edit(&mut detections);
                 with_meta(path, &old_meta)
-                    .append(&blocks, &detections)
+                    .append(&blocks, &detections, &[])
                     .unwrap();
             },
             &format!(
@@ -819,4 +819,98 @@ fn a_rescan_file_of_another_owner_is_refused() {
         Err(StoreError::Invariant(reason))
             if reason.contains("does not belong to the owner of the store")
     ));
+}
+
+/// Recorded spends are part of the file: they survive reopening, a file that
+/// lists a spend without its detection and block is refused, and a rescanned
+/// file that lacks a recorded spend does not replace the store.
+#[test]
+fn recorded_spends_are_kept_checked_and_never_dropped_by_a_replacement() {
+    use silent_sync::{bitcoin::hashes::Hash as _, bitcoin::Txid, SpentOutput};
+    let db = TempDb::new("spends");
+    let source = TestSource::new();
+    let meta = new_store_meta(&source, &scanner(), 1, "test");
+    let regtest = silent_sync::ChainIdentity::for_network(silent_sync::Network::Regtest);
+    let mut detections = silent_sync::scan_range(source.main_chain(), &scanner(), regtest, 1, 8)
+        .unwrap()
+        .detected_received_outputs;
+    silent_sync::store::sort_detections(&mut detections);
+    let blocks = block_refs(1, 8);
+    let spend = SpentOutput {
+        txid: detections[0].txid,
+        vout: detections[0].vout,
+        spent_in: blocks[5],
+        spending_txid: Txid::from_byte_array([8; 32]),
+    };
+    {
+        let mut store = SqliteStore::create(&db.path).unwrap();
+        store.initialize(&meta).unwrap();
+        store.append(&blocks, &detections, &[spend]).unwrap();
+        assert_eq!(store.spends().unwrap(), vec![spend]);
+    }
+    assert_eq!(
+        SqliteStore::open(&db.path).unwrap().spends().unwrap(),
+        vec![spend]
+    );
+
+    // A rescanned file with the same blocks and detections, but without the
+    // spend: spent outputs would look unspent.
+    let fresh = db.dir.join("store.sqlite3.rescan");
+    {
+        let mut store = SqliteStore::create(&fresh).unwrap();
+        store.initialize(&meta).unwrap();
+        store.append(&blocks, &detections, &[]).unwrap();
+    }
+    let in_use = std::fs::read(&db.path).unwrap();
+    assert!(matches!(
+        replace_store_file(&db.path, &fresh),
+        Err(StoreError::Invariant(reason)) if reason.contains("does not record that")
+    ));
+    assert_eq!(std::fs::read(&db.path).unwrap(), in_use);
+    // With the spend it is a replacement.
+    std::fs::remove_file(&fresh).unwrap();
+    {
+        let mut store = SqliteStore::create(&fresh).unwrap();
+        store.initialize(&meta).unwrap();
+        store.append(&blocks, &detections, &[spend]).unwrap();
+    }
+    replace_store_file(&db.path, &fresh).unwrap();
+    assert_eq!(
+        SqliteStore::open(&db.path).unwrap().spends().unwrap(),
+        vec![spend]
+    );
+
+    // Rolling back below the spending block forgets the spend with it.
+    {
+        let mut store = SqliteStore::open(&db.path).unwrap();
+        store.rollback_to(5).unwrap();
+        assert!(store.spends().unwrap().is_empty());
+    }
+
+    // A spend that belongs to no stored detection, or sits below the block
+    // that created its output, is damage: the file is refused.
+    let unknown = "INSERT INTO spent_outputs (txid, vout, spent_height, spending_txid) VALUES \
+                   ('0000000000000000000000000000000000000000000000000000000000000001', 0, 4, \
+                    '0000000000000000000000000000000000000000000000000000000000000002');";
+    let last = detections
+        .iter()
+        .rfind(|d| (2..=5).contains(&d.block.height))
+        .expect("a detection that is still stored after the rollback");
+    let too_early = format!(
+        "INSERT INTO spent_outputs (txid, vout, spent_height, spending_txid) VALUES \
+         ('{}', {}, {}, \
+          '0000000000000000000000000000000000000000000000000000000000000002');",
+        last.txid,
+        last.vout,
+        last.block.height - 1
+    );
+    for damage in [unknown, &too_early] {
+        let copy = TempDb::new("spends-damaged");
+        std::fs::copy(&db.path, &copy.path).unwrap();
+        raw(&copy, &format!("PRAGMA foreign_keys = OFF; {damage}"));
+        assert!(matches!(
+            SqliteStore::open(&copy.path),
+            Err(StoreError::Invariant(reason)) if reason.contains("recorded spend(s) do not belong")
+        ));
+    }
 }
