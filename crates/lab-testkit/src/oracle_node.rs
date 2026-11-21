@@ -115,7 +115,13 @@ impl Oracle {
 
     /// Waits until the oracle reports having indexed up to `height`.
     pub fn wait_for_height(&self, height: u32) {
-        let deadline = Instant::now() + Duration::from_secs(120);
+        self.wait_for_height_within(height, Duration::from_secs(120));
+    }
+
+    /// Like [`wait_for_height`](Self::wait_for_height) with a chosen limit
+    /// (indexing a long chain takes a while).
+    pub fn wait_for_height_within(&self, height: u32, limit: Duration) {
+        let deadline = Instant::now() + limit;
         loop {
             if self.info_height().is_some_and(|h| h >= height) {
                 return;

@@ -14,7 +14,7 @@
 use lab_testkit::{
     fixture_gen::{self, LABEL_NOT_BACKED_UP, LABEL_USED},
     regtest_node::{Node, NodeChain},
-    regtest_wallet::{expected_for_labels, standard_scenario, Faucet},
+    regtest_wallet::{expected_for_labels, long_scenario, standard_scenario, Faucet},
 };
 use sync_core::{
     engine::{scan_range, ScanError, ScanReport},
@@ -202,4 +202,49 @@ fn mainnet_node_is_refused() {
         CoreRestSource::connect(&node.rest_url()).err(),
         Some(SourceError::Network(NetworkError::MainnetRefused))
     );
+}
+
+/// T06 on a real node: a longer chain of signed transactions (more than one
+/// funding batch, more than one scan chunk would need > 100 blocks; this
+/// keeps the test short and checks the generator benchmarks rely on).
+#[test]
+#[ignore = "needs BITCOIND_EXE (Bitcoin Core >= 30)"]
+fn long_scenario_is_detected_exactly() {
+    let node = Node::regtest();
+    let mut faucet = Faucet::new(&node);
+    let scenario = long_scenario(&mut faucet, 70, 7);
+    assert_eq!(scenario.tip_height, scenario.base_height + 70);
+    assert_eq!(scenario.expected.len(), 10);
+
+    let source = CoreRestSource::connect(&node.rest_url()).unwrap();
+    let scanner = ReceiveScanner::new(&fixture_gen::lab_receiver_keys(), &[LABEL_USED]).unwrap();
+    let report = scan_range(
+        &source,
+        &scanner,
+        regtest(),
+        scenario.base_height + 1,
+        scenario.tip_height,
+    )
+    .unwrap();
+    assert_eq!(
+        detected(&report),
+        expected_for_labels(&scenario.expected, &[0, LABEL_USED])
+    );
+    assert_eq!(report.blocks_scanned, 70);
+    // Per block: coinbase, a silent payment, a taproot spend, a non-taproot payment.
+    assert_eq!(report.txs_seen, 70 * 4);
+    assert_eq!(report.txs_scanned, 70 * 2);
+    assert_eq!(report.txs_skipped.get("no_taproot_outputs"), Some(&70));
+
+    // A wallet without label 1 misses every second payment.
+    let plain_only = ReceiveScanner::new(&fixture_gen::lab_receiver_keys(), &[]).unwrap();
+    let report = scan_range(
+        &source,
+        &plain_only,
+        regtest(),
+        scenario.base_height + 1,
+        scenario.tip_height,
+    )
+    .unwrap();
+    assert_eq!(report.detected_received_outputs.len(), 5);
 }

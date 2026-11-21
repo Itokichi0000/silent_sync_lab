@@ -63,6 +63,12 @@ impl LoopbackHttp {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_timeout_secs(mut self, seconds: u64) -> Self {
+        self.timeout_secs = seconds;
+        self
+    }
+
     /// GETs `path` (starting with `/`). Anything but HTTP 200 — including
     /// every redirect — and any body larger than the limit is an error.
     pub(crate) fn get(&self, path: &str) -> Result<Vec<u8>, SourceError> {
@@ -280,6 +286,36 @@ mod tests {
         }
         // No more than limit + 1 bytes were read.
         assert_eq!(over.stats().downloaded_bytes, 1_001);
+    }
+
+    /// A server that accepts the connection and then says nothing must not
+    /// hang the client: the request fails once the timeout has passed.
+    #[test]
+    fn a_silent_server_times_out() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        // Detached: it outlives the assertion below and ends with the process.
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                // Hold the connection open, silently, well past the timeout.
+                std::thread::sleep(std::time::Duration::from_secs(4));
+                drop(stream);
+            }
+        });
+        let client = LoopbackHttp::new(&url, "test")
+            .expect("url")
+            .with_timeout_secs(1);
+        let started = std::time::Instant::now();
+        let result = client.get("/x");
+        let waited = started.elapsed();
+        assert!(
+            matches!(result, Err(SourceError::Unavailable(_))),
+            "{result:?}"
+        );
+        assert!(
+            waited < std::time::Duration::from_secs(3),
+            "gave up only after {waited:?}"
+        );
     }
 
     #[test]

@@ -584,6 +584,144 @@ fn build(fork: bool) -> FixtureFile {
     }
 }
 
+/// Shape of a chain made by [`generate_long`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LongChain {
+    /// Number of blocks (heights `1..=blocks`).
+    pub blocks: u32,
+    /// Non-coinbase transactions per block.
+    pub txs_per_block: u32,
+    /// Every `payment_every`-th block carries one payment to the lab receiver.
+    pub payment_every: u32,
+}
+
+impl LongChain {
+    /// The shape used for benchmarks and scale tests: 4 transactions per
+    /// block, one payment to the receiver every 10 blocks.
+    pub fn standard(blocks: u32) -> Self {
+        Self {
+            blocks,
+            txs_per_block: 4,
+            payment_every: 10,
+        }
+    }
+}
+
+/// A deterministic chain of any length, for scale tests and benchmarks.
+///
+/// Each block holds `txs_per_block` transactions that cycle through the cases
+/// a scanner meets in practice: a payment to another receiver (scanned, no
+/// match), a taproot key-path spend to an unrelated taproot output (scanned,
+/// no match), a transaction without a taproot output (not scanned) and one
+/// with only a non-eligible input (not scanned). In every `payment_every`-th
+/// block the first transaction pays the lab receiver instead: alternately its
+/// plain address and its label-1 address.
+///
+/// Like [`generate`], transactions carry placeholder signatures and are not
+/// consensus-valid. Nothing here is stored in the repository.
+pub fn generate_long(shape: &LongChain) -> FixtureFile {
+    assert!(shape.blocks >= 1 && shape.payment_every >= 1);
+    let network = LabNetwork::Regtest;
+    let receiver = lab_receiver_keys();
+    let other = other_receiver_keys();
+    let code = |a: LabAddress| {
+        SilentPaymentCode::new_v0(a.scan_public_key(), a.spend_public_key(), Network::Regtest)
+    };
+    let plain = code(receiver.address(network));
+    let label_used = code(receiver.labelled_address(network, LABEL_USED).unwrap());
+    let other_code = code(other.address(network));
+
+    let mut blocks = Vec::with_capacity(shape.blocks as usize);
+    let mut expected = Vec::new();
+    let mut prev = network.genesis_hash();
+    // Input indices far away from the ones the basic fixture uses.
+    let mut next_input = 1_000_000u32;
+    let mut take = || {
+        next_input += 1;
+        next_input
+    };
+
+    for height in 1..=shape.blocks {
+        let mut txs = Vec::new();
+        let mut prevouts = vec![vec![]]; // coinbase
+        for slot in 0..shape.txs_per_block {
+            let pays_receiver = slot == 0 && height % shape.payment_every == 0;
+            let (t, p) = if pays_receiver {
+                let nth = height / shape.payment_every;
+                let ins = [input(take(), InputKind::P2wpkh)];
+                let (target, label) = if nth % 2 == 0 {
+                    (&label_used, Some(LABEL_USED))
+                } else {
+                    (&plain, None)
+                };
+                let sp = silent_payment_scripts(&ins, std::slice::from_ref(target));
+                let value = 10_000 + u64::from(nth);
+                let (t, p) = tx(
+                    &ins,
+                    vec![
+                        (80_000, p2wpkh_script(&sender_key(height))),
+                        (value, sp[0].clone()),
+                    ],
+                );
+                expected.push(FixtureExpectedDetection {
+                    height,
+                    txid: t.compute_txid(),
+                    vout: 1,
+                    k: 0,
+                    value_sats: value,
+                    label,
+                    note: format!("long chain payment #{nth}"),
+                });
+                (t, p)
+            } else {
+                match (height + slot) % 4 {
+                    0 => {
+                        let ins = [input(take(), InputKind::P2wpkh)];
+                        let sp = silent_payment_scripts(&ins, std::slice::from_ref(&other_code));
+                        tx(&ins, vec![(90_000, sp[0].clone())])
+                    }
+                    1 => {
+                        let ins = [input(take(), InputKind::P2trKeyPath)];
+                        tx(&ins, vec![(90_000, unrelated_p2tr(height * 8 + slot))])
+                    }
+                    2 => {
+                        let ins = [input(take(), InputKind::P2wpkh)];
+                        tx(&ins, vec![(90_000, p2wpkh_script(&sender_key(height)))])
+                    }
+                    _ => {
+                        let ins = [input(take(), InputKind::P2wsh)];
+                        tx(&ins, vec![(90_000, unrelated_p2tr(height * 8 + slot))])
+                    }
+                }
+            };
+            txs.push(t);
+            prevouts.push(p);
+        }
+        let b = block(height, prev, txs);
+        prev = b.block_hash();
+        blocks.push(FixtureBlock {
+            height,
+            block_hex: serialize_hex(&b),
+            prevouts,
+        });
+    }
+
+    FixtureFile {
+        format: FIXTURE_FORMAT.to_string(),
+        description: format!(
+            "Deterministic long chain for scale tests and benchmarks ({} blocks, {} transactions \
+             per block, one payment to the lab receiver every {} blocks). Generated by \
+             lab-testkit; placeholder signatures, NOT consensus-valid; not stored in the \
+             repository.",
+            shape.blocks, shape.txs_per_block, shape.payment_every
+        ),
+        network,
+        genesis_hash: network.genesis_hash(),
+        blocks,
+        expected_detections: expected,
+    }
+}
+
 const MAIN_DESCRIPTION: &str = "Deterministic regtest-shaped chain for Silent Sync Lab Phase 1. \
                       Receiver = BIP352 test vector #0 keys. Transactions carry placeholder \
                       signatures and are NOT consensus-valid. `expected_detections` is \

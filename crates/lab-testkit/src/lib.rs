@@ -12,6 +12,7 @@
 //!   transactions on that node.
 
 pub mod fake_http;
+pub mod fault_matrix;
 pub mod fixture_gen;
 pub mod oracle_node;
 pub mod regtest_node;

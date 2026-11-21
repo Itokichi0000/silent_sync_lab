@@ -5,6 +5,7 @@
 //! This binary only parses arguments, calls `sync-core` / `lab-storage` and
 //! prints. It has no send, sign or balance functionality.
 
+mod bench;
 mod lab_keys;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -99,6 +100,76 @@ enum Command {
         #[command(subcommand)]
         action: ReceivedAction,
     },
+    /// Measure scan and sync on one block range through one or more backends
+    /// and write every run to a results file.
+    Bench(BenchArgs),
+    /// Convert benchmark results files (JSON, CSV or a Markdown report). The
+    /// results hold no transaction ids, wallet identifiers, paths or URLs.
+    Export(ExportArgs),
+}
+
+#[derive(clap::Args)]
+struct BenchArgs {
+    /// Backends to measure, comma separated (e.g. `core,oracle-v2`).
+    #[arg(long, value_enum, value_delimiter = ',', required = true)]
+    backends: Vec<Backend>,
+    /// Fixture file, for `fixture` (and for `local-index`, which then indexes
+    /// the fixture instead of your node).
+    #[arg(long)]
+    fixture: Option<PathBuf>,
+    /// REST URL of your own Bitcoin Core node (loopback only).
+    #[arg(long)]
+    core_rest_url: Option<String>,
+    /// HTTP URL of a BlindBit Oracle v2 on this machine.
+    #[arg(long)]
+    oracle_url: Option<String>,
+    #[arg(long, value_enum, default_value = "bip352")]
+    index_policy: IndexPolicyArg,
+    /// First height of the measured range [default: 1].
+    #[arg(long)]
+    from: Option<u32>,
+    /// Last height of the measured range [default: the first backend's tip].
+    #[arg(long)]
+    to: Option<u32>,
+    /// Runs per backend and mode. At least 5 are needed for a median with a
+    /// meaningful spread.
+    #[arg(long, default_value_t = 5)]
+    repeat: u32,
+    /// Modes to measure, comma separated
+    /// [default: scan,sync_cold,sync_resume,sync_noop,restore].
+    #[arg(long, value_delimiter = ',')]
+    modes: Vec<String>,
+    /// Label integer to scan for in addition to the change label (repeatable).
+    #[arg(long = "label")]
+    labels: Vec<u32>,
+    /// Results file to write (JSON). An existing file is never overwritten.
+    #[arg(long)]
+    output: PathBuf,
+    /// Directory for the temporary stores [default: the system temp directory].
+    #[arg(long)]
+    work_dir: Option<PathBuf>,
+    /// Free-form note recorded with the results, e.g. server versions (repeatable).
+    #[arg(long = "note")]
+    notes: Vec<String>,
+}
+
+#[derive(clap::Args)]
+struct ExportArgs {
+    /// Results file written by `bench` (repeatable; files are merged).
+    #[arg(long, required = true)]
+    input: Vec<PathBuf>,
+    #[arg(long, value_enum, default_value = "json")]
+    format: ExportFormat,
+    /// Write here instead of stdout. An existing file is never overwritten.
+    #[arg(long)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ExportFormat {
+    Json,
+    Csv,
+    Markdown,
 }
 
 #[derive(Subcommand)]
@@ -153,7 +224,7 @@ struct DbArg {
     db: PathBuf,
 }
 
-#[derive(clap::Args)]
+#[derive(clap::Args, Clone)]
 struct SourceArgs {
     /// Data source.
     #[arg(long, value_enum)]
@@ -355,6 +426,8 @@ fn run(cli: Cli) -> Result<(), Failure> {
         Command::Received {
             action: ReceivedAction::List { db, json },
         } => received_list(network, &db.db, json),
+        Command::Bench(args) => bench_command(network, args),
+        Command::Export(args) => export_command(&args),
     }
 }
 
@@ -366,6 +439,14 @@ fn default_core_rest_url(network: LabNetwork) -> &'static str {
 }
 
 fn open_source(network: LabNetwork, args: &SourceArgs) -> Result<Box<dyn ScanSource>, Failure> {
+    open_source_with(network, args, true)
+}
+
+fn open_source_with(
+    network: LabNetwork,
+    args: &SourceArgs,
+    announce: bool,
+) -> Result<Box<dyn ScanSource>, Failure> {
     let source: Box<dyn ScanSource> = match args.backend {
         Backend::Fixture => {
             let path = args
@@ -379,7 +460,9 @@ fn open_source(network: LabNetwork, args: &SourceArgs) -> Result<Box<dyn ScanSou
                 .core_rest_url
                 .as_deref()
                 .unwrap_or_else(|| default_core_rest_url(network));
-            eprintln!("connecting to Bitcoin Core REST (loopback)");
+            if announce {
+                eprintln!("connecting to Bitcoin Core REST (loopback)");
+            }
             Box::new(
                 CoreRestSource::connect(url)
                     .map_err(|e| Failure::error(format!("{e}\nnothing was scanned")))?,
@@ -391,7 +474,11 @@ fn open_source(network: LabNetwork, args: &SourceArgs) -> Result<Box<dyn ScanSou
                 .as_deref()
                 .unwrap_or_else(|| default_core_rest_url(network));
             let oracle_url = args.oracle_url.as_deref().unwrap_or(DEFAULT_ORACLE_URL);
-            eprintln!("connecting to BlindBit Oracle (loopback); headers from Bitcoin Core REST");
+            if announce {
+                eprintln!(
+                    "connecting to BlindBit Oracle (loopback); headers from Bitcoin Core REST"
+                );
+            }
             let headers = CoreRestSource::connect(core_url)
                 .map_err(|e| Failure::error(format!("header source: {e}\nnothing was scanned")))?;
             Box::new(
@@ -678,6 +765,247 @@ fn render_verification(report: &VerificationReport) -> String {
             .to_string(),
     );
     out
+}
+
+/// Writes `text` to a new file; an existing file is never replaced.
+fn write_new_file(path: &Path, text: &str) -> Result<(), Failure> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| {
+            Failure::error(format!(
+                "cannot create {} (an existing file is never overwritten): {e}",
+                path.display()
+            ))
+        })?;
+    file.write_all(text.as_bytes())
+        .and_then(|()| file.flush())
+        .map_err(|e| Failure::error(format!("cannot write {}: {e}", path.display())))
+}
+
+/// Opens a fresh connection to one backend; the error is its message.
+type Opener = Box<dyn Fn() -> Result<Box<dyn ScanSource>, String>>;
+
+fn bench_command(network: LabNetwork, args: BenchArgs) -> Result<(), Failure> {
+    if args.repeat == 0 {
+        return Err(Failure::error("`--repeat` must be at least 1"));
+    }
+    if args.output.exists() {
+        return Err(Failure::error(format!(
+            "{} already exists; results files are never overwritten",
+            args.output.display()
+        )));
+    }
+    let modes: Vec<bench::Mode> = if args.modes.is_empty() {
+        bench::Mode::ALL.to_vec()
+    } else {
+        args.modes
+            .iter()
+            .map(|name| {
+                bench::Mode::parse(name).ok_or_else(|| {
+                    Failure::error(format!(
+                        "unknown mode `{}` (known: scan, sync_cold, sync_resume, sync_noop, restore)",
+                        bench::single_line(name)
+                    ))
+                })
+            })
+            .collect::<Result<_, _>>()?
+    };
+    let keys = lab_keys::lab_receiver_keys().map_err(Failure::error)?;
+    let scanner = ReceiveScanner::new(&keys, &args.labels).map_err(fail)?;
+    let wallet_id = keys.wallet_id();
+
+    let sources: Vec<(String, SourceArgs)> = args
+        .backends
+        .iter()
+        .map(|&backend| {
+            let name = backend
+                .to_possible_value()
+                .map_or_else(String::new, |v| v.get_name().to_string());
+            (
+                name,
+                SourceArgs {
+                    backend,
+                    fixture: args.fixture.clone(),
+                    core_rest_url: args.core_rest_url.clone(),
+                    oracle_url: args.oracle_url.clone(),
+                    index_policy: args.index_policy,
+                },
+            )
+        })
+        .collect();
+    let openers: Vec<Opener> = sources
+        .iter()
+        .map(|(_, source_args)| {
+            let source_args = source_args.clone();
+            Box::new(move || open_source_with(network, &source_args, false).map_err(|f| f.message))
+                as Opener
+        })
+        .collect();
+
+    // The range is fixed once, from the first backend, and is the same for all.
+    let first = openers
+        .first()
+        .ok_or_else(|| Failure::error("no backend given"))?()
+    .map_err(Failure::error)?;
+    let from = args.from.unwrap_or(1);
+    let to = match args.to {
+        Some(to) => to,
+        None => first.tip().map_err(fail)?.height,
+    };
+    drop(first);
+    if from == 0 || from > to {
+        return Err(Failure::error(format!("invalid range {from}..={to}")));
+    }
+
+    let plan = bench::BenchPlan {
+        network,
+        backends: sources
+            .iter()
+            .zip(&openers)
+            .map(|((name, _), open)| (name.clone(), open.as_ref() as bench::OpenSource<'_>))
+            .collect(),
+        modes,
+        from,
+        to,
+        repeat: args.repeat,
+        work_dir: args.work_dir.clone().unwrap_or_else(std::env::temp_dir),
+    };
+    eprintln!(
+        "benchmark: {} backend(s) x {} mode(s) x {} repeat(s) on {from}..={to} ({network})",
+        plan.backends.len(),
+        plan.modes.len(),
+        plan.repeat
+    );
+    let runs = bench::run_plan(
+        &plan,
+        &scanner,
+        &wallet_id,
+        &mut |record| match &record.error {
+            None => eprintln!(
+                "  #{:<3} {:<12} {:<11} repeat {}: {:.2} ms, {} bytes, {} detected",
+                record.order,
+                record.backend,
+                record.mode.as_str(),
+                record.repeat,
+                record.wall_ms,
+                record.downloaded_bytes,
+                record.detected_count
+            ),
+            Some(error) => eprintln!(
+                "  #{:<3} {:<12} {:<11} repeat {}: FAILED: {error}",
+                record.order,
+                record.backend,
+                record.mode.as_str(),
+                record.repeat
+            ),
+        },
+    );
+
+    let file = bench::BenchFile {
+        format: bench::FORMAT.to_string(),
+        environment: bench::Environment::capture(
+            args.notes.iter().map(|n| bench::single_line(n)).collect(),
+        ),
+        runs,
+    };
+    let json = serde_json::to_string_pretty(&file)
+        .map_err(|e| Failure::error(format!("cannot serialize: {e}")))?;
+    write_new_file(&args.output, &(json + "\n"))?;
+    eprintln!("wrote {}", args.output.display());
+
+    let failed = file.runs.iter().filter(|r| r.error.is_some()).count();
+    let differing = file
+        .runs
+        .iter()
+        .filter(|r| r.verification_status == bench::Verification::DiffersFromReference)
+        .count();
+    emit(&render_bench_summary(&file))?;
+    if failed > 0 || differing > 0 {
+        return Err(Failure::error(format!(
+            "{failed} run(s) failed and {differing} run(s) produced a different result; see the \
+             results file"
+        )));
+    }
+    Ok(())
+}
+
+fn render_bench_summary(file: &bench::BenchFile) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{:<12} {:<11} {:>9} {:>4} {:>12} {:>10} {:>10} {:>8} {:>12} {:>8}",
+        "backend",
+        "mode",
+        "blocks",
+        "runs",
+        "wall med ms",
+        "min",
+        "max",
+        "CPU ms",
+        "bytes",
+        "detected"
+    );
+    let number = |v: Option<f64>, digits: usize| {
+        v.map_or_else(|| "-".to_string(), |v| format!("{v:.digits$}"))
+    };
+    for s in bench::summarize(&file.runs) {
+        let _ = writeln!(
+            out,
+            "{:<12} {:<11} {:>9} {:>4} {:>12} {:>10} {:>10} {:>8} {:>12} {:>8}",
+            s.backend,
+            s.mode.as_str(),
+            s.to_height - s.from_height + 1,
+            format!("{}/{}", s.runs - s.errors, s.runs),
+            number(s.wall_ms_median, 2),
+            number(s.wall_ms_min, 2),
+            number(s.wall_ms_max, 2),
+            number(s.cpu_ms_median, 0),
+            number(s.downloaded_bytes_median, 0),
+            s.detected_count
+                .map_or_else(|| "-".to_string(), |n| n.to_string()),
+        );
+    }
+    let _ = writeln!(
+        out,
+        "note: client-side measurements only; server-side preprocessing is not included. \
+         Detected outputs are not a balance."
+    );
+    out
+}
+
+fn export_command(args: &ExportArgs) -> Result<(), Failure> {
+    let mut files = Vec::new();
+    for path in &args.input {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| Failure::error(format!("cannot read {}: {e}", path.display())))?;
+        let file: bench::BenchFile = serde_json::from_str(&text).map_err(|e| {
+            Failure::error(format!(
+                "{} is not a benchmark results file: {e}",
+                path.display()
+            ))
+        })?;
+        files.push(file);
+    }
+    let merged = bench::merge(files).map_err(Failure::error)?;
+    let text = match args.format {
+        ExportFormat::Json => {
+            serde_json::to_string_pretty(&merged)
+                .map_err(|e| Failure::error(format!("cannot serialize: {e}")))?
+                + "\n"
+        }
+        ExportFormat::Csv => bench::to_csv(&merged),
+        ExportFormat::Markdown => bench::to_markdown(&merged),
+    };
+    match &args.output {
+        Some(path) => {
+            write_new_file(path, &text)?;
+            eprintln!("wrote {}", path.display());
+            Ok(())
+        }
+        None => emit(&text),
+    }
 }
 
 fn lab_init(

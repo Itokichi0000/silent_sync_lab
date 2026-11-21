@@ -337,7 +337,7 @@ fn damaged_stores_are_refused_on_open() {
     refused(
         "birthday-zero",
         "UPDATE meta SET value = replace(value, '\"birthday\":1', '\"birthday\":0') WHERE key = 'store_meta';",
-        "birthday 0",
+        "stored binding (birthday 0) is not valid",
     );
     refused(
         "no-binding",

@@ -244,10 +244,14 @@ impl<H: ScanSource> ScanSource for BlindbitHttpSource<H> {
         Ok(ScanBatch { blocks })
     }
 
-    /// Transfer counters of the oracle connection only (the header source
-    /// keeps its own).
+    /// Everything this backend downloaded: the oracle connection plus the
+    /// header source it is anchored to.
     fn stats(&self) -> SourceStats {
-        self.http.stats()
+        let (oracle, headers) = (self.http.stats(), self.headers.stats());
+        SourceStats {
+            requests: oracle.requests + headers.requests,
+            downloaded_bytes: oracle.downloaded_bytes + headers.downloaded_bytes,
+        }
     }
 }
 

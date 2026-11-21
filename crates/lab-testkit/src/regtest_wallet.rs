@@ -285,6 +285,54 @@ impl<'a> Faucet<'a> {
             .collect()
     }
 
+    /// Like [`fund`](Self::fund) for many coins: one wallet transaction per
+    /// 200 coins (`sendmany`), each confirmed in its own block. Only kinds
+    /// whose script differs per key can be funded this way.
+    pub fn fund_many(&mut self, kinds: &[InputKind]) -> Vec<Funded> {
+        let amount = Amount::from_sat(FUNDING_SATS).to_btc();
+        let mut funded = Vec::with_capacity(kinds.len());
+        for batch in kinds.chunks(200) {
+            let mut pending = Vec::new();
+            let mut outputs = serde_json::Map::new();
+            for &kind in batch {
+                assert!(
+                    matches!(kind, InputKind::P2wpkh | InputKind::P2trKeyPath),
+                    "fund_many needs a distinct address per coin"
+                );
+                let index = self.next_key;
+                self.next_key += 1;
+                let key = sender_key(index);
+                let script = script_for(kind, &key, index);
+                let address = Address::from_script(&script, Network::Regtest).expect("address");
+                outputs.insert(address.to_string(), serde_json::json!(amount));
+                pending.push((kind, key, script));
+            }
+            let txid = self.node.cli(&[
+                "sendmany",
+                "",
+                &serde_json::Value::Object(outputs).to_string(),
+            ]);
+            self.node.generate_to(1, &self.miner_address);
+            let info = self.node.cli_json(&["gettransaction", &txid]);
+            let tx: Transaction =
+                deserialize_hex(info["hex"].as_str().expect("hex")).expect("transaction");
+            for (kind, key, script) in pending {
+                let vout = tx
+                    .output
+                    .iter()
+                    .position(|o| o.script_pubkey == script)
+                    .expect("funding output");
+                funded.push(Funded {
+                    kind,
+                    outpoint: OutPoint::new(tx.compute_txid(), vout as u32),
+                    prevout: tx.output[vout].clone(),
+                    key,
+                });
+            }
+        }
+        funded
+    }
+
     /// Mines one block with exactly these transactions (mempool policy is
     /// bypassed, consensus is not) and returns its height.
     pub fn mine_block(&self, txs: &[&Transaction]) -> u32 {
@@ -499,6 +547,81 @@ pub fn standard_scenario(faucet: &mut Faucet<'_>) -> Scenario {
         expected,
         segwit_v2_txid: tx_v2.compute_txid(),
         last_two_payments: [change_only, tx],
+    }
+}
+
+/// What [`long_scenario`] put on chain.
+#[derive(Debug, Clone)]
+pub struct LongScenario {
+    /// Height of the last block before the scenario's blocks.
+    pub base_height: u32,
+    pub tip_height: u32,
+    /// Sender-side knowledge: outputs created for the lab receiver.
+    pub expected: Vec<FixtureExpectedDetection>,
+}
+
+/// Puts `blocks` blocks of signed, consensus-valid transactions on a real
+/// regtest chain, for scale tests and benchmarks. Every block holds three
+/// transactions:
+///
+/// * a silent payment — to the lab receiver in every `payment_every`-th block
+///   (alternately to its plain address and its label-1 address), to another
+///   receiver otherwise;
+/// * a taproot key-path spend paying an unrelated taproot output (scanned, no
+///   match);
+/// * a transaction without a taproot output (not scanned).
+pub fn long_scenario(faucet: &mut Faucet<'_>, blocks: u32, payment_every: u32) -> LongScenario {
+    use InputKind::*;
+    assert!(blocks >= 1 && payment_every >= 1);
+    let network = LabNetwork::Regtest;
+    let receiver = fixture_gen::lab_receiver_keys();
+    let other = fixture_gen::other_receiver_keys().address(network);
+    let plain = receiver.address(network);
+    let label_used = receiver
+        .labelled_address(network, LABEL_USED)
+        .expect("label");
+
+    let kinds: Vec<InputKind> = (0..blocks)
+        .flat_map(|_| [P2wpkh, P2trKeyPath, P2wpkh])
+        .collect();
+    let coins = faucet.fund_many(&kinds);
+    let base_height = faucet.node.block_count();
+    let mut expected = Vec::new();
+
+    for (index, coins) in coins.chunks(3).enumerate() {
+        let n = u32::try_from(index).expect("block index") + 1;
+        let pays_receiver = n % payment_every == 0;
+        let nth = n / payment_every;
+        let (target, label) = match (pays_receiver, nth % 2) {
+            (false, _) => (other, None),
+            (true, 0) => (label_used, Some(LABEL_USED)),
+            (true, _) => (plain, None),
+        };
+        let value = 10_000 + u64::from(nth);
+        let sp = silent_payment_scripts(&coins[0..1], &[target]);
+        let payment = signed_transaction(
+            &coins[0..1],
+            vec![(80_000, change_script(n)), (value, sp[0].clone())],
+        );
+        let taproot_only = signed_transaction(&coins[1..2], vec![(90_000, unrelated_p2tr(n))]);
+        let no_taproot = signed_transaction(&coins[2..3], vec![(90_000, change_script(n))]);
+        let height = faucet.mine_block(&[&payment, &taproot_only, &no_taproot]);
+        if pays_receiver {
+            expected.push(FixtureExpectedDetection {
+                height,
+                txid: payment.compute_txid(),
+                vout: 1,
+                k: 0,
+                value_sats: value,
+                label,
+                note: format!("long scenario payment #{nth}"),
+            });
+        }
+    }
+    LongScenario {
+        base_height,
+        tip_height: faucet.node.block_count(),
+        expected,
     }
 }
 
