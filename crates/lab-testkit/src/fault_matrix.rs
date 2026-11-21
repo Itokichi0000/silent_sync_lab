@@ -148,6 +148,7 @@ fn class_of_source(e: &SourceError) -> &'static str {
         SourceError::InvalidData(_) => "invalid data",
         SourceError::Unavailable(_) => "source unavailable",
         SourceError::Network(_) => "network refused",
+        _ => "other source error",
     }
 }
 
@@ -158,6 +159,7 @@ fn class_of(e: &ScanError) -> &'static str {
         ScanError::Source(e) => class_of_source(e),
         ScanError::InconsistentBatch { .. } => "inconsistent batch",
         ScanError::Transaction { .. } => "transaction error",
+        _ => "other scan error",
     }
 }
 

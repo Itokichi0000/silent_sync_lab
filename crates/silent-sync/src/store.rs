@@ -51,6 +51,7 @@ pub struct StoreMeta {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum StoreError {
     #[error("the store has not been initialized")]
     NotInitialized,

@@ -22,6 +22,7 @@ pub struct BlockRef {
 /// What kind of data a detection was derived from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum EvidenceKind {
     /// Full transactions plus the previous outputs of every input, so the
     /// client itself derived the BIP352 public tweak data.

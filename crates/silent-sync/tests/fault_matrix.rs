@@ -145,10 +145,7 @@ fn a_replayed_index_entry_is_refused_by_the_store_across_chunks() {
         &scanner,
         &keys.wallet_id(),
         &mut store,
-        &SyncOptions {
-            chunk_size: 1,
-            ..SyncOptions::default()
-        },
+        &SyncOptions::default().with_chunk_size(1),
     );
     match result {
         Err(SyncError::Interrupted { cause, partial }) => {

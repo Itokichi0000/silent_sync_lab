@@ -27,10 +27,7 @@ fn failed_commit_loses_only_the_uncommitted_chunk() {
     let source = TestSource::new();
     let keys = fixture_gen::lab_receiver_keys();
     let scanner = ReceiveScanner::new(&keys, &[fixture_gen::LABEL_USED]).unwrap();
-    let options = SyncOptions {
-        chunk_size: 3,
-        ..SyncOptions::default()
-    };
+    let options = SyncOptions::default().with_chunk_size(3);
     for good_commits in 0..3u32 {
         let mut store = FailingAppends::new(MemoryStore::new());
         store
@@ -158,10 +155,7 @@ fn what_was_changed_is_reported_without_reading_the_store_back() {
             written: false,
         }
     };
-    let options = SyncOptions {
-        chunk_size: 2,
-        ..SyncOptions::default()
-    };
+    let options = SyncOptions::default().with_chunk_size(2);
 
     // Reorg, then two chunks: the whole call succeeds and reports everything.
     let mut store = synced_on_main();

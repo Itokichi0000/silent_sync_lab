@@ -17,6 +17,7 @@ pub enum Network {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum NetworkError {
     #[error(
         "mainnet is refused: this is experimental, unaudited software and must not be used \

@@ -199,10 +199,7 @@ fn sync_and_tweak_index_agree_with_the_full_scan_on_a_long_chain() {
             &scanner(),
             &wallet_id,
             &mut store,
-            &SyncOptions {
-                chunk_size: chunk,
-                ..SyncOptions::default()
-            },
+            &SyncOptions::default().with_chunk_size(chunk),
         )
         .unwrap();
         assert!(report.caught_up);

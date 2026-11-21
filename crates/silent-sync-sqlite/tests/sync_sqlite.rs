@@ -57,11 +57,10 @@ fn wallet_id() -> String {
 fn state_survives_closing_and_reopening_the_file() {
     let db = TempDb::new("reopen");
     let source = TestSource::new();
-    let half = SyncOptions {
-        chunk_size: 2,
-        max_blocks: Some(4),
-        target_height: None,
-    };
+    let half = SyncOptions::default()
+        .with_chunk_size(2)
+        .with_max_blocks(Some(4))
+        .with_target_height(None);
     {
         let mut store = SqliteStore::create(&db.path).unwrap();
         store

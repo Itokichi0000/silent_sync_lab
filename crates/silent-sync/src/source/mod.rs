@@ -120,6 +120,7 @@ pub struct ScanBatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SourceError {
     #[error("invalid range {from}..={to}")]
     InvalidRange { from: u32, to: u32 },

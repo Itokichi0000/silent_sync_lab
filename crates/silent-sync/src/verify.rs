@@ -35,6 +35,7 @@ pub enum Side {
 /// Why the two sources disagree about one output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Explanation {
     /// The two sources do not even agree on which block is at this height.
     BlockHashDiffers,
@@ -64,6 +65,7 @@ pub enum Explanation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct Difference {
     pub height: u32,
     pub txid: Txid,
@@ -76,6 +78,7 @@ pub struct Difference {
 
 /// Result of [`cross_check`]. Contains no key material.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct VerificationReport {
     pub chain: ChainIdentity,
     pub candidate_backend: String,

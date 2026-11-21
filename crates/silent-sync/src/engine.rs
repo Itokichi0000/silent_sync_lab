@@ -20,6 +20,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ScanError {
     #[error(
         "chain mismatch: wallet expects {expected:?} but source `{backend_id}` serves {actual:?}"
@@ -46,6 +47,7 @@ pub enum ScanError {
 
 /// Result of scanning one complete range. Contains no key material.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct ScanReport {
     pub chain: ChainIdentity,
     pub backend_id: String,

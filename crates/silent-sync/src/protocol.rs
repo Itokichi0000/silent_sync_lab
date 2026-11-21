@@ -272,6 +272,7 @@ pub enum TxScanOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ProtocolError {
     #[error("transaction has {inputs} inputs but {prevouts} previous outputs were supplied")]
     PrevoutCountMismatch { inputs: usize, prevouts: usize },

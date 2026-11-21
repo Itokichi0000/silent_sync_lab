@@ -54,6 +54,8 @@ cargo test --workspace --locked          # K_max の 2 テストで約 2 分か�
 cargo run -p lab-testkit --bin gen_fixture -- fixtures/local/regtest_basic_v1.json
 cargo run -p lab-cli -- scan --backend fixture --fixture fixtures/local/regtest_basic_v1.json --label 1
 cargo run -p lab-testkit --bin fault_report        # docs/FAULT_INJECTION.md の表を再生成
+UPDATE_API_LISTS=1 cargo test -p silent-sync --test public_api   # 公開 API を変えたら docs/api/ を更新
+cargo clippy -p silent-sync --lib --locked --features <feature> -- -D warnings   # ライブラリ単体・feature ごと（CI と同じ）
 
 # 実ノードを使う E2E（通常の cargo test では ignored。バイナリが無いと失敗する）
 export BITCOIND_EXE="$(VERIFY_SIGNATURES=1 scripts/fetch_bitcoind.sh /path/outside/repo/core)"
@@ -65,6 +67,7 @@ cargo test --workspace --locked -- --ignored
 - バックエンドやエンジンの挙動を変えたら `cargo run -p lab-testkit --bin fault_report` で故障注入の表を作り直す（`docs/FAULT_INJECTION.md` と一致しないとテストが失敗する）。
 - ベンチマークの数値を手で書かない。`silent-sync bench` → `export` の出力を使う（`docs/BENCHMARK_PROTOCOL.md`）。計測中は他の重い処理を動かさない。
 - インデックス由来（`tweak_index`）の検出を、フルブロック由来と同じ確度のものとして表示・記述しない。
+- 公開 API（`silent-sync`、`silent-sync-sqlite`）を変えるときは、`docs/api/` の一覧の差分を確認してコミットする。実験・診断用の機能は feature の下に置き、既定で有効にしない。出力ごとの tweak を公開 API から渡さない（D-039。変更は人間レビュー必須）。
 - フェーズの終わりに、文脈を共有しない別エージェントへ敵対的レビューを依頼し、指摘は自分で再現してから対応する（DECISIONS D-018）。
 - 依存を追加・更新したら `docs/DEPENDENCIES.md` と `docs/DECISIONS.md` に理由を書く。`cargo update` を無指定で実行しない（暗号スタックが上がる。DECISIONS D-004）。
 - 本番コードで `unwrap()` は clippy が拒否する。エラーは型で分類する。

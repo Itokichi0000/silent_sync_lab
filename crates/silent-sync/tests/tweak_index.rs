@@ -149,10 +149,7 @@ fn persistent_sync_over_a_tweak_index() {
             "test",
         ))
         .unwrap();
-    let options = SyncOptions {
-        chunk_size: 3,
-        ..SyncOptions::default()
-    };
+    let options = SyncOptions::default().with_chunk_size(3);
     let report = sync(&source, &scanner, &keys.wallet_id(), &mut store, &options).unwrap();
     assert!(report.caught_up);
     let reference = scan_range(source.inner().main_chain(), &scanner, regtest(), 1, TIP).unwrap();
@@ -611,10 +608,7 @@ fn a_store_is_bound_to_the_index_policy() {
             "test",
         ))
         .unwrap();
-    let half = SyncOptions {
-        target_height: Some(5),
-        ..SyncOptions::default()
-    };
+    let half = SyncOptions::default().with_target_height(Some(5));
     sync(&strict, &scanner, &keys.wallet_id(), &mut store, &half).unwrap();
     let before = store.detections().unwrap();
 

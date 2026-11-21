@@ -1,0 +1,7 @@
+## lib.rs
+pub const SCHEMA_VERSION: u32 = 1
+pub struct SqliteStore
+pub fn create(path: &Path) -> Result<Self, StoreError>
+pub fn open(path: &Path) -> Result<Self, StoreError>
+pub fn in_memory() -> Result<Self, StoreError>
+

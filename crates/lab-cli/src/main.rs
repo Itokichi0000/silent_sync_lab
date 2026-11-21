@@ -1100,11 +1100,10 @@ fn sync_command(network: Network, args: SyncArgs) -> Result<(), Failure> {
         args.db.db.display(),
         source.backend_id()
     );
-    let options = SyncOptions {
-        chunk_size: args.chunk_size,
-        target_height: args.to,
-        max_blocks: args.max_blocks,
-    };
+    let options = SyncOptions::default()
+        .with_chunk_size(args.chunk_size)
+        .with_target_height(args.to)
+        .with_max_blocks(args.max_blocks);
     let delay = Duration::from_millis(args.chunk_delay_ms);
     let mut on_commit = |checkpoint: silent_sync::models::BlockRef| {
         eprintln!("committed up to height {}", checkpoint.height);
@@ -1193,10 +1192,12 @@ fn evidence_text(kind: EvidenceKind) -> &'static str {
     match kind {
         EvidenceKind::FullBlockWithPrevouts => "full_block",
         EvidenceKind::TweakIndex => "tweak_index: UNVERIFIED index claim",
+        // A kind this version does not know is never presented as verified.
+        _ => "unknown evidence kind: UNVERIFIED",
     }
 }
 
-const INDEX_CLAIM_NOTE: &str = "note: outputs marked `tweak_index` are what the index server \
+const INDEX_CLAIM_NOTE: &str = "note: outputs not marked `full_block` are what an index server \
     claimed. Their transaction id, output index and amount were NOT checked against the block; \
     an index can omit, alter or invent them (docs/FAULT_INJECTION.md).";
 
@@ -1216,7 +1217,7 @@ fn render_detections(out: &mut String, detections: &[DetectedOutput]) {
     }
     if detections
         .iter()
-        .any(|d| d.provenance.evidence_kind == EvidenceKind::TweakIndex)
+        .any(|d| d.provenance.evidence_kind != EvidenceKind::FullBlockWithPrevouts)
     {
         let _ = writeln!(out, "{INDEX_CLAIM_NOTE}");
     }
@@ -1260,6 +1261,7 @@ fn seen_label(kind: EvidenceKind) -> &'static str {
     match kind {
         EvidenceKind::FullBlockWithPrevouts => "transactions seen   ",
         EvidenceKind::TweakIndex => "index entries seen  ",
+        _ => "entries seen        ",
     }
 }
 
@@ -1374,6 +1376,7 @@ fn render_sync_report(report: &SyncReport) -> String {
                 StopReason::TipChanged =>
                     "no (the source tip changed while syncing; run sync again)",
                 StopReason::Error => "no (INTERRUPTED by an error; see the error message)",
+                _ => "no (stopped for a reason this version does not know)",
             }
         ));
         line(format!(

@@ -33,7 +33,19 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// How a [`sync`] call should proceed.
+///
+/// Start from [`SyncOptions::default`] and adjust it; more options may be
+/// added later, so the struct cannot be built field by field elsewhere.
+///
+/// ```
+/// use silent_sync::sync::SyncOptions;
+/// let options = SyncOptions::default()
+///     .with_chunk_size(50)
+///     .with_target_height(Some(1_000));
+/// assert_eq!(options.chunk_size, 50);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SyncOptions {
     /// Blocks fetched, scanned and committed per step.
     pub chunk_size: u32,
@@ -42,6 +54,26 @@ pub struct SyncOptions {
     /// Stop after committing at least this many blocks in this call (whole
     /// chunks are always committed). The store stays resumable.
     pub max_blocks: Option<u64>,
+}
+
+impl SyncOptions {
+    /// Blocks fetched, scanned and committed per step (at least 1).
+    pub fn with_chunk_size(mut self, chunk_size: u32) -> Self {
+        self.chunk_size = chunk_size;
+        self
+    }
+
+    /// Stop at this height instead of the source's tip (`None`: the tip).
+    pub fn with_target_height(mut self, target_height: Option<u32>) -> Self {
+        self.target_height = target_height;
+        self
+    }
+
+    /// Stop after committing at least this many blocks (`None`: no limit).
+    pub fn with_max_blocks(mut self, max_blocks: Option<u64>) -> Self {
+        self.max_blocks = max_blocks;
+        self
+    }
 }
 
 impl Default for SyncOptions {
@@ -55,6 +87,7 @@ impl Default for SyncOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SyncError {
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -104,6 +137,7 @@ impl From<SourceError> for SyncError {
 
 /// A reorganization that [`sync`] resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct ReorgReport {
     /// The checkpoint that turned out not to be on the source's chain.
     pub abandoned_checkpoint: BlockRef,
@@ -118,6 +152,7 @@ pub struct ReorgReport {
 
 /// Outcome of one [`sync`] call. Contains no key material.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct SyncReport {
     pub chain: ChainIdentity,
     pub backend_id: String,
@@ -149,6 +184,7 @@ pub struct SyncReport {
 /// Why a [`sync`] call stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum StopReason {
     /// The checkpoint is the source's tip.
     CaughtUp,

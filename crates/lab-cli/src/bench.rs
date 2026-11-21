@@ -343,6 +343,7 @@ fn source_class(e: &SourceError) -> &'static str {
         SourceError::InvalidData(_) => "source: invalid data",
         SourceError::Unavailable(_) => "source: unavailable",
         SourceError::Network(_) => "source: network refused",
+        _ => "source: other error",
     }
 }
 
@@ -353,6 +354,7 @@ fn scan_class(e: &ScanError) -> &'static str {
         ScanError::Source(e) => source_class(e),
         ScanError::InconsistentBatch { .. } => "scan: inconsistent batch",
         ScanError::Transaction { .. } => "scan: transaction error",
+        _ => "scan: other error",
     }
 }
 
@@ -362,6 +364,7 @@ fn store_class(e: &StoreError) -> &'static str {
         StoreError::AlreadyInitialized => "store: already initialized",
         StoreError::Invariant(_) => "store: invariant violated",
         StoreError::Backend(_) => "store: backend error",
+        _ => "store: other error",
     }
 }
 
@@ -375,6 +378,7 @@ fn sync_class(e: &SyncError) -> &'static str {
         SyncError::ChainMovedDuringSync { .. } => "sync: chain moved during sync",
         SyncError::InvalidChunkSize => "sync: invalid chunk size",
         SyncError::Interrupted { cause, .. } => sync_class(cause),
+        _ => "sync: other error",
     }
 }
 
@@ -438,10 +442,7 @@ impl Runner<'_> {
     }
 
     fn options(&self, target: u32) -> SyncOptions {
-        SyncOptions {
-            target_height: Some(target),
-            ..SyncOptions::default()
-        }
+        SyncOptions::default().with_target_height(Some(target))
     }
 
     /// Creates a store bound to `source` with the range start as birthday.

@@ -48,10 +48,7 @@ fn init(store: &mut dyn SyncStore, source: &dyn ScanSource, birthday: u32) {
 }
 
 fn options(chunk_size: u32) -> SyncOptions {
-    SyncOptions {
-        chunk_size,
-        ..SyncOptions::default()
-    }
+    SyncOptions::default().with_chunk_size(chunk_size)
 }
 
 fn run(source: &dyn ScanSource, store: &mut dyn SyncStore, opts: &SyncOptions) -> SyncReport {
@@ -163,11 +160,10 @@ pub fn interrupted_sync_resumes_without_loss_or_duplicates(new_store: StoreFacto
         &scanner(),
         &wallet_id(),
         store.as_mut(),
-        &SyncOptions {
-            chunk_size: 4,
-            max_blocks: Some(4),
-            target_height: None,
-        },
+        &SyncOptions::default()
+            .with_chunk_size(4)
+            .with_max_blocks(Some(4))
+            .with_target_height(None),
     )
     .expect("first half");
     assert!(!half.caught_up);
@@ -202,11 +198,10 @@ pub fn interrupted_sync_resumes_without_loss_or_duplicates(new_store: StoreFacto
                 &scanner(),
                 &wallet_id(),
                 store.as_mut(),
-                &SyncOptions {
-                    chunk_size: chunk,
-                    max_blocks: Some(1),
-                    target_height: None,
-                },
+                &SyncOptions::default()
+                    .with_chunk_size(chunk)
+                    .with_max_blocks(Some(1))
+                    .with_target_height(None),
             )
             .expect("step");
             assert_store_matches(store.as_ref(), source.main_chain(), 1);
@@ -373,10 +368,7 @@ pub fn the_reason_a_sync_stopped_is_reported(new_store: StoreFactory<'_>) {
     let report = run(
         &source,
         store.as_mut(),
-        &SyncOptions {
-            target_height: Some(4),
-            ..SyncOptions::default()
-        },
+        &SyncOptions::default().with_target_height(Some(4)),
     );
     assert_eq!(report.stopped_because, StopReason::TargetReached);
     assert!(!report.caught_up);
@@ -384,11 +376,10 @@ pub fn the_reason_a_sync_stopped_is_reported(new_store: StoreFactory<'_>) {
     let report = run(
         &source,
         store.as_mut(),
-        &SyncOptions {
-            chunk_size: 1,
-            max_blocks: Some(1),
-            target_height: None,
-        },
+        &SyncOptions::default()
+            .with_chunk_size(1)
+            .with_max_blocks(Some(1))
+            .with_target_height(None),
     );
     assert_eq!(report.stopped_because, StopReason::MaxBlocksReached);
     assert_eq!(report.checkpoint.map(|c| c.height), Some(5));
@@ -397,10 +388,7 @@ pub fn the_reason_a_sync_stopped_is_reported(new_store: StoreFactory<'_>) {
     let report = run(
         &source,
         store.as_mut(),
-        &SyncOptions {
-            target_height: Some(MAIN_TIP),
-            ..SyncOptions::default()
-        },
+        &SyncOptions::default().with_target_height(Some(MAIN_TIP)),
     );
     assert_eq!(report.stopped_because, StopReason::CaughtUp);
     assert!(report.caught_up);
@@ -410,11 +398,10 @@ pub fn the_reason_a_sync_stopped_is_reported(new_store: StoreFactory<'_>) {
     let report = run(
         &source,
         exact.as_mut(),
-        &SyncOptions {
-            chunk_size: 4,
-            max_blocks: Some(u64::from(MAIN_TIP)),
-            target_height: None,
-        },
+        &SyncOptions::default()
+            .with_chunk_size(4)
+            .with_max_blocks(Some(u64::from(MAIN_TIP)))
+            .with_target_height(None),
     );
     assert_eq!(report.stopped_because, StopReason::CaughtUp);
 
@@ -700,10 +687,7 @@ pub fn target_and_chunk_limits_are_respected(new_store: StoreFactory<'_>) {
     let source = TestSource::new();
     let mut store = new_store();
     init(store.as_mut(), &source, 1);
-    let with_target = |target: u32| SyncOptions {
-        target_height: Some(target),
-        ..SyncOptions::default()
-    };
+    let with_target = |target: u32| SyncOptions::default().with_target_height(Some(target));
 
     let report = run(&source, store.as_mut(), &with_target(4));
     assert!(!report.caught_up);
@@ -756,10 +740,7 @@ pub fn blocks_that_do_not_extend_the_checkpoint_are_refused(new_store: StoreFact
     run(
         &source,
         store.as_mut(),
-        &SyncOptions {
-            target_height: Some(6),
-            ..SyncOptions::default()
-        },
+        &SyncOptions::default().with_target_height(Some(6)),
     );
     let before = (
         store.checkpoint().expect("c"),
@@ -895,10 +876,7 @@ pub fn short_batches_are_refused_by_sync(new_store: StoreFactory<'_>) {
     run(
         &source,
         store.as_mut(),
-        &SyncOptions {
-            target_height: Some(2),
-            ..SyncOptions::default()
-        },
+        &SyncOptions::default().with_target_height(Some(2)),
     );
 
     source.drop_last_block.set(true);
