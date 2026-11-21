@@ -155,10 +155,48 @@ fn database_file_is_owner_only() {
     assert_eq!(mode, 0o600);
 }
 
-/// A commit that fails after some rows were written leaves nothing behind.
+/// A store on disk, bound to the fixture chain and synced to its tip.
+fn synced_store(db: &TempDb) -> SqliteStore {
+    let source = TestSource::new();
+    let mut store = SqliteStore::create(&db.path).unwrap();
+    store
+        .initialize(&new_store_meta(
+            &source,
+            &scanner(),
+            &wallet_id(),
+            1,
+            "test",
+        ))
+        .unwrap();
+    sync(
+        &source,
+        &scanner(),
+        &wallet_id(),
+        &mut store,
+        &SyncOptions::default(),
+    )
+    .unwrap();
+    store
+}
+
+/// Runs SQL on the file through a second, raw connection.
+fn raw(db: &TempDb, sql: &str) {
+    rusqlite::Connection::open(&db.path)
+        .unwrap()
+        .execute_batch(sql)
+        .unwrap();
+}
+
+/// A commit that fails after some rows were written leaves nothing behind:
+/// the block rows are inserted first, then the first detection insert aborts.
 #[test]
 fn failed_append_is_rolled_back_entirely() {
-    let db = TempDb::new("atomic");
+    let db = TempDb::new("atomic-append");
+    let full = synced_store(&db);
+    let detections = full.detections().unwrap();
+    drop(full);
+    std::fs::remove_file(&db.path).unwrap();
+
     let source = TestSource::new();
     let mut store = SqliteStore::create(&db.path).unwrap();
     store
@@ -172,45 +210,239 @@ fn failed_append_is_rolled_back_entirely() {
         .unwrap();
     let blocks = block_refs(1, 3);
     store.append(&blocks[..1], &[]).unwrap();
+    let in_blocks: Vec<_> = detections
+        .iter()
+        .filter(|d| (2..=3).contains(&d.block.height))
+        .cloned()
+        .collect();
+    assert!(
+        in_blocks.first().is_some_and(|d| d.block.height == 2)
+            && in_blocks.last().is_some_and(|d| d.block.height == 3),
+        "a detection at height 2 is inserted before the one that fails"
+    );
 
-    // Two valid blocks plus a detection whose value cannot be stored: the
-    // block rows are inserted first, then the detection insert fails.
-    let mut reference = SqliteStore::in_memory().unwrap();
-    reference
-        .initialize(&new_store_meta(
-            &source,
-            &scanner(),
-            &wallet_id(),
-            1,
-            "test",
-        ))
-        .unwrap();
-    sync(
-        &source,
-        &scanner(),
-        &wallet_id(),
-        &mut reference,
-        &SyncOptions::default(),
-    )
-    .unwrap();
-    let mut bad = reference
-        .detections()
-        .unwrap()
-        .into_iter()
-        .find(|d| d.block.height == 2)
-        .unwrap();
-    bad.value_sats = u64::MAX;
+    raw(
+        &db,
+        "CREATE TRIGGER injected_failure BEFORE INSERT ON detected_outputs
+         WHEN NEW.height = 3 BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+    );
+    // Blocks 2 and 3 and the detection at height 2 are written, then the
+    // detection at height 3 aborts.
     assert!(matches!(
-        store.append(&blocks[1..], &[bad]),
-        Err(StoreError::Invariant(m)) if m.contains("does not fit")
+        store.append(&blocks[1..], &in_blocks),
+        Err(StoreError::Backend(m)) if m.contains("injected failure")
     ));
     assert_eq!(store.block_count().unwrap(), 1);
     assert!(store.detections().unwrap().is_empty());
+    assert_eq!(store.checkpoint().unwrap().map(|c| c.height), Some(1));
     drop(store);
 
-    let store = SqliteStore::open(&db.path).unwrap();
-    assert_eq!(store.checkpoint().unwrap().map(|c| c.height), Some(1));
+    // Also on disk, and the same append works once the fault is gone.
+    let mut store = SqliteStore::open(&db.path).unwrap();
     assert_eq!(store.block_count().unwrap(), 1);
+    assert!(store.detections().unwrap().is_empty());
+    raw(&db, "DROP TRIGGER injected_failure;");
+    store.append(&blocks[1..], &in_blocks).unwrap();
+    assert_eq!(store.detections().unwrap(), in_blocks);
+}
+
+/// A rollback that fails half-way (detections already deleted, blocks not)
+/// leaves the store exactly as it was.
+#[test]
+fn failed_rollback_removes_nothing() {
+    let db = TempDb::new("atomic-rollback");
+    let mut store = synced_store(&db);
+    let before = (
+        store.checkpoint().unwrap(),
+        store.block_count().unwrap(),
+        store.detections().unwrap(),
+    );
+    assert_eq!(before.2.len(), 7);
+
+    raw(
+        &db,
+        "CREATE TRIGGER injected_failure BEFORE DELETE ON blocks
+         BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+    );
+    assert!(matches!(
+        store.rollback_to(5),
+        Err(StoreError::Backend(m)) if m.contains("injected failure")
+    ));
+    let now = (
+        store.checkpoint().unwrap(),
+        store.block_count().unwrap(),
+        store.detections().unwrap(),
+    );
+    assert_eq!(now, before, "a failed rollback must not remove detections");
+    drop(store);
+
+    let mut store = SqliteStore::open(&db.path).unwrap();
+    assert_eq!(store.detections().unwrap(), before.2);
+    raw(&db, "DROP TRIGGER injected_failure;");
+    let removed = store.rollback_to(5).unwrap();
+    assert_eq!(removed, before.2[5..]);
+    assert_eq!(store.checkpoint().unwrap().map(|c| c.height), Some(5));
+}
+
+/// A file that was edited or damaged is refused when it is opened, instead of
+/// being synced on top of.
+#[test]
+fn damaged_stores_are_refused_on_open() {
+    let refused = |name: &str, damage: &str, needle: &str| {
+        let db = TempDb::new(name);
+        drop(synced_store(&db));
+        raw(&db, damage);
+        match SqliteStore::open(&db.path) {
+            Err(StoreError::Invariant(m)) => {
+                assert!(
+                    m.contains(needle),
+                    "{name}: `{m}` should mention `{needle}`"
+                )
+            }
+            Err(other) => panic!("{name}: expected an invariant violation, got {other:?}"),
+            Ok(_) => panic!("{name}: a damaged store was opened"),
+        }
+    };
+    // Foreign keys are off on the raw connection, so rows can be removed freely.
+    refused(
+        "gap",
+        "DELETE FROM detected_outputs WHERE height = 4; DELETE FROM blocks WHERE height = 4;",
+        "not contiguous from the birthday",
+    );
+    refused(
+        "head",
+        "DELETE FROM detected_outputs WHERE height = 1; DELETE FROM blocks WHERE height = 1;",
+        "not contiguous from the birthday",
+    );
+    refused(
+        "link",
+        "UPDATE blocks SET prev_hash = (SELECT hash FROM blocks WHERE height = 1) WHERE height = 6;",
+        "not hash-linked",
+    );
+    refused(
+        "self-parent",
+        "UPDATE blocks SET prev_hash = hash WHERE height = 1;",
+        "not hash-linked",
+    );
+    refused(
+        "binding-garbage",
+        "UPDATE meta SET value = '{\"not\": \"a binding\"}' WHERE key = 'store_meta';",
+        "stored binding is not valid",
+    );
+    refused(
+        "binding-mainnet",
+        "UPDATE meta SET value = replace(value, '\"regtest\"', '\"mainnet\"') WHERE key = 'store_meta';",
+        "stored binding is not valid",
+    );
+    refused(
+        "birthday-zero",
+        "UPDATE meta SET value = replace(value, '\"birthday\":1', '\"birthday\":0') WHERE key = 'store_meta';",
+        "birthday 0",
+    );
+    refused(
+        "no-binding",
+        "DELETE FROM meta WHERE key = 'store_meta';",
+        "without a store binding",
+    );
+
+    // The same checks let an undamaged store through, at any length.
+    let db = TempDb::new("intact");
+    let mut store = synced_store(&db);
+    store.rollback_to(0).unwrap();
+    drop(store);
+    assert_eq!(
+        SqliteStore::open(&db.path).unwrap().block_count().unwrap(),
+        0
+    );
+}
+
+/// Rows that cannot be a value this code wrote are an error when read, never
+/// a silently different value.
+#[test]
+fn rows_that_cannot_be_valid_are_errors_when_read() {
+    let unreadable = |name: &str, damage: &str, needle: &str| {
+        let db = TempDb::new(name);
+        drop(synced_store(&db));
+        raw(&db, damage);
+        let store = SqliteStore::open(&db.path).unwrap();
+        match store.detections() {
+            Err(StoreError::Invariant(m)) => {
+                assert!(
+                    m.contains(needle),
+                    "{name}: `{m}` should mention `{needle}`"
+                )
+            }
+            other => panic!("{name}: expected an invariant violation, got {other:?}"),
+        }
+    };
+    unreadable(
+        "row-vout",
+        "UPDATE detected_outputs SET vout = -1 WHERE height = 2;",
+        "stored vout is not valid",
+    );
+    unreadable(
+        "row-vout-large",
+        "UPDATE detected_outputs SET vout = 4294967296 WHERE height = 2;",
+        "stored vout is not valid",
+    );
+    unreadable(
+        "row-value",
+        "UPDATE detected_outputs SET value_sats = -5 WHERE height = 2;",
+        "stored value is not valid",
+    );
+    unreadable(
+        "row-label",
+        "UPDATE detected_outputs SET label = -1 WHERE height = 2;",
+        "stored label is not valid",
+    );
+    unreadable(
+        "row-txid",
+        "UPDATE detected_outputs SET txid = 'zz' WHERE height = 2;",
+        "stored txid is not valid",
+    );
+    unreadable(
+        "row-kind",
+        "UPDATE detected_outputs SET evidence_kind = 'hearsay' WHERE height = 2;",
+        "stored evidence kind is not valid",
+    );
+
+    // A block hash that is not a hash: the checkpoint cannot be read.
+    let db = TempDb::new("row-hash");
+    drop(synced_store(&db));
+    raw(
+        &db,
+        "UPDATE blocks SET hash = 'not-a-hash' WHERE height = 8;",
+    );
+    let store = SqliteStore::open(&db.path).unwrap();
+    assert!(matches!(
+        store.checkpoint(),
+        Err(StoreError::Invariant(m)) if m.contains("stored block hash is not valid")
+    ));
+}
+
+/// A second process holding the write lock for a moment delays a commit; it
+/// does not make it fail, and it cannot interleave with it.
+#[test]
+fn a_briefly_locked_file_delays_the_commit() {
+    let db = TempDb::new("busy");
+    let mut store = synced_store(&db);
+    store.rollback_to(6).unwrap();
+    let blocks = block_refs(7, 8);
+
+    let other = rusqlite::Connection::open(&db.path).unwrap();
+    other.execute_batch("BEGIN IMMEDIATE;").unwrap();
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        other.execute_batch("COMMIT;").unwrap();
+    });
+    let started = std::time::Instant::now();
+    store.append(&blocks, &[]).unwrap();
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(300),
+        "the commit must have waited for the lock"
+    );
+    holder.join().unwrap();
+    assert_eq!(store.checkpoint().unwrap().map(|c| c.height), Some(8));
 }
 
 /// The database holds public data only.

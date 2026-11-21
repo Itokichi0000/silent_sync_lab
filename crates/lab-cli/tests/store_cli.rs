@@ -3,7 +3,10 @@
 //! the refusals that protect the store.
 #![allow(clippy::unwrap_used)] // test code: a panic is the failure report
 
-use lab_testkit::fixture_gen;
+use lab_testkit::{
+    fake_http::{fixture_blocks, FakeCoreRest},
+    fixture_gen,
+};
 use std::{
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
@@ -240,11 +243,13 @@ fn stopped_sync_resumes_from_the_checkpoint() {
         &["--chunk-size", "4", "--max-blocks", "4", "--json"],
     ));
     assert_eq!(half["caught_up"], false);
+    assert_eq!(half["stopped_because"], "max_blocks_reached");
     assert_eq!(checkpoint_height(&db), Some(4));
     assert_eq!(received(&db), expected()[..3].to_vec());
     let text = ok(&sync_args(&db, FIXTURE, &["--to", "6"]));
     assert!(
-        text.contains("resumed from         : 4") && text.contains("caught up            : no"),
+        text.contains("resumed from         : 4")
+            && text.contains("caught up            : no (stopped at --to, below the source tip"),
         "{text}"
     );
     let rest = json(&sync_args(&db, FIXTURE, &["--json"]));
@@ -406,6 +411,12 @@ fn the_store_is_protected_from_misuse() {
     };
     refused(&init_with("0", "x"), "birthday must be at least 1");
     refused(&init_with("1", "  "), "must say why");
+    refused(
+        &init_with("1", "line one\nline two\u{1b}[31m"),
+        "without control characters",
+    );
+    let long: &'static str = Box::leak("x".repeat(501).into_boxed_str());
+    refused(&init_with("1", long), "at most 500 characters");
     assert!(!Path::new(&db).exists());
 
     init(&db, "1");
@@ -432,7 +443,33 @@ fn the_store_is_protected_from_misuse() {
         &sync_args(&db, FIXTURE, &["--chunk-size", "0"]),
         "chunk size",
     );
-    // A different backend than the store was created with.
+    // A limit that is refused is refused before a reorg is acted on: the
+    // other chain is offered together with an impossible target.
+    let fork = temp.fork_fixture();
+    refused(
+        &sync_args(&db, &fork, &["--to", "99"]),
+        "above the source's tip",
+    );
+    refused(
+        &sync_args(&db, &fork, &["--to", "99"]),
+        "the store was not changed",
+    );
+    // A different backend than the store was created with: a reachable one
+    // is refused by the store's binding ...
+    let node = FakeCoreRest::serve(&fixture_gen::generate());
+    refused(
+        &[
+            "sync",
+            "--db",
+            &db,
+            "--backend",
+            "core",
+            "--core-rest-url",
+            &node.url(),
+        ],
+        "the store is bound to a different backend: stored `fixture`, given `bitcoin_core_rest`",
+    );
+    // ... and an unreachable one before that.
     refused(
         &[
             "sync",
@@ -517,4 +554,191 @@ fn the_store_file_contains_no_key_material() {
     for forbidden in ["tweak", "scan_sk", "priv", "seed"] {
         assert!(!text.contains(forbidden), "{forbidden}");
     }
+}
+
+/// The reasons a sync is not caught up are spelled out, not guessed.
+#[test]
+fn the_reason_for_stopping_is_shown() {
+    let temp = Temp::new("stop-reason");
+    let db = temp.db();
+    init(&db, "20");
+    let report = json(&sync_args(&db, FIXTURE, &["--json"]));
+    assert_eq!(report["caught_up"], false);
+    assert_eq!(report["stopped_because"], "birthday_above_tip");
+    assert_eq!(report["blocks_scanned"], 0);
+    let text = ok(&sync_args(&db, FIXTURE, &[]));
+    assert!(
+        text.contains("caught up            : no (the birthday is above the source tip"),
+        "{text}"
+    );
+
+    let other = Temp::new("stop-reason-2");
+    let db = other.db();
+    init(&db, "1");
+    let text = ok(&sync_args(
+        &db,
+        FIXTURE,
+        &["--chunk-size", "2", "--max-blocks", "2"],
+    ));
+    assert!(
+        text.contains("caught up            : no (stopped by --max-blocks"),
+        "{text}"
+    );
+    let done = json(&sync_args(&db, FIXTURE, &["--to", "8", "--json"]));
+    assert_eq!(done["stopped_because"], "caught_up");
+    assert_eq!(done["caught_up"], true);
+}
+
+/// A store file that `lab init` did not finish is named as such.
+#[test]
+fn a_store_file_without_a_binding_is_explained() {
+    let temp = Temp::new("unbound");
+    let db = temp.db();
+    drop(lab_storage::SqliteStore::create(Path::new(&db)).unwrap());
+    for args in [
+        vec!["status", "--db", db.as_str()],
+        vec!["received", "list", "--db", db.as_str()],
+        sync_args(&db, FIXTURE, &[]),
+    ] {
+        let (code, stdout, stderr) = run(&args);
+        assert_eq!(code, Some(1));
+        assert!(
+            stdout.is_empty() && stderr.contains("store file without a binding"),
+            "{args:?}: {stderr}"
+        );
+    }
+}
+
+/// A sync that fails after it changed the store — here: a reorg was rolled
+/// back, one block of the new chain was committed, then the node stopped
+/// serving blocks — prints what it changed before it reports the failure.
+#[test]
+fn an_interrupted_sync_reports_what_it_changed() {
+    let temp = Temp::new("interrupted");
+    let db = temp.db();
+    let main = fixture_gen::generate();
+    let fork = fixture_gen::generate_fork();
+    let mut node = FakeCoreRest::serve(&main);
+    let url = node.url();
+    let core = |extra: &[&'static str]| -> Vec<String> {
+        let mut args: Vec<String> = [
+            "sync",
+            "--db",
+            &db,
+            "--backend",
+            "core",
+            "--core-rest-url",
+            &url,
+        ]
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
+        args.extend(extra.iter().map(|a| a.to_string()));
+        args
+    };
+    let call = |args: Vec<String>| {
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        run(&borrowed)
+    };
+
+    ok(&[
+        "lab",
+        "init",
+        "--db",
+        &db,
+        "--backend",
+        "core",
+        "--core-rest-url",
+        &url,
+        "--birthday",
+        "1",
+        "--birthday-basis",
+        "fixture chain starts at height 1",
+        "--label",
+        "1",
+    ]);
+    let (code, _, stderr) = call(core(&[]));
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(received(&db), expected());
+
+    // Reorg to the fork; the node then fails to serve block 7 of it.
+    node.replace_chain(fork.network, &fixture_blocks(&fork));
+    let block_7 = node.block_path(7);
+    let saved = node.get(&block_7);
+    node.remove(&block_7);
+
+    let (code, stdout, stderr) = call(core(&["--chunk-size", "1", "--json"]));
+    assert_eq!(code, Some(1), "{stderr}");
+    let partial: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(partial["stopped_because"], "error");
+    assert_eq!(partial["caught_up"], false);
+    assert_eq!(partial["reorg"]["fork_height"], 5);
+    assert_eq!(partial["reorg"]["blocks_rolled_back"], 3);
+    assert_eq!(
+        partial["reorg"]["detections_removed"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(partial["blocks_scanned"], 1);
+    assert_eq!(partial["checkpoint"]["height"], 6);
+    assert_eq!(partial["new_detections"].as_array().unwrap().len(), 1);
+    assert!(
+        stderr.contains("sync aborted after changing the store")
+            && stderr.contains("source is unavailable"),
+        "{stderr}"
+    );
+    // The store is exactly what was reported.
+    assert_eq!(checkpoint_height(&db), Some(6));
+    let stored = received(&db);
+    assert_eq!(stored.len(), 6);
+    assert_eq!(stored[..5], expected()[..5]);
+    assert_eq!((stored[5].0, stored[5].3), (6, 33_000));
+
+    // Failing again without changing anything more is a plain refusal.
+    let (code, stdout, stderr) = call(core(&["--chunk-size", "1"]));
+    assert_eq!(code, Some(1));
+    assert!(
+        stdout.is_empty() && stderr.contains("sync aborted: the store was not changed"),
+        "{stderr}"
+    );
+
+    // Text form of an interruption: roll the store onto the main chain again,
+    // failing at its block 8.
+    node.replace_chain(main.network, &fixture_blocks(&main));
+    let block_8 = node.block_path(8);
+    node.remove(&block_8);
+    let (code, stdout, stderr) = call(core(&["--chunk-size", "2"]));
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(
+        stdout.contains("REORG")
+            && stdout.contains("rolled back to height 5 (1 blocks, 1 detections removed)")
+            && stdout.contains("caught up            : no (INTERRUPTED by an error"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("sync aborted after changing the store"),
+        "{stderr}"
+    );
+    // Blocks 6 and 7 of the main chain were committed before block 8 failed.
+    assert_eq!(checkpoint_height(&db), Some(7));
+    assert_eq!(received(&db), expected()[..6].to_vec());
+
+    // Once the node serves everything, the sync completes.
+    node.replace_chain(fork.network, &fixture_blocks(&fork));
+    node.set(&block_7, saved);
+    let (code, stdout, stderr) = call(core(&["--json"]));
+    assert_eq!(code, Some(0), "{stderr}");
+    let done: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(done["reorg"]["blocks_rolled_back"], 2);
+    assert_eq!(done["stopped_because"], "caught_up");
+    assert_eq!(done["caught_up"], true);
+    assert_eq!(done["checkpoint"]["height"], 9);
+    assert_eq!(received(&db).len(), 7); // Nothing is left to report about the reorg afterwards.
+    let (code, stdout, stderr) = call(core(&["--json"]));
+    assert_eq!(code, Some(0), "{stderr}");
+    let again: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(again["reorg"].is_null());
+    assert_eq!(again["blocks_scanned"], 0);
 }

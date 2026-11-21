@@ -64,7 +64,8 @@ pub enum SyncError {
     },
     #[error(
         "source `{backend_id}` is behind the stored checkpoint (source tip {source_tip}, \
-         checkpoint {checkpoint}) on the same chain; refusing to discard scanned blocks"
+         checkpoint {checkpoint}) and shows no competing chain; refusing to discard scanned \
+         blocks. If the chain was reorganized, sync again once the source has caught up"
     )]
     SourceBehindCheckpoint {
         backend_id: String,
@@ -80,6 +81,14 @@ pub enum SyncError {
     ChainMovedDuringSync { height: u32 },
     #[error("chunk size must be at least 1")]
     InvalidChunkSize,
+    /// The call failed after it had already changed the store. `partial`
+    /// reports exactly what was changed (a reorg rollback and/or committed
+    /// chunks); the store is consistent and can be synced again.
+    #[error("sync interrupted after changing the store: {cause}")]
+    Interrupted {
+        cause: Box<SyncError>,
+        partial: Box<SyncReport>,
+    },
 }
 
 impl From<SourceError> for SyncError {
@@ -123,9 +132,29 @@ pub struct SyncReport {
     pub checkpoint: Option<BlockRef>,
     /// The source's tip when the call started.
     pub source_tip: BlockRef,
-    /// Whether the checkpoint reached `source_tip`. `false` after a
-    /// `max_blocks` / `target_height` stop — never because of an error.
+    /// Whether the checkpoint is exactly `source_tip` (same height and hash).
     pub caught_up: bool,
+    /// Why the call stopped where it did.
+    pub stopped_because: StopReason,
+}
+
+/// Why a [`sync`] call stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    /// The checkpoint is the source's tip.
+    CaughtUp,
+    /// `target_height` was reached; it is below the source's tip.
+    TargetReached,
+    /// `max_blocks` was reached.
+    MaxBlocksReached,
+    /// The store's birthday is above the source's tip: nothing to scan yet.
+    BirthdayAboveTip,
+    /// The source's tip changed while syncing; sync again.
+    TipChanged,
+    /// The call failed (only in the partial report of
+    /// [`SyncError::Interrupted`]).
+    Error,
 }
 
 /// Creates the binding for a new store.
@@ -269,6 +298,25 @@ pub fn sync(
     store: &mut dyn SyncStore,
     options: &SyncOptions,
 ) -> Result<SyncReport, SyncError> {
+    sync_with_progress(source, scanner, wallet_id, store, options, &mut |_| {})
+}
+
+/// Like [`sync`], calling `on_commit` with the new checkpoint after every
+/// committed chunk (for progress display).
+///
+/// Error contract: if the call fails *before* changing the store, the plain
+/// error is returned. If it fails *after* changing it — a reorg rollback or
+/// committed chunks — the error is [`SyncError::Interrupted`], carrying a
+/// report of exactly what was changed, so that no rollback or detection is
+/// ever applied without being reported.
+pub fn sync_with_progress(
+    source: &dyn ScanSource,
+    scanner: &ReceiveScanner,
+    wallet_id: &str,
+    store: &mut dyn SyncStore,
+    options: &SyncOptions,
+    on_commit: &mut dyn FnMut(BlockRef),
+) -> Result<SyncReport, SyncError> {
     if options.chunk_size == 0 {
         return Err(SyncError::InvalidChunkSize);
     }
@@ -277,12 +325,7 @@ pub fn sync(
     let backend_id = source.backend_id().to_string();
 
     let source_tip = source.tip()?;
-    let resumed_from = store.checkpoint()?;
-    let reorg = match resumed_from {
-        Some(checkpoint) => resolve_reorg(source, store, &meta, checkpoint, source_tip)?,
-        None => None,
-    };
-
+    // Everything that can be refused without touching the store comes first.
     let target = match options.target_height {
         Some(target) if target > source_tip.height => {
             return Err(SyncError::TargetAboveTip {
@@ -292,6 +335,11 @@ pub fn sync(
         }
         Some(target) => target,
         None => source_tip.height,
+    };
+    let resumed_from = store.checkpoint()?;
+    let reorg = match resumed_from {
+        Some(checkpoint) => resolve_reorg(source, store, &meta, checkpoint, source_tip)?,
+        None => None,
     };
 
     let mut report = SyncReport {
@@ -307,31 +355,98 @@ pub fn sync(
         txs_scanned: 0,
         txs_skipped: BTreeMap::new(),
         new_detections: Vec::new(),
-        checkpoint: store.checkpoint()?,
+        checkpoint: None,
         source_tip,
         caught_up: false,
+        stopped_because: StopReason::CaughtUp,
     };
 
+    let outcome = advance(
+        source,
+        scanner,
+        store,
+        options,
+        &meta,
+        &backend_id,
+        target,
+        &mut report,
+        on_commit,
+    );
+    // The checkpoint as it now is, whatever happened.
+    let checkpoint = store.checkpoint();
+    match (outcome, checkpoint) {
+        (Ok(reason), Ok(checkpoint)) => {
+            report.checkpoint = checkpoint;
+            report.caught_up = checkpoint
+                .is_some_and(|cp| cp.height == source_tip.height && cp.hash == source_tip.hash);
+            report.stopped_because = if report.caught_up {
+                StopReason::CaughtUp
+            } else if reason == StopReason::CaughtUp {
+                // Reached the height of the sampled tip, but on another block.
+                StopReason::TipChanged
+            } else {
+                reason
+            };
+            Ok(report)
+        }
+        (Err(cause), checkpoint) => {
+            let changed = report.reorg.is_some() || report.blocks_scanned > 0;
+            if !changed {
+                return Err(cause);
+            }
+            report.checkpoint = checkpoint.ok().flatten();
+            report.stopped_because = StopReason::Error;
+            Err(SyncError::Interrupted {
+                cause: Box::new(cause),
+                partial: Box::new(report),
+            })
+        }
+        (Ok(_), Err(e)) => Err(e.into()),
+    }
+}
+
+/// The fetch / scan / commit loop. Returns why it stopped.
+#[allow(clippy::too_many_arguments)]
+fn advance(
+    source: &dyn ScanSource,
+    scanner: &ReceiveScanner,
+    store: &mut dyn SyncStore,
+    options: &SyncOptions,
+    meta: &StoreMeta,
+    backend_id: &str,
+    target: u32,
+    report: &mut SyncReport,
+    on_commit: &mut dyn FnMut(BlockRef),
+) -> Result<StopReason, SyncError> {
+    if meta.birthday > report.source_tip.height {
+        return Ok(StopReason::BirthdayAboveTip);
+    }
     loop {
         let checkpoint = store.checkpoint()?;
         let next = match checkpoint {
             Some(cp) => match cp.height.checked_add(1) {
                 Some(next) => next,
-                None => break,
+                None => return Ok(StopReason::CaughtUp),
             },
             None => meta.birthday,
         };
-        if next > target
-            || options
-                .max_blocks
-                .is_some_and(|max| report.blocks_scanned >= max)
+        if next > target {
+            return Ok(if target < report.source_tip.height {
+                StopReason::TargetReached
+            } else {
+                StopReason::CaughtUp
+            });
+        }
+        if options
+            .max_blocks
+            .is_some_and(|max| report.blocks_scanned >= max)
         {
-            break;
+            return Ok(StopReason::MaxBlocksReached);
         }
         let last = target.min(next.saturating_add(options.chunk_size - 1));
 
         let batch = source.fetch_range(next, last)?;
-        check_batch(&backend_id, &batch.blocks, next, last)?;
+        check_batch(backend_id, &batch.blocks, next, last)?;
         if let (Some(cp), Some(first)) = (checkpoint, batch.blocks.first()) {
             if first.block.prev_hash != cp.hash {
                 return Err(SyncError::ChainMovedDuringSync { height: next });
@@ -340,7 +455,7 @@ pub fn sync(
 
         let mut counters = ScanCounters::default();
         let detections = scan_blocks(
-            &backend_id,
+            backend_id,
             meta.chain,
             scanner,
             &batch.blocks,
@@ -357,11 +472,8 @@ pub fn sync(
             *report.txs_skipped.entry(reason).or_default() += count;
         }
         report.new_detections.extend(detections);
+        if let Some(last) = blocks.last() {
+            on_commit(*last);
+        }
     }
-
-    report.checkpoint = store.checkpoint()?;
-    report.caught_up = report
-        .checkpoint
-        .is_some_and(|cp| cp.height == source_tip.height && cp.hash == source_tip.hash);
-    Ok(report)
 }

@@ -11,7 +11,7 @@
 //! key material.
 
 use crate::{
-    bitcoin::OutPoint,
+    bitcoin::{BlockHash, OutPoint},
     models::{BlockRef, DetectedOutput},
     network::ChainIdentity,
 };
@@ -94,7 +94,11 @@ pub trait SyncStore {
 /// * `blocks` is non-empty, ascending by one, each linked to the previous;
 /// * the first block extends the checkpoint (height + 1 and `prev_hash` equal
 ///   to the checkpoint's hash), or sits at the birthday when nothing is stored;
-/// * every detection belongs to one of `blocks` (same height and hash);
+/// * no block is its own parent, and no block hash occurs twice — within the
+///   call or against `block_hash_stored`;
+/// * every detection belongs to one of `blocks` (same height *and* hash), is
+///   on the store's network, came from the store's backend and has a value
+///   every store can represent;
 /// * no output is recorded twice, neither within the call nor against
 ///   `already_stored`.
 pub fn check_append(
@@ -103,6 +107,7 @@ pub fn check_append(
     blocks: &[BlockRef],
     detections: &[DetectedOutput],
     already_stored: &dyn Fn(OutPoint) -> bool,
+    block_hash_stored: &dyn Fn(BlockHash) -> bool,
 ) -> Result<(), StoreError> {
     let meta = meta.ok_or(StoreError::NotInitialized)?;
     let invariant = |msg: String| StoreError::Invariant(msg);
@@ -138,8 +143,36 @@ pub fn check_append(
         }
     }
 
+    let mut hashes = BTreeSet::new();
+    for b in blocks {
+        if b.hash == b.prev_hash {
+            return Err(invariant(format!(
+                "block {} claims to be its own parent",
+                b.height
+            )));
+        }
+        if !hashes.insert(b.hash) || block_hash_stored(b.hash) {
+            return Err(invariant(format!(
+                "block hash {} (height {}) is already recorded",
+                b.hash, b.height
+            )));
+        }
+    }
+
     let mut seen = BTreeSet::new();
     for d in detections {
+        if d.value_sats > MAX_STORABLE_SATS {
+            return Err(invariant(format!(
+                "value of {}:{} does not fit the store",
+                d.txid, d.vout
+            )));
+        }
+        if d.provenance.backend_id != meta.backend_id {
+            return Err(invariant(format!(
+                "detection from backend `{}` in a store bound to `{}`",
+                d.provenance.backend_id, meta.backend_id
+            )));
+        }
         if d.network != meta.chain.network() {
             return Err(invariant(format!(
                 "detection on {} in a {} store",
@@ -161,7 +194,14 @@ pub fn check_append(
     Ok(())
 }
 
-/// Canonical order of detections in every store.
+/// Largest output value a store accepts (what a signed 64-bit column holds;
+/// far above the 21 million coin supply).
+pub const MAX_STORABLE_SATS: u64 = i64::MAX as u64;
+
+/// Canonical order of detections in every store: by height, then by `Txid`'s
+/// own ordering (its internal byte order — *not* the order of the displayed
+/// hex string), then by output index. Every implementation must return
+/// detections in exactly this order.
 pub fn sort_detections(detections: &mut [DetectedOutput]) {
     detections.sort_by_key(|d| (d.block.height, d.txid, d.vout));
 }
@@ -235,6 +275,7 @@ impl SyncStore for MemoryStore {
                     .iter()
                     .any(|d| OutPoint::new(d.txid, d.vout) == outpoint)
             },
+            &|hash| self.blocks.iter().any(|b| b.hash == hash),
         )?;
         if let Some(remaining) = self.appends_before_failure.as_mut() {
             if *remaining == 0 {
@@ -262,10 +303,45 @@ impl SyncStore for MemoryStore {
     }
 
     fn detections(&self) -> Result<Vec<DetectedOutput>, StoreError> {
+        if self.meta.is_none() {
+            return Err(StoreError::NotInitialized);
+        }
         Ok(self.detections.clone())
     }
 
     fn block_count(&self) -> Result<u64, StoreError> {
         Ok(self.blocks.len() as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SCANNER_VERSION;
+
+    /// The scanner version names the upstream revision the workspace actually
+    /// builds against: bumping the `bdk_sp` pin without bumping the version
+    /// (which forces stores to be rescanned) fails here.
+    #[test]
+    fn scanner_version_names_the_pinned_upstream_revision() {
+        let manifest = include_str!("../../../Cargo.toml");
+        let pinned: Vec<&str> = manifest
+            .lines()
+            .filter(|line| line.trim_start().starts_with("bdk_sp"))
+            .filter_map(|line| line.split("rev = \"").nth(1))
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        let [rev] = pinned[..] else {
+            panic!("expected exactly one pinned bdk_sp revision, found {pinned:?}");
+        };
+        assert_eq!(rev.len(), 40, "the pin must be a full commit id");
+        let (version, upstream) = SCANNER_VERSION
+            .split_once("+bdk_sp@")
+            .expect("version has an upstream part");
+        assert_eq!(version, concat!("sync-core/", env!("CARGO_PKG_VERSION")));
+        assert_eq!(upstream.len(), 12);
+        assert!(
+            rev.starts_with(upstream),
+            "SCANNER_VERSION says bdk_sp@{upstream}, the workspace pins {rev}"
+        );
     }
 }

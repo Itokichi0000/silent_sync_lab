@@ -41,12 +41,17 @@ fn failed_commit_loses_only_the_uncommitted_chunk() {
             .unwrap();
         store.fail_appends_after(good_commits);
         let result = sync(&source, &scanner, &keys.wallet_id(), &mut store, &options);
-        assert_eq!(
-            result,
-            Err(SyncError::Store(StoreError::Backend(
-                "injected failure".to_string()
-            )))
-        );
+        let injected = SyncError::Store(StoreError::Backend("injected failure".to_string()));
+        match result {
+            Err(e) if good_commits == 0 => assert_eq!(e, injected),
+            Err(SyncError::Interrupted { cause, partial }) => {
+                assert_eq!(*cause, injected);
+                assert_eq!(partial.blocks_scanned, u64::from(good_commits * 3));
+                assert_eq!(partial.checkpoint.map(|c| c.height), Some(good_commits * 3));
+                assert_eq!(partial.new_detections, store.detections().unwrap());
+            }
+            other => panic!("expected the injected failure, got {other:?}"),
+        }
         let checkpoint = store.checkpoint().unwrap().map(|c| c.height);
         assert_eq!(checkpoint, (good_commits > 0).then_some(good_commits * 3));
         assert!(store

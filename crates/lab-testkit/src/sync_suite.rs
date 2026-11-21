@@ -11,14 +11,16 @@ use crate::{
     test_source::TestSource,
 };
 use sync_core::{
-    bitcoin::{OutPoint, Txid},
+    bitcoin::{hashes::Hash as _, OutPoint, Txid},
     engine::{scan_range, ScanError},
     models::{BlockRef, DetectedOutput},
     network::{ChainIdentity, LabNetwork},
     protocol::ReceiveScanner,
     source::{ScanSource, SourceError},
     store::{StoreError, SyncStore, SCANNER_VERSION},
-    sync::{new_store_meta, sync, SyncError, SyncOptions, SyncReport},
+    sync::{
+        new_store_meta, sync, sync_with_progress, StopReason, SyncError, SyncOptions, SyncReport,
+    },
 };
 
 pub type StoreFactory<'a> = &'a dyn Fn() -> Box<dyn SyncStore>;
@@ -238,18 +240,35 @@ pub fn source_outage_leaves_a_resumable_store(new_store: StoreFactory<'_>) {
             store.as_mut(),
             &options(2),
         );
-        assert!(
+        let outage = |e: &SyncError| {
             matches!(
-                result,
-                Err(SyncError::Scan(ScanError::Source(
-                    SourceError::Unavailable(_)
-                )))
-            ),
-            "{result:?}"
-        );
+                e,
+                SyncError::Scan(ScanError::Source(SourceError::Unavailable(_)))
+            )
+        };
+        let committed = healthy_fetches * 2;
+        match result {
+            // Nothing was committed: the plain error.
+            Err(ref e) if healthy_fetches == 0 => assert!(outage(e), "{e:?}"),
+            // Chunks were committed before the outage: they are reported.
+            Err(SyncError::Interrupted { cause, partial }) => {
+                assert!(healthy_fetches > 0 && outage(&cause), "{cause:?}");
+                assert_eq!(partial.stopped_because, StopReason::Error);
+                assert!(!partial.caught_up);
+                assert_eq!(partial.blocks_scanned, u64::from(committed));
+                assert_eq!(partial.checkpoint.map(|c| c.height), Some(committed));
+                assert_eq!(partial.reorg, None);
+                assert_eq!(
+                    partial.new_detections,
+                    reference(source.main_chain(), 1, committed),
+                    "the partial report lists exactly what was committed"
+                );
+            }
+            other => panic!("expected an outage after {healthy_fetches} fetches, got {other:?}"),
+        }
         assert_eq!(
             store.checkpoint().expect("checkpoint").map(|c| c.height),
-            (healthy_fetches > 0).then_some(healthy_fetches * 2)
+            (healthy_fetches > 0).then_some(committed)
         );
         assert_store_matches(store.as_ref(), source.main_chain(), 1);
 
@@ -265,6 +284,245 @@ pub fn source_outage_leaves_a_resumable_store(new_store: StoreFactory<'_>) {
             reference(source.main_chain(), 1, MAIN_TIP)
         );
     }
+}
+
+/// A reorg rollback changes the store before anything is fetched. If the call
+/// then fails, the rollback (and the detections it removed) must still be
+/// reported: nothing is ever removed silently.
+pub fn a_failure_after_a_reorg_rollback_still_reports_the_reorg(new_store: StoreFactory<'_>) {
+    let source = TestSource::new();
+    let mut store = new_store();
+    init(store.as_mut(), &source, 1);
+    run(&source, store.as_mut(), &SyncOptions::default());
+    let old_tip = store.checkpoint().expect("checkpoint").expect("synced");
+    let on_main = store.detections().expect("detections");
+    let removed: Vec<_> = on_main
+        .iter()
+        .filter(|d| d.block.height > FORK_HEIGHT)
+        .cloned()
+        .collect();
+    assert_eq!(removed.len(), 2);
+
+    // The chain reorganizes, and the source fails `healthy` fetches later.
+    for healthy in 0..2u32 {
+        let mut store = new_store();
+        init(store.as_mut(), &source, 1);
+        source.on_fork.set(false);
+        source.fetches_left.set(None);
+        run(&source, store.as_mut(), &SyncOptions::default());
+
+        source.on_fork.set(true);
+        source.fetches_left.set(Some(healthy));
+        let result = sync(
+            &source,
+            &scanner(),
+            &wallet_id(),
+            store.as_mut(),
+            &options(2),
+        );
+        let Err(SyncError::Interrupted { cause, partial }) = result else {
+            panic!("expected an interrupted sync, got {result:?}");
+        };
+        assert!(
+            matches!(
+                *cause,
+                SyncError::Scan(ScanError::Source(SourceError::Unavailable(_)))
+            ),
+            "{cause:?}"
+        );
+        let reorg = partial.reorg.clone().expect("the rollback is reported");
+        assert_eq!(reorg.abandoned_checkpoint, old_tip);
+        assert_eq!(reorg.fork_height, FORK_HEIGHT);
+        assert_eq!(reorg.detections_removed, removed);
+        assert_eq!(partial.blocks_scanned, u64::from(healthy * 2));
+        assert_eq!(partial.stopped_because, StopReason::Error);
+        assert_eq!(
+            partial.checkpoint.map(|c| c.height),
+            Some(FORK_HEIGHT + healthy * 2)
+        );
+        // The store is what the report says: the new chain up to there.
+        assert_store_matches(store.as_ref(), source.fork_chain(), 1);
+        assert_eq!(
+            store.checkpoint().expect("c").map(|c| c.height),
+            Some(FORK_HEIGHT + healthy * 2)
+        );
+
+        // The next call has no reorg left to report and finishes the job.
+        source.fetches_left.set(None);
+        let report = run(&source, store.as_mut(), &options(2));
+        assert_eq!(report.reorg, None);
+        assert!(report.caught_up);
+        assert_store_matches(store.as_ref(), source.fork_chain(), 1);
+    }
+}
+
+/// Every way a call can end without being caught up is named.
+pub fn the_reason_a_sync_stopped_is_reported(new_store: StoreFactory<'_>) {
+    let source = TestSource::new();
+    let mut store = new_store();
+    init(store.as_mut(), &source, 3);
+
+    // The source has not reached the birthday yet.
+    source.visible_tip.set(Some(2));
+    let report = run(&source, store.as_mut(), &SyncOptions::default());
+    assert_eq!(report.stopped_because, StopReason::BirthdayAboveTip);
+    assert!(!report.caught_up);
+    assert_eq!((report.blocks_scanned, report.checkpoint), (0, None));
+    source.visible_tip.set(None);
+
+    let report = run(
+        &source,
+        store.as_mut(),
+        &SyncOptions {
+            target_height: Some(4),
+            ..SyncOptions::default()
+        },
+    );
+    assert_eq!(report.stopped_because, StopReason::TargetReached);
+    assert!(!report.caught_up);
+
+    let report = run(
+        &source,
+        store.as_mut(),
+        &SyncOptions {
+            chunk_size: 1,
+            max_blocks: Some(1),
+            target_height: None,
+        },
+    );
+    assert_eq!(report.stopped_because, StopReason::MaxBlocksReached);
+    assert_eq!(report.checkpoint.map(|c| c.height), Some(5));
+
+    // A target equal to the tip is "caught up", not "target reached".
+    let report = run(
+        &source,
+        store.as_mut(),
+        &SyncOptions {
+            target_height: Some(MAIN_TIP),
+            ..SyncOptions::default()
+        },
+    );
+    assert_eq!(report.stopped_because, StopReason::CaughtUp);
+    assert!(report.caught_up);
+    // --max-blocks that is exactly what was left is also "caught up".
+    let mut exact = new_store();
+    init(exact.as_mut(), &source, 1);
+    let report = run(
+        &source,
+        exact.as_mut(),
+        &SyncOptions {
+            chunk_size: 4,
+            max_blocks: Some(u64::from(MAIN_TIP)),
+            target_height: None,
+        },
+    );
+    assert_eq!(report.stopped_because, StopReason::CaughtUp);
+
+    // The tip moved to another block of the same height while syncing: the
+    // call reaches that height on blocks that are not the sampled tip.
+    let mut raced = new_store();
+    init(raced.as_mut(), &source, FORK_HEIGHT + 1);
+    source.visible_tip.set(Some(MAIN_TIP));
+    source.fetch_from_fork.set(Some(true));
+    let report = run(&source, raced.as_mut(), &SyncOptions::default());
+    assert_eq!(report.stopped_because, StopReason::TipChanged);
+    assert!(!report.caught_up);
+    assert_eq!(report.checkpoint.map(|c| c.height), Some(MAIN_TIP));
+    assert_ne!(report.checkpoint, Some(report.source_tip));
+    source.fetch_from_fork.set(None);
+    source.visible_tip.set(None);
+}
+
+/// The progress callback sees every commit, in order, and the counters of the
+/// chunks add up to those of one stateless scan.
+pub fn progress_and_counters_cover_every_chunk(new_store: StoreFactory<'_>) {
+    let source = TestSource::new();
+    let regtest = ChainIdentity::for_network(LabNetwork::Regtest);
+    let whole = scan_range(source.main_chain(), &scanner(), regtest, 1, MAIN_TIP).expect("scan");
+    assert!(
+        whole.txs_skipped.len() >= 2 && whole.txs_skipped.values().sum::<u64>() > 2,
+        "the fixture must exercise several skip reasons: {:?}",
+        whole.txs_skipped
+    );
+
+    for chunk in [1, 3, 8] {
+        let mut store = new_store();
+        init(store.as_mut(), &source, 1);
+        let mut commits = Vec::new();
+        let report = sync_with_progress(
+            &source,
+            &scanner(),
+            &wallet_id(),
+            store.as_mut(),
+            &options(chunk),
+            &mut |checkpoint: BlockRef| commits.push(checkpoint.height),
+        )
+        .expect("sync");
+        let expected: Vec<u32> = (1..=MAIN_TIP)
+            .filter(|h| h % chunk == 0 || *h == MAIN_TIP)
+            .collect();
+        assert_eq!(commits, expected, "chunk size {chunk}");
+        assert_eq!(report.txs_skipped, whole.txs_skipped, "chunk size {chunk}");
+        assert_eq!(
+            (report.txs_seen, report.txs_scanned, report.blocks_scanned),
+            (whole.txs_seen, whole.txs_scanned, whole.blocks_scanned)
+        );
+    }
+}
+
+/// Stores return detections in one canonical order — by height, then by
+/// `Txid`'s own ordering, then by output index — whatever order they were
+/// appended in. The order of a txid's hex text is the reverse-byte order and
+/// must not leak through.
+pub fn detections_come_back_in_the_canonical_order(new_store: StoreFactory<'_>) {
+    let source = TestSource::new();
+    let chain = source.main_chain();
+    let block = |h: u32| chain.block_ref(h).expect("block");
+    let template = reference(chain, 1, MAIN_TIP)
+        .into_iter()
+        .next()
+        .expect("a detection");
+
+    // `low` sorts first as a `Txid` but last as hex text.
+    let mut bytes = [0u8; 32];
+    bytes[0] = 0x01;
+    bytes[31] = 0xff;
+    let low = Txid::from_byte_array(bytes);
+    bytes[0] = 0x02;
+    bytes[31] = 0x00;
+    let high = Txid::from_byte_array(bytes);
+    assert!(low < high && low.to_string() > high.to_string());
+
+    let made = |height: u32, txid: Txid, vout: u32| DetectedOutput {
+        block: block(height),
+        txid,
+        vout,
+        ..template.clone()
+    };
+    let mut store = new_store();
+    init(store.as_mut(), &source, 1);
+    store
+        .append(
+            &[block(1), block(2)],
+            &[
+                made(2, high, 0),
+                made(2, low, 10),
+                made(1, high, 1),
+                made(2, low, 9),
+                made(1, low, 0),
+            ],
+        )
+        .expect("append");
+    let canonical = vec![
+        made(1, low, 0),
+        made(1, high, 1),
+        made(2, low, 9),
+        made(2, low, 10),
+        made(2, high, 0),
+    ];
+    assert_eq!(store.detections().expect("detections"), canonical);
+    assert_eq!(store.rollback_to(1).expect("rollback"), canonical[2..]);
+    assert_eq!(store.rollback_to(0).expect("rollback"), canonical[..2]);
 }
 
 /// T08: a store rebuilt from a birthday finds exactly what a full rescan finds
@@ -690,6 +948,7 @@ pub fn stores_reject_inconsistent_appends(new_store: StoreFactory<'_>) {
         Err(StoreError::NotInitialized)
     );
     assert_eq!(store.rollback_to(0).err(), Some(StoreError::NotInitialized));
+    assert_eq!(store.detections().err(), Some(StoreError::NotInitialized));
     let mut zero = new_store();
     let mut meta = new_store_meta(&source, &scanner(), &wallet_id(), 0, "x");
     invariant(zero.initialize(&meta), "birthday must be at least 1");
@@ -726,10 +985,50 @@ pub fn stores_reject_inconsistent_appends(new_store: StoreFactory<'_>) {
     unlinked.prev_hash = fork_block.hash;
     invariant(store.append(&[block(3), unlinked], &[]), "does not follow");
 
+    // A block hash is recorded once, and no block is its own parent.
+    let mut own_parent = block(3);
+    own_parent.hash = own_parent.prev_hash;
+    invariant(store.append(&[own_parent], &[]), "its own parent");
+    let mut stored_again = block(4);
+    stored_again.hash = block(2).hash;
+    invariant(
+        store.append(&[block(3), stored_again], &[]),
+        "is already recorded",
+    );
+    let mut repeated = block(5);
+    repeated.hash = block(3).hash;
+    invariant(
+        store.append(&[block(3), block(4), repeated], &[]),
+        "is already recorded",
+    );
+
     // Detections must belong to the appended blocks, once.
     invariant(
         store.append(&[block(3)], &at(5)),
         "which is not being appended",
+    );
+    // ... by hash, not just by height.
+    let mut other_block = at(3);
+    other_block[0].block.hash = fork_block.hash;
+    invariant(
+        store.append(&[block(3)], &other_block),
+        "which is not being appended",
+    );
+    // A value no store can represent, and a detection from another backend.
+    let mut huge = at(3);
+    huge[0].value_sats = u64::MAX;
+    invariant(store.append(&[block(3)], &huge), "does not fit the store");
+    let mut at_limit = at(3);
+    at_limit[0].value_sats = sync_core::store::MAX_STORABLE_SATS + 1;
+    invariant(
+        store.append(&[block(3)], &at_limit),
+        "does not fit the store",
+    );
+    let mut other_backend = at(3);
+    other_backend[0].provenance.backend_id = "something_else".to_string();
+    invariant(
+        store.append(&[block(3)], &other_backend),
+        "detection from backend `something_else`",
     );
     let mut twice = at(3);
     twice.extend(at(3));
@@ -779,7 +1078,11 @@ pub fn stores_reject_inconsistent_appends(new_store: StoreFactory<'_>) {
     assert_eq!(store.block_count().expect("n"), 0);
     // After a full rollback the birthday rule applies again.
     invariant(store.append(&[block(3)], &[]), "must be the birthday 2");
-    store.append(&[block(2)], &at(2)).expect("append");
+    // The largest representable value is accepted and read back unchanged.
+    let mut largest = at(2);
+    largest[0].value_sats = sync_core::store::MAX_STORABLE_SATS;
+    store.append(&[block(2)], &largest).expect("append");
+    assert_eq!(store.detections().expect("d"), largest);
 }
 
 /// Reference helper for implementation-specific tests.
@@ -800,6 +1103,10 @@ macro_rules! sync_store_suite {
             syncing_again_changes_nothing,
             interrupted_sync_resumes_without_loss_or_duplicates,
             source_outage_leaves_a_resumable_store,
+            a_failure_after_a_reorg_rollback_still_reports_the_reorg,
+            the_reason_a_sync_stopped_is_reported,
+            progress_and_counters_cover_every_chunk,
+            detections_come_back_in_the_canonical_order,
             birthday_bounds_what_a_restored_wallet_finds,
             reorg_rolls_back_and_rescans,
             reorg_reaching_below_the_birthday_rescans_from_the_birthday,

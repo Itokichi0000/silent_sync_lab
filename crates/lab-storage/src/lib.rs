@@ -11,13 +11,21 @@
 //! Crash safety: `append` and `rollback_to` each run in one SQLite
 //! transaction, so a process killed at any point leaves either the previous
 //! or the new state on disk.
+//!
+//! One process per store file is the supported use. Writes take the SQLite
+//! write lock up front and wait a few seconds for it, so a second process
+//! either waits or fails with a clean error; it cannot interleave a commit.
+//!
+//! A file is checked when it is opened: a binding that cannot be read, or a
+//! block chain that is not contiguous and hash-linked from the birthday, is
+//! refused rather than synced on top of.
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
-use std::path::Path;
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use std::{path::Path, time::Duration};
 use sync_core::{
     bitcoin::{BlockHash, OutPoint, Txid},
     models::{BlockRef, DetectedOutput, EvidenceKind, MatchProvenance},
-    store::{check_append, StoreError, StoreMeta, SyncStore},
+    store::{check_append, sort_detections, StoreError, StoreMeta, SyncStore},
 };
 
 /// Bumped whenever the table layout changes. Older files are refused.
@@ -93,6 +101,7 @@ impl SqliteStore {
         Self::configure(&conn)?;
         let store = Self { conn };
         store.check_schema_version()?;
+        store.check_integrity()?;
         Ok(store)
     }
 
@@ -110,9 +119,69 @@ impl SqliteStore {
     }
 
     fn configure(conn: &Connection) -> Result<(), StoreError> {
+        // A second process on the same file waits instead of failing at once.
+        conn.busy_timeout(Duration::from_secs(10))
+            .map_err(backend)?;
         // Durability over speed: a committed chunk must survive a crash.
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA synchronous = FULL;")
             .map_err(backend)
+    }
+
+    /// Checks, when a file is opened, that what it holds can be a store this
+    /// code wrote: a readable binding, and a block chain that starts at the
+    /// birthday and is contiguous and hash-linked up to the checkpoint.
+    fn check_integrity(&self) -> Result<(), StoreError> {
+        let meta = read_meta(&self.conn)?;
+        let (count, min, max): (i64, Option<i64>, Option<i64>) = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*), MIN(height), MAX(height) FROM blocks",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(backend)?;
+        let Some(meta) = meta else {
+            // Not initialized yet: there must be nothing else either.
+            return if count == 0 {
+                Ok(())
+            } else {
+                Err(StoreError::Invariant(
+                    "stored blocks without a store binding".to_string(),
+                ))
+            };
+        };
+        if let (Some(min), Some(max)) = (min, max) {
+            if min != i64::from(meta.birthday) || max - min + 1 != count {
+                return Err(StoreError::Invariant(format!(
+                    "stored chain is not contiguous from the birthday {} (heights {min}..={max}, \
+                     {count} blocks)",
+                    meta.birthday
+                )));
+            }
+        }
+        let broken: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM blocks b JOIN blocks p ON p.height = b.height - 1 \
+                 WHERE p.hash != b.prev_hash",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(backend)?;
+        let self_parent: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM blocks WHERE hash = prev_hash",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(backend)?;
+        if broken != 0 || self_parent != 0 {
+            return Err(StoreError::Invariant(
+                "stored chain is not hash-linked".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     fn check_schema_version(&self) -> Result<(), StoreError> {
@@ -152,8 +221,13 @@ fn read_meta(conn: &Connection) -> Result<Option<StoreMeta>, StoreError> {
         })
         .optional()
         .map_err(backend)?;
-    json.map(|j| serde_json::from_str(&j).map_err(|_| corrupt("binding")))
-        .transpose()
+    let meta: Option<StoreMeta> = json
+        .map(|j| serde_json::from_str(&j).map_err(|_| corrupt("binding")))
+        .transpose()?;
+    if meta.as_ref().is_some_and(|m| m.birthday == 0) {
+        return Err(corrupt("binding (birthday 0)"));
+    }
+    Ok(meta)
 }
 
 fn parse_hash(text: String) -> Result<BlockHash, StoreError> {
@@ -208,7 +282,7 @@ fn read_detections(
         "SELECT d.txid, d.vout, d.height, b.hash, b.prev_hash, d.value_sats, d.label, \
                 d.backend_id, d.evidence_kind \
          FROM detected_outputs d JOIN blocks b ON b.height = d.height \
-         WHERE {filter} ORDER BY d.height, d.txid, d.vout"
+         WHERE {filter}"
     );
     let mut statement = conn.prepare(&sql).map_err(backend)?;
     type Row = (
@@ -240,7 +314,8 @@ fn read_detections(
         .collect::<Result<Vec<Row>, _>>()
         .map_err(backend)?;
 
-    rows.into_iter()
+    let mut detections = rows
+        .into_iter()
         .map(
             |(txid, vout, height, hash, prev_hash, value, label, backend_id, kind)| {
                 Ok(DetectedOutput {
@@ -259,7 +334,11 @@ fn read_detections(
                 })
             },
         )
-        .collect()
+        .collect::<Result<Vec<DetectedOutput>, StoreError>>()?;
+    // The canonical order is defined on `Txid`, not on its hex text, so it is
+    // applied here rather than in SQL.
+    sort_detections(&mut detections);
+    Ok(detections)
 }
 
 fn insert_all(
@@ -316,7 +395,10 @@ impl SyncStore for SqliteStore {
             ));
         }
         let json = serde_json::to_string(meta).map_err(backend)?;
-        let tx = self.conn.transaction().map_err(backend)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(backend)?;
         if read_meta(&tx)?.is_some() {
             return Err(StoreError::AlreadyInitialized);
         }
@@ -356,7 +438,10 @@ impl SyncStore for SqliteStore {
         blocks: &[BlockRef],
         detections: &[DetectedOutput],
     ) -> Result<(), StoreError> {
-        let tx = self.conn.transaction().map_err(backend)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(backend)?;
         let meta = read_meta(&tx)?;
         let checkpoint = read_checkpoint(&tx)?;
         // Collected up front so the closure below cannot fail.
@@ -374,15 +459,37 @@ impl SyncStore for SqliteStore {
                 stored.insert(OutPoint::new(d.txid, d.vout));
             }
         }
-        check_append(meta.as_ref(), checkpoint, blocks, detections, &|outpoint| {
-            stored.contains(&outpoint)
-        })?;
+        let mut stored_hashes = std::collections::BTreeSet::new();
+        for b in blocks {
+            let exists: Option<i64> = tx
+                .query_row(
+                    "SELECT 1 FROM blocks WHERE hash = ?1",
+                    params![b.hash.to_string()],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(backend)?;
+            if exists.is_some() {
+                stored_hashes.insert(b.hash);
+            }
+        }
+        check_append(
+            meta.as_ref(),
+            checkpoint,
+            blocks,
+            detections,
+            &|outpoint| stored.contains(&outpoint),
+            &|hash| stored_hashes.contains(&hash),
+        )?;
         insert_all(&tx, blocks, detections)?;
         tx.commit().map_err(backend)
     }
 
     fn rollback_to(&mut self, height: u32) -> Result<Vec<DetectedOutput>, StoreError> {
-        let tx = self.conn.transaction().map_err(backend)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(backend)?;
         let meta = read_meta(&tx)?.ok_or(StoreError::NotInitialized)?;
         let removed = read_detections(&tx, "d.height > ?1", i64::from(height), &meta)?;
         tx.execute(

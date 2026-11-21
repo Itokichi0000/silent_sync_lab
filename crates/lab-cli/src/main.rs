@@ -29,7 +29,7 @@ use sync_core::{
         ScanSource,
     },
     store::{StoreMeta, SyncStore},
-    sync::{new_store_meta, sync, SyncOptions, SyncReport},
+    sync::{new_store_meta, sync_with_progress, StopReason, SyncError, SyncOptions, SyncReport},
     verify::{cross_check, VerificationReport},
     EXPERIMENTAL_BANNER,
 };
@@ -693,6 +693,12 @@ fn lab_init(
             "`--birthday-basis` must say why the birthday height is safe",
         ));
     }
+    if birthday_basis.chars().any(char::is_control) || birthday_basis.chars().count() > 500 {
+        return Err(Failure::error(
+            "`--birthday-basis` must be one line of at most 500 characters without control \
+             characters",
+        ));
+    }
     let source = open_source(network, source_args)?;
     let keys = lab_keys::lab_receiver_keys().map_err(Failure::error)?;
     let scanner = ReceiveScanner::new(&keys, labels).map_err(fail)?;
@@ -728,7 +734,8 @@ fn open_store(network: LabNetwork, db: &Path) -> Result<(SqliteStore, StoreMeta)
     let store = SqliteStore::open(db).map_err(fail)?;
     let meta = store.meta().map_err(fail)?.ok_or_else(|| {
         Failure::error(format!(
-            "{} is not initialized; run `lab init`",
+            "{} is a store file without a binding (an interrupted `lab init`?); delete it and \
+             run `lab init` again",
             db.display()
         ))
     })?;
@@ -750,70 +757,52 @@ fn sync_command(network: LabNetwork, args: SyncArgs) -> Result<(), Failure> {
     let extra: Vec<u32> = meta.labels.iter().copied().filter(|&m| m != 0).collect();
     let scanner = ReceiveScanner::new(&keys, &extra).map_err(fail)?;
     let wallet_id = keys.wallet_id();
-    let aborted = |e: sync_core::sync::SyncError| {
-        Failure::error(format!(
-            "{e}\nsync aborted: the store keeps what was committed before the error and can be resumed"
-        ))
-    };
-
     eprintln!(
         "syncing {} on `{}` ({network}) from the stored checkpoint",
         args.db.db.display(),
         source.backend_id()
     );
-    let mut options = SyncOptions {
+    let options = SyncOptions {
         chunk_size: args.chunk_size,
         target_height: args.to,
         max_blocks: args.max_blocks,
     };
-
-    // One `sync` call per chunk when a delay is requested, so that the pause
-    // sits between commits. The reports are merged.
-    let report = if args.chunk_delay_ms == 0 {
-        sync(source.as_ref(), &scanner, &wallet_id, &mut store, &options).map_err(aborted)?
-    } else {
-        let mut merged: Option<SyncReport> = None;
-        let mut remaining = args.max_blocks;
-        loop {
-            options.max_blocks =
-                Some(u64::from(args.chunk_size).min(remaining.unwrap_or(u64::MAX)));
-            let step = sync(source.as_ref(), &scanner, &wallet_id, &mut store, &options)
-                .map_err(aborted)?;
-            if let Some(cp) = step.checkpoint {
-                eprintln!("committed up to height {}", cp.height);
-            }
-            let done = step.caught_up || step.blocks_scanned == 0;
-            if let Some(left) = remaining.as_mut() {
-                *left = left.saturating_sub(step.blocks_scanned);
-            }
-            let stop = done || remaining == Some(0);
-            merged = Some(match merged {
-                None => step,
-                Some(mut all) => {
-                    all.blocks_scanned += step.blocks_scanned;
-                    all.txs_seen += step.txs_seen;
-                    all.txs_scanned += step.txs_scanned;
-                    for (reason, count) in step.txs_skipped {
-                        *all.txs_skipped.entry(reason).or_default() += count;
-                    }
-                    all.new_detections.extend(step.new_detections);
-                    all.checkpoint = step.checkpoint;
-                    all.caught_up = step.caught_up;
-                    all
-                }
-            });
-            if stop {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(args.chunk_delay_ms));
+    let delay = Duration::from_millis(args.chunk_delay_ms);
+    let mut on_commit = |checkpoint: sync_core::models::BlockRef| {
+        eprintln!("committed up to height {}", checkpoint.height);
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
         }
-        merged.ok_or_else(|| Failure::error("sync made no step"))?
+    };
+    let show = |report: &SyncReport| {
+        if args.json {
+            emit_json(report)
+        } else {
+            emit(&render_sync_report(report))
+        }
     };
 
-    if args.json {
-        emit_json(&report)
-    } else {
-        emit(&render_sync_report(&report))
+    match sync_with_progress(
+        source.as_ref(),
+        &scanner,
+        &wallet_id,
+        &mut store,
+        &options,
+        &mut on_commit,
+    ) {
+        Ok(report) => show(&report),
+        // The store was changed before the error: what was changed (a reorg
+        // rollback, committed chunks) is reported before the failure is.
+        Err(SyncError::Interrupted { cause, partial }) => {
+            show(&partial)?;
+            Err(Failure::error(format!(
+                "{cause}\nsync aborted after changing the store: the changes listed above were \
+                 committed; the store is consistent and can be synced again"
+            )))
+        }
+        Err(e) => Err(Failure::error(format!(
+            "{e}\nsync aborted: the store was not changed"
+        ))),
     }
 }
 
@@ -988,10 +977,17 @@ fn render_sync_report(report: &SyncReport) -> String {
         ));
         line(format!(
             "caught up            : {}",
-            if report.caught_up {
-                "yes"
-            } else {
-                "no (stopped by --to / --max-blocks; run sync again to continue)"
+            match report.stopped_because {
+                StopReason::CaughtUp => "yes",
+                StopReason::TargetReached =>
+                    "no (stopped at --to, below the source tip; run sync again to continue)",
+                StopReason::MaxBlocksReached =>
+                    "no (stopped by --max-blocks; run sync again to continue)",
+                StopReason::BirthdayAboveTip =>
+                    "no (the birthday is above the source tip: nothing to scan yet)",
+                StopReason::TipChanged =>
+                    "no (the source tip changed while syncing; run sync again)",
+                StopReason::Error => "no (INTERRUPTED by an error; see the error message)",
             }
         ));
         line(format!(
