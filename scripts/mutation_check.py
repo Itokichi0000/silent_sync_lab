@@ -251,7 +251,6 @@ muts = [
     ("wallet: RPC to a non-loopback address accepted", WR, ".filter(|address| address.ip().is_loopback() && *address.ip() != Ipv4Addr::UNSPECIFIED)", ".filter(|_| true)"),
     ("wallet: seed of any length accepted", WK, "        if !(16..=64).contains(&seed.len()) {", "        if false {"),
     ("wallet cli: store of another seed accepted", WC, "    if wallet.scanner().wallet_id() != meta.wallet_id {", "    if false {"),
-    ("wallet cli: change label handed out", WC, "            if label == Some(0) {", "            if false {"),
     ("sync: zero chunk size accepted", S, "if options.chunk_size == 0 {", "if false {"),
     ("sync: binding chain unchecked", S, "if meta.chain != chain {", "if false {"),
     ("sync: binding wallet unchecked", S, "if meta.wallet_id != wallet_id {", "if false {"),

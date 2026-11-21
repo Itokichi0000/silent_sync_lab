@@ -500,8 +500,8 @@ SDK の API に関する 4 つの判断（出力ごとの tweak は渡さない�
   - W2（支出のためのデータ）: `crates/silent-sync/src/spend.rs`（feature `spend`）、`SilentPaymentAddress::parse`
   - W3（ウォレット）: `crates/silent-wallet/src/{keys,holdings,send,rpc,pending}.rs`、`crates/wallet-cli/src/main.rs`（バイナリ `silent-wallet`）
 - **実行したコマンド**: `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、feature ごとの clippy（8 通り）、`cargo test --workspace --locked -- --skip k_max`、`scripts/check_embedder_view.sh`（ウォレット CLI を単独でビルドして起動する検査を含む）、実ノードの `cargo test --workspace --locked -- --ignored`、`scripts/mutation_check.py`
-- **テスト結果**: 高速テスト 235 件成功・失敗 0（K_max の 2 件を除く）。実ノードを使うテスト 13 件成功（うちウォレット 4 件: 2 つのウォレット間の受信と送金、応答が失われた送信、承認後の reorg、別チェーンのノードの拒否）。`scripts/check_embedder_view.sh` 成功。無効化チェック: **コミット `02e0e96` に対して全 267 項目を実行中で、この記述の時点では結果未確認（UNVERIFIED）**
-- **出力証拠**: `docs/logs/wallet_mutation_check.log`（実行完了後に追加する）、実ノードのテスト `crates/wallet-cli/tests/regtest_wallet.rs`（4 件）
+- **テスト結果**: 高速テスト 235 件成功・失敗 0（K_max の 2 件を除く）。実ノードを使うテスト 13 件成功（うちウォレット 4 件: 2 つのウォレット間の受信と送金、応答が失われた送信、承認後の reorg、別チェーンのノードの拒否）。`scripts/check_embedder_view.sh` 成功。無効化チェック: コミット `02e0e96` に対して全 267 項目を実行し、266 項目を検出、**生存 1**。生存したのは、ライブラリと重複していた CLI 側の検査（お釣り用のラベル 0 をアドレスとして渡さない）で、重複とその項目を削除した（266 項目）。修正後のツリーでウォレット関係の 33 項目を再実行し、**生存 0**。ウォレット以外の 233 項目は `02e0e96` での結果（すべて検出）で、その後のコード変更は CLI の重複削除だけ
+- **出力証拠**: `docs/logs/wallet_mutation_check.log`、実ノードのテスト `crates/wallet-cli/tests/regtest_wallet.rs`（4 件）
 - **調べた上流資料・commit SHA**: `bdk_sp` `bb373e566fa2` の `silentpayments/src/send/`、`wallet/src/`、`indexer/src/v2/indexes.rs`（RESEARCH §3.6）。依存のバージョンは変えていない。外部の依存も増やしていない
 - **安全性で気をつけたこと**:
   - mainnet は型として表現できないまま。送信に使う RPC の接続先も、ストアと同じチェーンであることを確かめる

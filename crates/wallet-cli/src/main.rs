@@ -267,11 +267,7 @@ fn run(cli: Cli) -> Result<(), Failure> {
     let network = cli.network;
     match cli.command {
         Command::Address { label } => {
-            if label == Some(0) {
-                return Err(Failure(
-                    "label 0 is the change label; it is not handed out".to_string(),
-                ));
-            }
+            // (The library refuses label 0, the change label.)
             let address = wallet(network, &[])?.address(label).map_err(fail)?;
             if let Some(m) = label {
                 eprintln!(
