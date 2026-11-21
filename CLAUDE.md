@@ -66,6 +66,7 @@ cargo test --workspace --locked -- --ignored
 ```
 
 - 検証コード（`silent-sync` の各検査、`silent-sync-sqlite` の不変条件、CLI の拒否条件）を足したり変えたりしたら、`scripts/mutation_check.py` の項目も更新し、スクラッチコピーに対して実行して生存 0 を確認する（使い方はスクリプト冒頭。全項目で 1 時間以上かかる）。
+- `probes/` はワークスペースの外にある。クレートごとに `-p` を付けて実行する（まとめて実行すると feature が統合され、「既定では届かない」ことの検査が意味を失う）。`scripts/check_embedder_view.sh` がその形で実行する。
 - バックエンドやエンジンの挙動を変えたら `cargo run -p lab-testkit --bin fault_report` で故障注入の表を作り直す（`docs/FAULT_INJECTION.md` と一致しないとテストが失敗する）。
 - ベンチマークの数値を手で書かない。`silent-sync bench` → `export` の出力を使う（`docs/BENCHMARK_PROTOCOL.md`）。計測中は他の重い処理を動かさない。
 - インデックス由来（`tweak_index`）の検出を、フルブロック由来と同じ確度のものとして表示・記述しない。
@@ -85,4 +86,4 @@ cargo test --workspace --locked -- --ignored
 | 3 | 永続化・再開・復元 | 完了（Gate 3 通過） |
 | 4 | 第二バックエンド | 完了（Gate 4 通過） |
 | 5 | ベンチマーク・故障注入 | 完了（Gate 5 通過） |
-| 6 | 進路決定 | 判断材料を作成（`docs/PHASE6_DECISION_MATERIALS.md`）。**決定は所有者待ち** |
+| 6 | 進路決定 | 所有者が決定: SDK を先に完成させ、その後ウォレット（`docs/PROGRESS.md` の「SDK 化 Result」）。ウォレット段階に入るには、上の規約の変更と設計案の承認が先 |
