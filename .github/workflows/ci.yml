@@ -32,7 +32,7 @@ jobs:
       # embedder can choose (the workspace build above enables them all).
       - name: Clippy (library alone, each feature set)
         run: |
-          for features in "" core-rest blindbit-http fixture local-index low-level secret-output-tweaks; do
+          for features in "" core-rest blindbit-http fixture local-index low-level secret-output-tweaks spend; do
             echo "::group::features: ${features:-none}"
             cargo clippy -p silent-sync --lib --locked --features "$features" -- -D warnings
             echo "::endgroup::"

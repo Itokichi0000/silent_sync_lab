@@ -149,6 +149,15 @@ impl Node {
         format!("http://127.0.0.1:{}", self.port)
     }
 
+    /// The file holding this node's RPC credentials. Tests hand its path to
+    /// the program under test; they never read or print its contents.
+    pub fn cookie_file(&self) -> PathBuf {
+        match self.chain {
+            NodeChain::Regtest => self.datadir.join("regtest").join(".cookie"),
+            NodeChain::OfflineMainnet => self.datadir.join(".cookie"),
+        }
+    }
+
     fn cli_command(&self) -> Command {
         let mut command = Command::new(&self.cli);
         let chain_arg = match self.chain {

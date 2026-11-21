@@ -1,0 +1,28 @@
+[package]
+name = "wallet-cli"
+description = "EXPERIMENTAL command line silent payments wallet on silent-sync and silent-wallet. Regtest and signet only. NOT FOR MAINNET OR REAL FUNDS."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "silent-wallet"
+path = "src/main.rs"
+# The library crate has the same name; only one of them can own the docs.
+doc = false
+
+[dependencies]
+silent-wallet = { path = "../silent-wallet" }
+silent-sync = { path = "../silent-sync", features = ["core-rest"] }
+silent-sync-sqlite = { path = "../silent-sync-sqlite" }
+clap = { version = "4.5", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+lab-testkit = { path = "../lab-testkit" }
+
+[lints]
+workspace = true

@@ -84,6 +84,20 @@
 //! fn f(_: silent_sync::protocol::SkipReason) {}
 //! ```
 //!
+//! ## What a wallet needs to spend is absent
+//!
+//! Control:
+//! ```
+//! use silent_sync::rescan::rescan_into;
+//! use silent_sync::SpentOutput;
+//! ```
+//! ```compile_fail
+//! use silent_sync::spend::recover_spendable;
+//! ```
+//! ```compile_fail
+//! use silent_sync::spend::SpendableOutput;
+//! ```
+//!
 //! ## Experimental sources and network backends are absent
 //!
 //! Control:

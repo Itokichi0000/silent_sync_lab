@@ -5,6 +5,7 @@ fixture = []
 local-index = []
 low-level = []
 secret-output-tweaks = ["low-level"]
+spend = []
 
 ## audit.rs
 #[derive(Debug, Clone, Default, PartialEq, Eq)] #[non_exhaustive] pub struct AuditOptions
@@ -119,6 +120,7 @@ pub mod network;
 pub mod protocol;
 pub mod rescan;
 pub mod source;
+#[cfg(feature = "spend")] pub mod spend;
 pub mod store;
 pub mod sync;
 pub mod verify;
@@ -220,6 +222,7 @@ impl SilentPaymentAddress
     pub fn network(&self) -> Network
     pub fn scan_public_key(&self) -> PublicKey
     pub fn spend_public_key(&self) -> PublicKey
+    pub fn parse(text: &str, network: Network) -> Result<Self, ProtocolError>
 impl fmt::Display for SilentPaymentAddress
 impl fmt::Debug for SilentPaymentAddress
 mod tx_level
@@ -228,8 +231,9 @@ mod tx_level
         pub script_pubkey: ScriptBuf,
         pub amount: Amount,
         pub label: Option<u32>,
-        #[cfg(feature = "secret-output-tweaks")]
+        #[cfg(any(feature = "secret-output-tweaks", feature = "spend"))]
         <private field>
+    #[cfg(feature = "spend")] impl ScanMatch
     #[cfg(feature = "secret-output-tweaks")] impl ScanMatch
         pub fn sensitive_output_tweak(&self) -> SecretKey
     impl From<SpOut> for ScanMatch
@@ -266,6 +270,8 @@ mod tx_level
         "more than K_max={0} outputs matched even after capping the scan (docs/DECISIONS.md D-005)"
     )]
     KMaxExceeded(u32),
+    #[error("{0}")]
+    Address(String),
     #[error("K_max fallback found {0} matches instead of exactly K_max; refusing to guess")]
     KMaxFallbackInconsistent(usize),
     #[error("could not derive label: {0}")]
@@ -498,6 +504,66 @@ pub trait ScanSource
     fn block_ref(&self, height: u32) -> Result<BlockRef, SourceError>
     fn block_refs(&self, from: u32, to: u32) -> Result<Vec<BlockRef>, SourceError>
     fn stats(&self) -> SourceStats
+
+## spend.rs
+#[derive(Clone, PartialEq, Eq)] #[non_exhaustive] pub struct SpendableOutput
+    pub outpoint: OutPoint,
+    pub txout: TxOut,
+    pub label: Option<u32>,
+    pub block: BlockRef,
+    <private field>
+impl SpendableOutput
+    pub fn sensitive_tweak(&self) -> SecretKey
+impl fmt::Debug for SpendableOutput
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] #[non_exhaustive] pub enum SpendError
+    #[error(transparent)]
+    Scan(#[from] ScanError),
+    #[error(
+        "source `{backend_id}` does not supply full blocks; an output can only be prepared for \
+         spending from the transactions themselves"
+    )]
+    NotFullBlocks {
+        backend_id: String,
+    },
+    #[error(
+        "the output {outpoint} was detected through `{found}` evidence; only outputs detected \
+         through full blocks are prepared for spending"
+    )]
+    DetectionNotFromFullBlocks {
+        outpoint: OutPoint,
+        found: &'static str,
+    },
+    #[error("the detection is on {detected}, the source on {source_network}")]
+    NetworkMismatch {
+        detected: String,
+        source_network: String,
+    },
+    #[error(
+        "the block at height {height} is no longer the block the output was detected in \
+         (a reorganization?); sync, then try again"
+    )]
+    BlockChanged {
+        height: u32,
+    },
+    #[error("the block at height {height} does not contain the transaction of {outpoint}")]
+    TransactionMissing {
+        height: u32,
+        outpoint: OutPoint,
+    },
+    #[error(
+        "scanning the transaction again did not yield {outpoint} as it was detected (same \
+         output, amount and label)"
+    )]
+    NotReproduced {
+        outpoint: OutPoint,
+    },
+    #[error("the transaction of {outpoint} could not be scanned: {reason}")]
+    Transaction {
+        outpoint: OutPoint,
+        reason: ProtocolError,
+    },
+impl From<SourceError> for SpendError
+pub fn recover_spendable( source: &dyn ScanSource, scanner: &ReceiveScanner, detection: &DetectedOutput, ) -> Result<SpendableOutput, SpendError>
 
 ## store.rs
 pub const SCANNER_VERSION: &str = concat!( "sync-core/", env!("CARGO_PKG_VERSION"), "+bdk_sp@bb373e566fa2" );
