@@ -10,7 +10,7 @@
 //! scanned unless every block of the requested range was processed.
 
 use crate::{
-    bitcoin::{OutPoint, Txid},
+    bitcoin::Txid,
     models::{BlockRef, DetectedOutput, MatchProvenance},
     network::ChainIdentity,
     protocol::{ProtocolError, ReceiveScanner, SkipReason, TxScanOutcome},
@@ -42,8 +42,6 @@ pub enum ScanError {
         #[source]
         source: ProtocolError,
     },
-    #[error("output {0} was detected twice in one range")]
-    DuplicateDetection(OutPoint),
 }
 
 /// Result of scanning one complete range. Contains no key material.
@@ -112,7 +110,7 @@ pub fn scan_range(
         txs_skipped: BTreeMap::new(),
         detected_received_outputs: Vec::new(),
     };
-    let mut seen_outpoints = BTreeSet::<OutPoint>::new();
+    let mut seen_txids = BTreeSet::<Txid>::new();
 
     for block in &batch.blocks {
         let provenance = MatchProvenance {
@@ -121,6 +119,7 @@ pub fn scan_range(
         };
         match &block.evidence {
             Evidence::FullBlock(txs) => {
+                check_full_block(&backend_id, block.block.height, txs, &mut seen_txids)?;
                 for entry in txs {
                     report.txs_seen += 1;
                     let outcome =
@@ -142,13 +141,10 @@ pub fn scan_range(
                             report.txs_scanned += 1;
                             matches.sort_by_key(|m| m.outpoint.vout);
                             for m in matches {
-                                if !seen_outpoints.insert(m.outpoint) {
-                                    return Err(ScanError::DuplicateDetection(m.outpoint));
-                                }
-                                // The upstream match also carries the output
-                                // tweak; it is dropped here on purpose.
+                                // The match also carries the output tweak; it
+                                // is dropped here on purpose.
                                 report.detected_received_outputs.push(DetectedOutput {
-                                    network: chain.network,
+                                    network: chain.network(),
                                     block: block.block,
                                     txid: m.outpoint.txid,
                                     vout: m.outpoint.vout,
@@ -166,6 +162,43 @@ pub fn scan_range(
     }
 
     Ok(report)
+}
+
+/// Structural facts every real block satisfies, checked regardless of what the
+/// source claims to have verified: at least one transaction, exactly one
+/// coinbase and it comes first, and no transaction appears twice in the range.
+///
+/// What this cannot catch is a block from which a non-coinbase transaction was
+/// removed; only a source that verifies the merkle root can (see
+/// `SourceCapabilities::verifies_merkle_root`).
+fn check_full_block(
+    backend_id: &str,
+    height: u32,
+    txs: &[crate::source::TxWithPrevouts],
+    seen_txids: &mut BTreeSet<Txid>,
+) -> Result<(), ScanError> {
+    let inconsistent = |reason: String| ScanError::InconsistentBatch {
+        backend_id: backend_id.to_string(),
+        reason,
+    };
+    if txs.is_empty() {
+        return Err(inconsistent(format!("block {height} has no transactions")));
+    }
+    for (position, entry) in txs.iter().enumerate() {
+        if entry.tx.is_coinbase() != (position == 0) {
+            return Err(inconsistent(format!(
+                "block {height}: transaction at position {position} violates \
+                 \"exactly one coinbase, first\""
+            )));
+        }
+        let txid = entry.tx.compute_txid();
+        if !seen_txids.insert(txid) {
+            return Err(inconsistent(format!(
+                "block {height}: transaction {txid} appears more than once in the range"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Verifies that a batch is exactly `from..=to`, ascending and hash-linked.

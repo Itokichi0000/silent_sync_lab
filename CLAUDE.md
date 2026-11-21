@@ -37,11 +37,13 @@ docs/               RESEARCH / DECISIONS / DEPENDENCIES / PROGRESS / logs
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked          # K_max ベクトルで約 1 分かかる
+cargo test --workspace --locked          # K_max の 2 テストで約 2 分かかる
 cargo run -p sync-core --example gen_fixture -- fixtures/local/regtest_basic_v1.json
 cargo run -p lab-cli -- sync --backend fixture --fixture fixtures/local/regtest_basic_v1.json --label 1
 ```
 
+- 検証コード（`fixture.rs` / `engine.rs` / `protocol.rs` / `network.rs` の検査）を足したり変えたりしたら、`scripts/mutation_check.py` の項目も更新し、スクラッチコピーに対して実行して生存 0 を確認する（使い方はスクリプト冒頭）。
+- フェーズの終わりに、文脈を共有しない別エージェントへ敵対的レビューを依頼し、指摘は自分で再現してから対応する（DECISIONS D-018）。
 - 依存を追加・更新したら `docs/DEPENDENCIES.md` と `docs/DECISIONS.md` に理由を書く。`cargo update` を無指定で実行しない（暗号スタックが上がる。DECISIONS D-004）。
 - 本番コードで `unwrap()` は clippy が拒否する。エラーは型で分類する。
 - 各フェーズの終わりに、仕様書 §15 のテンプレートで報告し、`docs/PROGRESS.md` とログ（`docs/logs/`）を更新する。

@@ -69,7 +69,18 @@
 | U-5 | 不正な witness で panic し得る（`control_block[1..33]` のスライス）。コンセンサス有効な tx では起きないが、未検証データでは起きる | `lib.rs` `tag_txin`。テスト `malformed_taproot_witness_is_contained_as_an_error` で再現 | `catch_unwind` でエラー化（D-008） |
 | U-6 | 同梱ベクトルが古い（28 件、v1.1.1 相当）。v1.1.2 の annex ベクトルを含まない | `tests/functional_tests/send_and_receive_test_vectors.json`（SHA-256 `f5f9ed4a…`） | 正本の 29 件で検証。annex ベクトルも通過を確認 |
 
+| U-7 | 同じ `k` に 2 つの出力がマッチし得るとき（無ラベルの `P_k` とラベル付きの `P_k + L` が同居）、**どちらを報告するかが出力の並びに依存**する。`reference.py` は tx 内で最初の出力を取る | `find_spout_for_tweak` の `swap_remove` が残り出力の順序を崩す。独立レビューで再現 | 未対応。準拠した送信者はこの形を作らないが、バックエンド間比較で差分として現れ得る（DECISIONS O-011） |
+| U-8 | P2WPKH の witness 内公開鍵と prevout の hash160 の一致を確認しない。witness が空の SegWit 入力は「適格でない入力」として無視する | `extract_pubkey` / `tag_txin`。コンセンサス有効な tx では問題にならない | 後者は D-017 でエラー化。前者は未対応（DECISIONS O-010） |
+
 U-1, U-2, U-5 は上流への報告候補（未報告。DECISIONS O-002）。
+
+### 3.5 rust-bitcoin 0.32.7 の注意点（実測）
+
+| 項目 | 挙動 | 対応 |
+|---|---|---|
+| `Block::check_witness_commitment` | **全入力の witness が空なら、coinbase に commitment があっても `true` を返す。** witness を剥がしたブロックは txid・マークルルート・ブロックハッシュ・PoW が変わらないため、これだけでは検出できない | アダプタで厳密に再計算（D-013）。スキャナ側でも witness 欠落をエラー化（D-017） |
+| `Target::from_compact` | オーバーフローする `bits`（例 `0x227fffff`）を拒否せず丸める。Bitcoin Core は拒否する | `bits` の正規性とネットワーク上限を検査（D-013） |
+| `Block::bip34_block_height` | 高さ 1〜16（`OP_1`〜`OP_16`）を読めない | 自前の `coinbase_height`（D-016） |
 
 ### 3.4 上流テスト・サンプルの再現（Gate 0）
 

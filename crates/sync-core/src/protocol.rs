@@ -17,8 +17,9 @@
 use crate::{
     bitcoin::{
         key::Secp256k1,
+        script::Instruction,
         secp256k1::{self, PublicKey, Scalar, SecretKey},
-        Network, ScriptBuf, Transaction, TxOut,
+        Amount, Network, OutPoint, Script, ScriptBuf, Transaction, TxIn, TxOut,
     },
     network::LabNetwork,
 };
@@ -63,8 +64,12 @@ impl ReceiverKeys {
     }
 
     /// The unlabelled silent payment address for `network`.
-    pub fn address(&self, network: LabNetwork) -> SilentPaymentCode {
-        self.code(network.to_bitcoin())
+    pub fn address(&self, network: LabNetwork) -> LabAddress {
+        LabAddress {
+            network,
+            scan: self.scan_public_key(),
+            spend: self.spend_pk,
+        }
     }
 
     /// The labelled silent payment address for label integer `m`.
@@ -72,11 +77,17 @@ impl ReceiverKeys {
         &self,
         network: LabNetwork,
         m: u32,
-    ) -> Result<SilentPaymentCode, ProtocolError> {
+    ) -> Result<LabAddress, ProtocolError> {
         let label = SilentPaymentCode::get_label(self.scan_sk, m);
-        self.address(network)
+        let labelled = self
+            .code(network.to_bitcoin())
             .add_label(label)
-            .map_err(|e| ProtocolError::Label(e.to_string()))
+            .map_err(|e| ProtocolError::Label(e.to_string()))?;
+        Ok(LabAddress {
+            network,
+            scan: labelled.scan,
+            spend: labelled.spend,
+        })
     }
 
     fn code(&self, network: Network) -> SilentPaymentCode {
@@ -89,6 +100,97 @@ impl fmt::Debug for ReceiverKeys {
         f.debug_struct("ReceiverKeys")
             .field("scan_sk", &"<redacted>")
             .field("spend_pk", &self.spend_pk)
+            .finish()
+    }
+}
+
+/// A silent payment address on a lab network.
+///
+/// The upstream address type has a public, mutable `network` field, so handing
+/// it out would let a caller re-encode it for mainnet. This type keeps the
+/// network private and can only be created for a [`LabNetwork`]; its `Display`
+/// output therefore always carries a test-network prefix.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LabAddress {
+    network: LabNetwork,
+    scan: PublicKey,
+    spend: PublicKey,
+}
+
+impl LabAddress {
+    pub fn network(&self) -> LabNetwork {
+        self.network
+    }
+
+    pub fn scan_public_key(&self) -> PublicKey {
+        self.scan
+    }
+
+    /// Spend public key; for a labelled address this already includes the label.
+    pub fn spend_public_key(&self) -> PublicKey {
+        self.spend
+    }
+}
+
+impl fmt::Display for LabAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        SilentPaymentCode::new_v0(self.scan, self.spend, self.network.to_bitcoin()).fmt(f)
+    }
+}
+
+impl fmt::Debug for LabAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "LabAddress({self})")
+    }
+}
+
+/// One output that matched the receiver keys.
+///
+/// The upstream match type is serializable including the per-output tweak.
+/// This type is deliberately not `Serialize`, redacts the tweak in `Debug` and
+/// only releases it through an explicitly named method.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ScanMatch {
+    pub outpoint: OutPoint,
+    pub script_pubkey: ScriptBuf,
+    pub amount: Amount,
+    /// BIP352 label integer, `None` for the unlabelled address.
+    pub label: Option<u32>,
+    tweak: SecretKey,
+}
+
+impl ScanMatch {
+    /// The output tweak `t_k` (plus the label tweak for labelled outputs).
+    ///
+    /// **Sensitive**: together with the spend private key it yields the
+    /// output's private key, and on its own it links the output to the
+    /// receiver. Nothing in this lab stores, logs or exports it; it exists so
+    /// conformance tests can compare against the BIP352 vectors.
+    pub fn sensitive_output_tweak(&self) -> SecretKey {
+        self.tweak
+    }
+}
+
+impl From<SpOut> for ScanMatch {
+    fn from(spout: SpOut) -> Self {
+        Self {
+            outpoint: spout.outpoint,
+            script_pubkey: spout.script_pubkey,
+            amount: spout.amount,
+            label: spout.label,
+            tweak: spout.tweak,
+        }
+    }
+}
+
+impl fmt::Debug for ScanMatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScanMatch")
+            .field("outpoint", &self.outpoint)
+            .field("script_pubkey", &self.script_pubkey)
+            .field("amount", &self.amount)
+            .field("label", &self.label)
+            .field("tweak", &"<redacted>")
             .finish()
     }
 }
@@ -127,16 +229,18 @@ pub enum TxScanOutcome {
     /// BIP352 says this transaction must not be scanned.
     NotEligible(SkipReason),
     /// The transaction was scanned. `matches` may be empty.
-    ///
-    /// The upstream [`SpOut`] carries the per-output tweak; callers that do not
-    /// need it (everything in this lab) must drop it rather than store it.
-    Scanned { matches: Vec<SpOut> },
+    Scanned { matches: Vec<ScanMatch> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProtocolError {
     #[error("transaction has {inputs} inputs but {prevouts} previous outputs were supplied")]
     PrevoutCountMismatch { inputs: usize, prevouts: usize },
+    #[error(
+        "input {input} spends a SegWit output but carries no witness; the data was stripped of \
+         witnesses or is not consensus-valid, and scanning it would silently miss payments"
+    )]
+    MissingWitness { input: usize },
     #[error(
         "more than K_max={0} outputs matched even after capping the scan (docs/DECISIONS.md D-005)"
     )]
@@ -221,6 +325,16 @@ impl ReceiveScanner {
                 prevouts: prevouts.len(),
             });
         }
+        // Checked for every transaction, relevant to us or not: witness-less
+        // data means the source cannot be used for BIP352 at all.
+        if let Some(input) = tx
+            .input
+            .iter()
+            .zip(prevouts)
+            .position(|(txin, prevout)| witness_is_missing(txin, &prevout.script_pubkey))
+        {
+            return Err(ProtocolError::MissingWitness { input });
+        }
         if !tx.output.iter().any(|o| o.script_pubkey.is_p2tr()) {
             return Ok(Err(SkipReason::NoTaprootOutputs));
         }
@@ -259,7 +373,9 @@ impl ReceiveScanner {
             .map_err(|_| ProtocolError::UpstreamPanic)?;
 
         match scanned {
-            Ok(matches) => Ok(TxScanOutcome::Scanned { matches }),
+            Ok(matches) => Ok(TxScanOutcome::Scanned {
+                matches: matches.into_iter().map(ScanMatch::from).collect(),
+            }),
             // `PublicKey::combine_keys` reports a sum equal to the point at
             // infinity with this exact error. The "no keys at all" case, which
             // yields the same error, was excluded by the eligibility check.
@@ -309,7 +425,9 @@ impl ReceiveScanner {
                 if matches.len() != K_MAX as usize {
                     return Err(ProtocolError::KMaxFallbackInconsistent(matches.len()));
                 }
-                Ok(TxScanOutcome::Scanned { matches })
+                Ok(TxScanOutcome::Scanned {
+                    matches: matches.into_iter().map(ScanMatch::from).collect(),
+                })
             }
             Err(SpReceiveError::ScanLimitExceeded(k_max)) => {
                 Err(ProtocolError::KMaxExceeded(k_max))
@@ -319,7 +437,8 @@ impl ReceiveScanner {
     }
 
     /// BIP352 public tweak data (`input_hash·A`) of an eligible transaction.
-    /// Uses no private key. Returns `None` when the transaction is not eligible.
+    /// Uses no private key. The inner `Err` carries the reason when BIP352 says
+    /// the transaction must not be scanned.
     pub fn public_tweak_data(
         tx: &Transaction,
         prevouts: &[TxOut],
@@ -339,6 +458,36 @@ impl ReceiveScanner {
             Err(other) => Err(ProtocolError::Upstream(other.to_string())),
         }
     }
+}
+
+/// True when `txin` spends a SegWit output that consensus only allows to be
+/// spent with a non-empty witness, yet has none.
+///
+/// Upstream classifies such an input as "not eligible" and moves on. On real
+/// chain data that state cannot occur, so it means the witnesses were stripped
+/// (e.g. blocks fetched without witness data) — and stripped data makes every
+/// P2WPKH / P2TR payment invisible. This inspects scripts only.
+///
+/// Covered: native P2WPKH, P2WSH, P2TR, and P2SH-wrapped P2WPKH / P2WSH (a
+/// scriptSig that is exactly one push of a v0 witness program). Other witness
+/// programs, such as pay-to-anchor, may legitimately have an empty witness.
+fn witness_is_missing(txin: &TxIn, prevout_script: &Script) -> bool {
+    if !txin.witness.is_empty() {
+        return false;
+    }
+    if prevout_script.is_p2wpkh() || prevout_script.is_p2wsh() || prevout_script.is_p2tr() {
+        return true;
+    }
+    if prevout_script.is_p2sh() {
+        let mut instructions = txin.script_sig.instructions();
+        if let (Some(Ok(Instruction::PushBytes(push))), None) =
+            (instructions.next(), instructions.next())
+        {
+            let redeem = Script::from_bytes(push.as_bytes());
+            return redeem.is_p2wpkh() || redeem.is_p2wsh();
+        }
+    }
+    false
 }
 
 impl fmt::Debug for ReceiveScanner {

@@ -40,7 +40,7 @@ Rust 1.97.0 が必要です（`rust-toolchain.toml` で固定。rustup が自動
 cargo test --workspace --locked
 ```
 
-K_max のベクトルに約 1 分かかります。
+K_max 関連の 2 テストがあるため、全体で約 2 分かかります。
 
 ## 使い方
 

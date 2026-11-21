@@ -33,11 +33,12 @@ use sync_core::{
         script::Builder,
         secp256k1::{PublicKey, SecretKey},
         transaction::Version,
-        Amount, Block, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
-        TxMerkleNode, TxOut, Txid, Witness, WitnessProgram, WitnessVersion, XOnlyPublicKey,
+        Amount, Block, BlockHash, CompactTarget, Network, OutPoint, ScriptBuf, Sequence,
+        Transaction, TxIn, TxMerkleNode, TxOut, Txid, Witness, WitnessProgram, WitnessVersion,
+        XOnlyPublicKey,
     },
     network::LabNetwork,
-    protocol::ReceiverKeys,
+    protocol::{LabAddress, ReceiverKeys},
     source::fixture::{
         FixtureBlock, FixtureExpectedDetection, FixtureFile, FixturePrevout, FIXTURE_FORMAT,
     },
@@ -257,6 +258,39 @@ fn coinbase(height: u32) -> Transaction {
     }
 }
 
+fn is_witness_commitment(output: &TxOut) -> bool {
+    output
+        .script_pubkey
+        .as_bytes()
+        .starts_with(&[0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed])
+}
+
+/// Makes `block` internally consistent again after its transactions or header
+/// changed: BIP141 witness commitment, merkle root and regtest proof of work.
+/// Tests use this to build blocks that are wrong in exactly one respect.
+pub fn seal(block: &mut Block) {
+    // BIP141 commitment output: OP_RETURN 0xaa21a9ed || commitment.
+    let witness_root = block.witness_root().unwrap();
+    let commitment = Block::compute_witness_commitment(&witness_root, &[0u8; 32]);
+    let mut payload = [0u8; 36];
+    payload[..4].copy_from_slice(&[0xaa, 0x21, 0xa9, 0xed]);
+    payload[4..].copy_from_slice(commitment.as_byte_array());
+    let coinbase = &mut block.txdata[0];
+    coinbase.output.retain(|o| !is_witness_commitment(o));
+    coinbase.output.push(TxOut {
+        value: Amount::ZERO,
+        script_pubkey: Builder::new()
+            .push_opcode(OP_RETURN)
+            .push_slice(payload)
+            .into_script(),
+    });
+    block.header.merkle_root = block.compute_merkle_root().unwrap();
+    block.header.nonce = 0;
+    while block.header.validate_pow(block.header.target()).is_err() {
+        block.header.nonce += 1;
+    }
+}
+
 fn block(height: u32, prev: BlockHash, txs: Vec<Transaction>) -> Block {
     let mut txdata = vec![coinbase(height)];
     txdata.extend(txs);
@@ -271,23 +305,7 @@ fn block(height: u32, prev: BlockHash, txs: Vec<Transaction>) -> Block {
         },
         txdata,
     };
-    // BIP141 commitment output: OP_RETURN 0xaa21a9ed || commitment.
-    let witness_root = block.witness_root().unwrap();
-    let commitment = Block::compute_witness_commitment(&witness_root, &[0u8; 32]);
-    let mut payload = [0u8; 36];
-    payload[..4].copy_from_slice(&[0xaa, 0x21, 0xa9, 0xed]);
-    payload[4..].copy_from_slice(commitment.as_byte_array());
-    block.txdata[0].output.push(TxOut {
-        value: Amount::ZERO,
-        script_pubkey: Builder::new()
-            .push_opcode(OP_RETURN)
-            .push_slice(payload)
-            .into_script(),
-    });
-    block.header.merkle_root = block.compute_merkle_root().unwrap();
-    while block.header.validate_pow(block.header.target()).is_err() {
-        block.header.nonce += 1;
-    }
+    seal(&mut block);
     block
 }
 
@@ -296,12 +314,18 @@ pub fn generate() -> FixtureFile {
     let network = LabNetwork::Regtest;
     let receiver = lab_receiver_keys();
     let other = other_receiver_keys();
-    let plain = receiver.address(network);
-    let label_used = receiver.labelled_address(network, LABEL_USED).unwrap();
-    let label_change = receiver.labelled_address(network, 0).unwrap();
-    let label_lost = receiver
-        .labelled_address(network, LABEL_NOT_BACKED_UP)
-        .unwrap();
+    // Upstream's address type, needed by upstream's sending functions.
+    let code = |a: LabAddress| {
+        SilentPaymentCode::new_v0(a.scan_public_key(), a.spend_public_key(), Network::Regtest)
+    };
+    let plain = code(receiver.address(network));
+    let label_used = code(receiver.labelled_address(network, LABEL_USED).unwrap());
+    let label_change = code(receiver.labelled_address(network, 0).unwrap());
+    let label_lost = code(
+        receiver
+            .labelled_address(network, LABEL_NOT_BACKED_UP)
+            .unwrap(),
+    );
 
     let mut blocks: Vec<FixtureBlock> = Vec::new();
     let mut expected: Vec<FixtureExpectedDetection> = Vec::new();
@@ -355,7 +379,7 @@ pub fn generate() -> FixtureFile {
             ],
         );
         let ins2 = [input(3, InputKind::P2wpkh)];
-        let sp2 = silent_payment_scripts(&ins2, &[other.address(network)]);
+        let sp2 = silent_payment_scripts(&ins2, &[code(other.address(network))]);
         let (t2, p2) = tx(&ins2, vec![(90_000, sp2[0].clone())]);
         plan.push(vec![
             (

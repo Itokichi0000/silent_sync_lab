@@ -1,7 +1,7 @@
 //! End-to-end tests of the `silent-sync` binary.
 #![allow(clippy::unwrap_used)] // test code: a panic is the failure report
 
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 const BIN: &str = env!("CARGO_BIN_EXE_silent-sync");
 const FIXTURE: &str = concat!(
@@ -239,5 +239,37 @@ fn there_is_no_send_or_balance_command() {
         let (output, _, stderr) = run(&[command]);
         assert_eq!(output.status.code(), Some(2), "{command}");
         assert!(stderr.contains("unrecognized subcommand"), "{stderr}");
+    }
+}
+
+/// When stdout cannot be written (full disk, reader gone as in
+/// `... | head -c 0`), the command must fail visibly: no panic, no success.
+/// `/dev/full` makes every write fail deterministically.
+#[cfg(target_os = "linux")]
+#[test]
+fn unwritable_stdout_is_an_error_not_a_panic() {
+    for args in [
+        sync_args(&["--label", "1", "--json"]),
+        sync_args(&[]),
+        vec!["doctor"],
+        vec!["address", "show"],
+    ] {
+        let full = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        let output = Command::new(BIN)
+            .args(&args)
+            .stdout(Stdio::from(full))
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("cannot write to stdout"),
+            "{args:?}: {stderr}"
+        );
+        assert!(!stderr.contains("panicked"), "{args:?}: {stderr}");
     }
 }

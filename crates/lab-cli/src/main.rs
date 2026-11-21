@@ -8,7 +8,12 @@
 mod lab_keys;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use std::{path::PathBuf, process::ExitCode};
+use std::{
+    fmt::Write as _,
+    io::{self, Write as _},
+    path::PathBuf,
+    process::ExitCode,
+};
 use sync_core::{
     engine::{scan_range, ScanReport},
     network::{ChainIdentity, LabNetwork},
@@ -122,6 +127,17 @@ impl Failure {
     }
 }
 
+/// Writes `text` to stdout in one go. A closed or broken stdout is reported
+/// as an error instead of panicking (as `println!` would): the consumer did
+/// not receive the result, so the command must not look successful.
+fn emit(text: &str) -> Result<(), Failure> {
+    let mut stdout = io::stdout().lock();
+    stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+        .map_err(|e| Failure::error(format!("cannot write to stdout: {e}")))
+}
+
 fn main() -> ExitCode {
     // Shown before anything else, including argument errors (design spec §5.10).
     eprintln!("{EXPERIMENTAL_BANNER}");
@@ -137,10 +153,7 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), Failure> {
     match cli.command {
-        Command::Doctor => {
-            doctor(cli.network);
-            Ok(())
-        }
+        Command::Doctor => doctor(cli.network),
         Command::Address {
             action: AddressAction::Show { label },
         } => address_show(cli.network, label),
@@ -148,14 +161,17 @@ fn run(cli: Cli) -> Result<(), Failure> {
     }
 }
 
-fn doctor(network: LabNetwork) {
-    println!("silent-sync {}", env!("CARGO_PKG_VERSION"));
-    println!("network           : {network} (mainnet is refused by design)");
-    println!("receiver          : {}", lab_keys::DESCRIPTION);
-    println!("backend fixture   : available (offline, structurally validated only)");
-    println!("backend core      : NOT IMPLEMENTED (Phase 2)");
-    println!("backend oracle-v2 : NOT IMPLEMENTED (Phase 4)");
-    println!("persistence       : NOT IMPLEMENTED (Phase 3) — `sync` is a stateless scan");
+fn doctor(network: LabNetwork) -> Result<(), Failure> {
+    let lines = [
+        format!("silent-sync {}", env!("CARGO_PKG_VERSION")),
+        format!("network           : {network} (mainnet is refused by design)"),
+        format!("receiver          : {}", lab_keys::DESCRIPTION),
+        "backend fixture   : available (offline, structurally validated only)".to_string(),
+        "backend core      : NOT IMPLEMENTED (Phase 2)".to_string(),
+        "backend oracle-v2 : NOT IMPLEMENTED (Phase 4)".to_string(),
+        "persistence       : NOT IMPLEMENTED (Phase 3) — `sync` is a stateless scan".to_string(),
+    ];
+    emit(&(lines.join("\n") + "\n"))
 }
 
 fn address_show(network: LabNetwork, label: Option<u32>) -> Result<(), Failure> {
@@ -166,7 +182,7 @@ fn address_show(network: LabNetwork, label: Option<u32>) -> Result<(), Failure> 
             .labelled_address(network, m)
             .map_err(|e| Failure::error(e.to_string()))?,
     };
-    println!("{code}");
+    emit(&format!("{code}\n"))?;
     eprintln!("receiver: {}", lab_keys::DESCRIPTION);
     if network == LabNetwork::Regtest {
         eprintln!(
@@ -233,40 +249,48 @@ fn sync(network: LabNetwork, args: SyncArgs) -> Result<(), Failure> {
     if args.json {
         let json = serde_json::to_string_pretty(&report)
             .map_err(|e| Failure::error(format!("cannot serialize report: {e}")))?;
-        println!("{json}");
+        emit(&(json + "\n"))
     } else {
-        print_report(&report);
+        emit(&render_report(&report))
     }
-    Ok(())
 }
 
-fn print_report(report: &ScanReport) {
-    println!("backend              : {}", report.backend_id);
-    println!("network              : {}", report.chain.network);
-    println!(
+fn render_report(report: &ScanReport) -> String {
+    let mut out = String::new();
+    // Writing to a `String` cannot fail.
+    let mut line = |text: String| {
+        let _ = writeln!(out, "{text}");
+    };
+    line(format!("backend              : {}", report.backend_id));
+    line(format!("network              : {}", report.chain.network()));
+    line(format!(
         "range                : {} ({}) ..= {} ({})",
         report.first_block.height,
         report.first_block.hash,
         report.last_block.height,
         report.last_block.hash
-    );
-    println!("labels scanned       : {:?}", report.labels_scanned);
-    println!("blocks scanned       : {}", report.blocks_scanned);
-    println!("transactions seen    : {}", report.txs_seen);
-    println!("transactions scanned : {}", report.txs_scanned);
+    ));
+    line(format!(
+        "labels scanned       : {:?}",
+        report.labels_scanned
+    ));
+    line(format!("blocks scanned       : {}", report.blocks_scanned));
+    line(format!("transactions seen    : {}", report.txs_seen));
+    line(format!("transactions scanned : {}", report.txs_scanned));
     for (reason, count) in &report.txs_skipped {
-        println!("  not scanned ({reason}): {count}");
+        line(format!("  not scanned ({reason}): {count}"));
     }
-    println!(
+    line(format!(
         "detected_received_outputs: {}",
         report.detected_received_outputs.len()
-    );
+    ));
     for d in &report.detected_received_outputs {
         let label = d.label.map_or_else(|| "-".to_string(), |m| m.to_string());
-        println!(
+        line(format!(
             "  height {:>4}  {}:{}  {} sat  label {}",
             d.block.height, d.txid, d.vout, d.value_sats, label
-        );
+        ));
     }
-    println!("note: detected outputs are not a balance; spent status is not tracked.");
+    line("note: detected outputs are not a balance; spent status is not tracked.".to_string());
+    out
 }

@@ -6,8 +6,9 @@
 //! * network name (mainnet refused) and genesis hash;
 //! * contiguous heights starting at 1, each block linking to its parent, the
 //!   first one to the network's genesis block;
-//! * merkle root, BIP141 witness commitment, proof of work against the
-//!   header's own `bits`, BIP34 height;
+//! * merkle root; BIP141 witness commitment (strictly: a stripped block is
+//!   rejected); proof of work against the header's own `bits`, which must be
+//!   canonical and within the network's limit; BIP34 height;
 //! * exactly one coinbase (first), unique txids, one prevout per input.
 //!
 //! It does **not** validate scripts, signatures, amounts or that prevouts
@@ -20,7 +21,8 @@ use super::{
 };
 use crate::{
     bitcoin::{
-        consensus::encode::deserialize_hex, Amount, Block, BlockHash, ScriptBuf, TxOut, Txid,
+        consensus::encode::deserialize_hex, hashes::Hash, Amount, Block, BlockHash, ScriptBuf,
+        Target, TxOut, Txid,
     },
     models::{BlockRef, EvidenceKind},
     network::{ChainIdentity, LabNetwork},
@@ -122,7 +124,7 @@ impl FixtureSource {
         }
 
         let mut blocks = Vec::with_capacity(file.blocks.len());
-        let mut parent_hash = chain.genesis_hash;
+        let mut parent_hash = chain.genesis_hash();
         let mut seen_txids = BTreeSet::<Txid>::new();
 
         for (index, fb) in file.blocks.iter().enumerate() {
@@ -135,7 +137,7 @@ impl FixtureSource {
                     fb.height
                 )));
             }
-            let (block_ref, txs) = decode_block(fb, parent_hash, &mut seen_txids)?;
+            let (block_ref, txs) = decode_block(fb, chain.network(), parent_hash, &mut seen_txids)?;
             parent_hash = block_ref.hash;
             blocks.push(BlockEvidence {
                 block: block_ref,
@@ -166,8 +168,92 @@ impl FixtureSource {
     }
 }
 
+/// Proof of work against the header's own `bits`, after checking that `bits`
+/// is a canonical encoding and not easier than the network allows. (Without
+/// that, a file could choose an arbitrarily easy or wrapped-around target.)
+///
+/// This still says nothing about the block being part of the most-work chain.
+fn check_proof_of_work(block: &Block, network: LabNetwork) -> Result<BlockHash, String> {
+    let bits = block.header.bits;
+    let target = block.header.target();
+    if target.to_compact_lossy() != bits {
+        return Err(format!(
+            "bits {:#010x} is not a canonical target encoding",
+            bits.to_consensus()
+        ));
+    }
+    let limit = match network {
+        LabNetwork::Regtest => Target::MAX_ATTAINABLE_REGTEST,
+        LabNetwork::Signet => Target::MAX_ATTAINABLE_SIGNET,
+    };
+    if target > limit {
+        return Err(format!(
+            "bits {:#010x} is easier than the {network} limit",
+            bits.to_consensus()
+        ));
+    }
+    block.header.validate_pow(target).map_err(|e| e.to_string())
+}
+
+/// BIP141 witness commitment, checked strictly.
+///
+/// `bitcoin::Block::check_witness_commitment` reports success for a block
+/// whose inputs carry no witness at all, even when its coinbase commits to
+/// witness data. Such a block is a *stripped* block: txids, merkle root and
+/// proof of work are unchanged, but the data BIP352 needs is gone. Here a
+/// commitment that is present must verify, and witness data without a
+/// commitment is rejected.
+fn check_witness_commitment(block: &Block) -> Result<(), String> {
+    const MAGIC: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+    let coinbase = block.txdata.first().ok_or("block has no transactions")?;
+    // BIP141: the commitment is the last matching output.
+    let committed = coinbase
+        .output
+        .iter()
+        .rev()
+        .map(|o| o.script_pubkey.as_bytes())
+        .find(|script| script.len() >= 38 && script[..6] == MAGIC)
+        .map(|script| &script[6..38]);
+
+    let Some(committed) = committed else {
+        let has_witness = block
+            .txdata
+            .iter()
+            .skip(1)
+            .any(|tx| tx.input.iter().any(|i| !i.witness.is_empty()));
+        return if has_witness {
+            Err("transactions carry witness data but the coinbase has no commitment".to_string())
+        } else {
+            Ok(())
+        };
+    };
+
+    let reserved = match coinbase.input.first().map(|i| i.witness.to_vec()) {
+        Some(items) if items.len() == 1 && items[0].len() == 32 => items[0].clone(),
+        _ => {
+            return Err(
+                "coinbase commits to witness data but lacks the 32-byte reserved value \
+                 (block stripped of witnesses?)"
+                    .to_string(),
+            )
+        }
+    };
+    let root = block
+        .witness_root()
+        .ok_or("cannot compute the witness root")?;
+    let expected = Block::compute_witness_commitment(&root, &reserved);
+    if expected.as_byte_array() != committed {
+        return Err(
+            "witness data does not match the coinbase commitment (modified or stripped witnesses)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn decode_block(
     fb: &FixtureBlock,
+    network: LabNetwork,
     parent_hash: BlockHash,
     seen_txids: &mut BTreeSet<Txid>,
 ) -> Result<(BlockRef, Vec<TxWithPrevouts>), SourceError> {
@@ -186,15 +272,15 @@ fn decode_block(
             "block {height}: transactions do not match the header merkle root"
         )));
     }
-    let hash = block
-        .header
-        .validate_pow(block.header.target())
+    let hash = check_proof_of_work(&block, network)
         .map_err(|e| invalid(format!("block {height}: proof of work check failed: {e}")))?;
-    if !block.check_witness_commitment() {
+    if !block.txdata.first().is_some_and(|tx| tx.is_coinbase()) {
         return Err(invalid(format!(
-            "block {height}: witness data does not match the coinbase witness commitment"
+            "block {height}: transaction 0 violates \"exactly one coinbase, first\""
         )));
     }
+    check_witness_commitment(&block)
+        .map_err(|e| invalid(format!("block {height}: witness commitment: {e}")))?;
     match block.txdata.first().and_then(coinbase_height) {
         Some(h) if h == height => {}
         Some(h) => {
