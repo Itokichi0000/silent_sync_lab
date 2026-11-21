@@ -1,0 +1,349 @@
+$ cargo test --workspace --locked
+   Compiling lab-storage v0.1.0 (/home/user/silent_sync_lab/crates/lab-storage)
+   Compiling lab-cli v0.1.0 (/home/user/silent_sync_lab/crates/lab-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.21s
+     Running unittests src/main.rs (target/debug/deps/silent_sync-73efb3f7cff1b035)
+
+running 5 tests
+test bench::tests::csv_fields_are_quoted_when_needed ... ok
+test bench::tests::modes_round_trip_through_their_names ... ok
+test bench::tests::median_of_odd_even_and_empty_inputs ... ok
+test lab_keys::tests::lab_receiver_is_the_vector_zero_receiver ... ok
+test bench::tests::cpu_clock_reads_this_process ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.11s
+
+     Running tests/bench_cli.rs (target/debug/deps/bench_cli-c5251194e5782b04)
+
+running 4 tests
+test failed_and_differing_runs_are_recorded_and_fail_the_command ... ok
+test results_hold_no_personal_data ... ok
+test export_converts_and_merges_results ... ok
+test every_run_is_recorded_and_compared ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+
+     Running tests/cli.rs (target/debug/deps/cli-e2cfbe69a8516ba7)
+
+running 11 tests
+test doctor_without_urls_probes_nothing_and_says_so ... ok
+test address_show_uses_test_network_prefixes_only ... ok
+test core_backend_without_a_node_fails_closed ... ok
+test scan_on_fixture_reports_the_expected_outputs_as_json ... ok
+test scan_fails_closed ... ok
+test mainnet_is_refused_by_every_command ... ok
+test unsupported_networks_are_rejected ... ok
+test scan_text_output_does_not_claim_a_balance ... ok
+test core_backend_through_the_cli_matches_the_fixture_scan ... ok
+test there_is_no_send_or_balance_command ... ok
+test unwritable_stdout_is_an_error_not_a_panic ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/regtest_cli.rs (target/debug/deps/regtest_cli-1952ccd1dd32c761)
+
+running 4 tests
+test cli_refuses_a_mainnet_node ... ignored, needs BITCOIND_EXE (Bitcoin Core >= 30)
+test persistent_sync_follows_a_real_reorg ... ignored, needs BITCOIND_EXE (Bitcoin Core >= 30)
+test scan_against_a_regtest_node_reports_the_expected_outputs ... ignored, needs BITCOIND_EXE (Bitcoin Core >= 30)
+test verify_real_oracle_against_real_node ... ignored, needs BITCOIND_EXE and BLINDBIT_ORACLE_EXE
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/store_cli.rs (target/debug/deps/store_cli-576e01bb36f60b6f)
+
+running 10 tests
+test a_store_file_without_a_binding_is_explained ... ok
+test birthday_limits_what_is_found ... ok
+test init_sync_status_and_received_list ... ok
+test reorg_is_reported_and_resolved ... ok
+test stopped_sync_resumes_from_the_checkpoint ... ok
+test an_interrupted_sync_reports_what_it_changed ... ok
+test the_store_file_contains_no_key_material ... ok
+test the_reason_for_stopping_is_shown ... ok
+test the_store_is_protected_from_misuse ... ok
+test killed_sync_resumes_without_loss_or_duplicates ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.91s
+
+     Running tests/verify_cli.rs (target/debug/deps/verify_cli-0ae1ac9b9b7157f4)
+
+running 3 tests
+test oracle_backend_fails_closed_without_services ... ok
+test local_index_scan_and_verify_on_the_fixture ... ok
+test oracle_backend_scan_verify_doctor_and_persistent_sync ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+     Running unittests src/lib.rs (target/debug/deps/lab_storage-bfd5564b983465f0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/sync_sqlite.rs (target/debug/deps/sync_sqlite-424d43259f002ff2)
+
+running 26 tests
+test a_source_behind_the_checkpoint_is_refused ... ok
+test a_store_only_syncs_what_it_is_bound_to ... ok
+test a_failure_after_a_reorg_rollback_still_reports_the_reorg ... ok
+test blocks_that_do_not_extend_the_checkpoint_are_refused ... ok
+test database_file_is_owner_only ... ok
+test birthday_bounds_what_a_restored_wallet_finds ... ok
+test detections_come_back_in_the_canonical_order ... ok
+test failed_rollback_removes_nothing ... ok
+test files_are_never_overwritten_and_foreign_files_are_refused ... ok
+test failed_append_is_rolled_back_entirely ... ok
+test initial_sync_matches_a_stateless_scan ... ok
+test no_key_material_is_written_to_the_database ... ok
+test a_briefly_locked_file_delays_the_commit ... ok
+test reorg_reaching_below_the_birthday_rescans_from_the_birthday ... ok
+test progress_and_counters_cover_every_chunk ... ok
+test reorg_rolls_back_and_rescans ... ok
+test short_batches_are_refused_by_sync ... ok
+test damaged_stores_are_refused_on_open ... ok
+test state_survives_closing_and_reopening_the_file ... ok
+test interrupted_sync_resumes_without_loss_or_duplicates ... ok
+test stores_reject_inconsistent_appends ... ok
+test syncing_again_changes_nothing ... ok
+test target_and_chunk_limits_are_respected ... ok
+test source_outage_leaves_a_resumable_store ... ok
+test the_reason_a_sync_stopped_is_reported ... ok
+test rows_that_cannot_be_valid_are_errors_when_read ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.81s
+
+     Running unittests src/lib.rs (target/debug/deps/lab_testkit-c4ec34ebedd97139)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/bench_node.rs (target/debug/deps/bench_node-7953a655a16735fe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/fault_report.rs (target/debug/deps/fault_report-7592c889daa48469)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/gen_fixture.rs (target/debug/deps/gen_fixture-ad6ce20b86989154)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/scenario_node.rs (target/debug/deps/scenario_node-2cbdd7060c85d685)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/sync_core-f4e4f0208174feb5)
+
+running 22 tests
+test network::tests::mainnet_bitcoin_network_is_refused ... ok
+test network::tests::mainnet_genesis_is_rejected_even_when_labelled_regtest ... ok
+test network::tests::mainnet_names_are_refused ... ok
+test network::tests::chain_identity_cannot_be_deserialized_with_a_foreign_genesis ... ok
+test network::tests::networks_map_to_their_well_known_genesis_blocks ... ok
+test network::tests::other_networks_are_unsupported ... ok
+test source::bitcoin_core::tests::mainnet_and_unknown_chains_are_refused ... ok
+test network::tests::supported_networks_round_trip ... ok
+test network::tests::mainnet_is_refused_by_the_deserializer ... ok
+test source::bitcoin_core::tests::spent_outputs_decoding_is_strict ... ok
+test source::blindbit::tests::oracle_network_names ... ok
+test source::http::tests::only_plain_http_to_an_ipv4_loopback_literal_with_port_is_accepted ... ok
+test source::block_check::tests::prevouts_are_cross_checked_against_outputs_created_in_the_range ... ok
+test source::http::tests::printable_strips_control_characters_and_bounds_length ... ok
+test source::http::tests::refusal_messages_do_not_echo_credentials_or_control_characters ... ok
+test source::http::tests::response_bodies_are_bounded ... ok
+test source::http::tests::response_headers_and_status_line_are_bounded ... ok
+test source::tests::coinbase_height_rejects_garbage ... ok
+test store::tests::scanner_version_names_the_pinned_upstream_revision ... ok
+test source::tests::coinbase_height_handles_small_and_large_heights ... ok
+test source::bitcoin_core::tests::spent_outputs_transaction_count_is_bounded ... ok
+test source::http::tests::a_silent_server_times_out ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s
+
+     Running tests/bip352_vectors.rs (target/debug/deps/bip352_vectors-271b49dd0b64cb22)
+
+running 5 tests
+test not_eligible_vectors_report_the_bip352_reason ... ok
+test vector_file_is_the_pinned_canonical_file ... ok
+test all_receiving_vectors_except_the_limit_case ... ok
+test k_max_cap_with_mixed_labels_reverse_order_and_several_outputs_beyond_the_limit has been running for over 60 seconds
+test k_max_vector has been running for over 60 seconds
+test k_max_vector ... ok
+test k_max_cap_with_mixed_labels_reverse_order_and_several_outputs_beyond_the_limit ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 130.62s
+
+     Running tests/core_rest_fake.rs (target/debug/deps/core_rest_fake-f2f28cb08a916912)
+
+running 14 tests
+test an_unreachable_node_costs_one_request_and_keeps_the_verified_headers ... ok
+test honest_node_gives_the_same_result_as_the_fixture_adapter ... ok
+test blocks_not_rooted_at_the_network_genesis_are_refused ... ok
+test lying_about_spent_outputs_from_outside_the_range_goes_unnoticed ... ok
+test mainnet_and_foreign_chains_are_refused_by_name ... ok
+test only_loopback_http_urls_are_contacted ... ok
+test inconsistent_spent_output_responses_are_refused ... ok
+test ranges_outside_the_node_s_chain_are_refused ... ok
+test inconsistent_block_responses_are_refused ... ok
+test redirects_and_non_200_statuses_are_errors ... ok
+test the_tip_is_bound_to_the_verified_header_chain ... ok
+test witness_stripped_blocks_from_the_node_are_refused ... ok
+test the_header_anchor_follows_a_reorg_on_the_node ... ok
+test deep_reorgs_and_range_lookups_cost_few_requests ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.01s
+
+     Running tests/fault_matrix.rs (target/debug/deps/fault_matrix-b78cc84e8bdcf0c8)
+
+running 2 tests
+test a_replayed_index_entry_is_refused_by_the_store_across_chunks ... ok
+test every_fault_has_the_documented_verdict ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.11s
+
+     Running tests/fixture_scan.rs (target/debug/deps/fixture_scan-1aaca4d61a43a5bb)
+
+running 29 tests
+test detects_exactly_the_outputs_created_for_the_receiver ... ok
+test eligibility_reasons_for_the_non_scannable_fixture_transactions ... ok
+test committed_fixture_is_exactly_what_the_generator_produces ... ok
+test engine_accepts_an_honest_wrapped_source ... ok
+test engine_alone_cannot_detect_an_omitted_transaction ... ok
+test engine_fails_the_range_when_a_source_serves_stripped_transactions ... ok
+test fixture_adapter_checks_coinbase_position_and_duplicates ... ok
+test engine_propagates_transaction_errors_and_refuses_other_chains ... ok
+test fixture_adapter_checks_the_coinbase_height ... ok
+test fixture_adapter_checks_proof_of_work ... ok
+test fixture_adapter_never_returns_a_partial_range ... ok
+test fixture_adapter_cross_checks_prevouts_created_in_the_file ... ok
+test fixture_adapter_refuses_mainnet ... ok
+test fixture_adapter_rejects_witness_stripped_blocks ... ok
+test fixture_adapter_rejects_tampered_data ... ok
+test fixture_adapter_requires_block_one_to_build_on_the_network_genesis ... ok
+test fixture_adapter_reports_what_it_does_and_does_not_verify ... ok
+test engine_rejects_short_reordered_duplicated_or_unlinked_batches ... ok
+test engine_rejects_structurally_impossible_blocks ... ok
+test malformed_taproot_witness_is_contained_as_an_error ... ok
+test missing_prevouts_are_an_error_not_a_silent_miss ... ok
+test labels_decide_what_a_restored_wallet_can_see ... ok
+test other_keys_do_not_detect_the_receivers_outputs ... ok
+test segwit_v2_spending_transaction_is_skipped_although_upstream_would_match ... ok
+test stateless_scan_is_chunked_and_still_all_or_nothing ... ok
+test witness_commitment_location_rules ... ok
+test sub_ranges_detect_the_matching_subset ... ok
+test reports_and_debug_output_contain_no_key_material ... ok
+test scanner_refuses_segwit_spends_without_witness ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/long_chain.rs (target/debug/deps/long_chain-fe3a9f30ab3d3a8c)
+
+running 5 tests
+test a_chunk_that_does_not_link_to_the_previous_one_fails_the_scan ... ok
+test a_scan_across_chunk_borders_finds_every_payment_once ... ok
+test the_generator_is_deterministic_and_shaped_as_documented ... ok
+test sync_and_tweak_index_agree_with_the_full_scan_on_a_long_chain ... ok
+test cross_check_applies_the_range_rules_to_both_sides ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.16s
+
+     Running tests/oracle_e2e.rs (target/debug/deps/oracle_e2e-b8f2017b78889e18)
+
+running 1 test
+test real_oracle_matches_core_except_for_the_segwit_version_rule ... ignored, needs BITCOIND_EXE and BLINDBIT_ORACLE_EXE
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/oracle_fake.rs (target/debug/deps/oracle_fake-0895de3ca84dfe99)
+
+running 6 tests
+test an_oracle_that_is_behind_is_not_mistaken_for_empty_blocks ... ok
+test only_loopback_oracles_are_contacted ... ok
+test an_oracle_on_another_chain_or_network_is_refused ... ok
+test oracle_backend_scans_the_index_and_differs_from_full_blocks_as_observed ... ok
+test block_identity_for_a_range_costs_one_header_lookup ... ok
+test malformed_oracle_answers_are_refused ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.99s
+
+     Running tests/regtest_e2e.rs (target/debug/deps/regtest_e2e-5147abdab02eff03)
+
+running 4 tests
+test long_scenario_is_detected_exactly ... ignored, needs BITCOIND_EXE (Bitcoin Core >= 30)
+test mainnet_node_is_refused ... ignored, needs BITCOIND_EXE (Bitcoin Core >= 30)
+test regtest_send_mine_detect ... ignored, needs BITCOIND_EXE (Bitcoin Core >= 30)
+test stopped_node_is_an_error_not_a_completed_scan ... ignored, needs BITCOIND_EXE (Bitcoin Core >= 30)
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/sync_memory.rs (target/debug/deps/sync_memory-6949d40cc350f89c)
+
+running 18 tests
+test a_source_behind_the_checkpoint_is_refused ... ok
+test a_failure_after_a_reorg_rollback_still_reports_the_reorg ... ok
+test detections_come_back_in_the_canonical_order ... ok
+test a_store_only_syncs_what_it_is_bound_to ... ok
+test failed_commit_loses_only_the_uncommitted_chunk ... ok
+test initial_sync_matches_a_stateless_scan ... ok
+test blocks_that_do_not_extend_the_checkpoint_are_refused ... ok
+test progress_and_counters_cover_every_chunk ... ok
+test reorg_reaching_below_the_birthday_rescans_from_the_birthday ... ok
+test birthday_bounds_what_a_restored_wallet_finds ... ok
+test reorg_rolls_back_and_rescans ... ok
+test short_batches_are_refused_by_sync ... ok
+test stores_reject_inconsistent_appends ... ok
+test syncing_again_changes_nothing ... ok
+test target_and_chunk_limits_are_respected ... ok
+test the_reason_a_sync_stopped_is_reported ... ok
+test source_outage_leaves_a_resumable_store ... ok
+test interrupted_sync_resumes_without_loss_or_duplicates ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.68s
+
+     Running tests/tweak_index.rs (target/debug/deps/tweak_index-eae305e53a377d84)
+
+running 11 tests
+test an_index_ignoring_the_segwit_version_rule_differs_by_exactly_that_transaction ... ok
+test a_store_is_bound_to_the_index_policy ... ok
+test an_index_can_fabricate_a_payment_and_only_a_cross_check_shows_it ... ok
+test detections_of_one_transaction_are_ordered_by_output_index ... ok
+test malformed_index_entries_are_errors ... ok
+test a_bip352_index_gives_exactly_the_full_block_result ... ok
+test cross_check_refuses_mismatched_chains_and_reports_block_hash_differences ... ok
+test persistent_sync_over_a_tweak_index ... ok
+test the_local_index_lists_only_taproot_outputs ... ok
+test omissions_and_alterations_by_an_index_are_silent_until_cross_checked ... ok
+test impossible_index_claims_are_refused ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+
+   Doc-tests lab_storage
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests lab_testkit
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests sync_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+exit=0
