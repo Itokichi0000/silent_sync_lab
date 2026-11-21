@@ -13,6 +13,8 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+# For the example that syncs from a node.
+silent-sync = { path = "../silent-sync", features = ["core-rest"] }
 lab-testkit = { path = "../lab-testkit" }
 
 [lints]

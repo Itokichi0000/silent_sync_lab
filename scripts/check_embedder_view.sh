@@ -7,7 +7,8 @@
 #   2. the probes' lock file pins the same versions as the workspace's;
 #   3. documentation builds without warnings with default and all features;
 #   4. the CLI built on its own (its real feature set) finds the fixture's
-#      payments.
+#      payments;
+#   5. the offline examples run and give the expected result.
 #
 # Usage: scripts/check_embedder_view.sh        (from the repository root)
 set -euo pipefail
@@ -49,4 +50,12 @@ grep -q "\[full_block\]" <<<"$out"
 out="$("$target/debug/silent-sync" verify --backend local-index \
   --fixture fixtures/local/regtest_basic_v1.json --reference fixture --label 1 2>/dev/null)"
 grep -q "identical" <<<"$out" || { echo "$out"; echo "unexpected verify result" >&2; exit 1; }
+
+echo "== examples"
+out="$(cargo run --quiet --locked -p silent-sync --example cross_check_index \
+  --features fixture,local-index -- fixtures/local/regtest_basic_v1.json)"
+grep -q "^identical: true$" <<<"$out" || { echo "$out"; echo "unexpected example output" >&2; exit 1; }
+out="$(cargo run --quiet --locked -p silent-sync --example custom_store \
+  --features fixture -- fixtures/local/regtest_basic_v1.json)"
+[ "$(grep -c "evidence FullBlockWithPrevouts" <<<"$out")" = 7 ] || { echo "$out"; echo "unexpected example output" >&2; exit 1; }
 echo "ok"

@@ -137,10 +137,10 @@ for output in &report.new_detections { /* txid, vout, 金額, ラベル, 証拠�
 
 | 順 | 内容 | 影響 | 状態 |
 |---|---|---|---|
-| 1 | 層 C の非公開化と feature 分け（`fixture`, `local-index`, `low-level`）、テスト用フックの移動 | 公開範囲のみ。挙動は不変 | **済**。提案との差: (1) 出力ごとの tweak は `low-level` でも渡さず、適合テスト専用の feature `secret-output-tweaks` を別に設けた（既定では `ScanMatch` が tweak を保持しない）。(2) `SCAN_CHUNK_BLOCKS` と `MAX_INDEXED_OUTPUTS_PER_BLOCK` は観測できる挙動の上限なので公開のまま |
+| 1 | 層 C の非公開化と feature 分け（`fixture`, `local-index`, `low-level`）、テスト用フックの移動 | 公開範囲のみ。挙動は不変 | **済**。提案との差: (1) 出力ごとの tweak は `low-level` でも渡さず、適合テスト専用の feature `secret-output-tweaks` を別に設けた（既定では `ScanMatch` が tweak を保持しない）。(2) `SCAN_CHUNK_BLOCKS`、`MAX_INDEXED_OUTPUTS_PER_BLOCK`、`K_MAX`、`CHANGE_LABEL` は挙動を説明する定数として公開のまま。(3) 既定の公開範囲は、ワークスペース外の検査用クレート（`probes/`）が「到達できないこと」を含めて検査する |
 | 2 | 名前の変更（クレート `silent-sync` / `silent-sync-sqlite`、型 `Network` / `SilentPaymentAddress`） | 機械的な置換 | **済**。ディレクトリも `crates/silent-sync`・`crates/silent-sync-sqlite` に変更。ストアに記録する識別子 `SCANNER_VERSION` の接頭辞 `sync-core/` は、既存のストアを無効にしないため変えていない |
-| 3 | 層 A の再エクスポート、`#[non_exhaustive]`、ドキュメントと使用例 | 追加のみ | **済（一部は残り）**。クレート直下から層 A を使えるようにし、レポート・エラー・`SyncOptions` を `#[non_exhaustive]` にした（`SyncOptions` は `with_*` で設定）。クレート先頭に説明とコンパイルされる使用例を置いた。**残り**: `missing_docs` の強制（未文書の公開項目が約 170 行分ある）と、`examples/` の 3 本は未実施 |
-| 4 | 公開 API 一覧の固定とテスト | 追加のみ | **済**。`docs/api/silent-sync.txt`・`silent-sync-sqlite.txt` と、テスト `tests/public_api.rs`。一覧は宣言行のテキストで、互換性の判定はしない（変更が必ず差分に出るようにするためのもの） |
+| 3 | 層 A の再エクスポート、`#[non_exhaustive]`、ドキュメントと使用例 | 追加のみ | **済**。クレート直下から層 A を使える。レポート・エラー・`SyncOptions` は `#[non_exhaustive]`（`SyncOptions` は `with_*` で設定）。全公開項目を文書化し `missing_docs` を強制。使用例 3 本（`cross_check_index`、`custom_store`、`silent-sync-sqlite` の `sync_from_node`）。オフラインの 2 本は `scripts/check_embedder_view.sh` で実行して結果を検査 |
+| 4 | 公開 API 一覧の固定とテスト | 追加のみ | **済**。`docs/api/*.txt` と `tests/public_api.rs`。型・variant・トレイトの中身、属性、`impl` の見出し、マクロの使用、features 表を記録する。ソースの文面から作る「変更検知の仕掛け」であり、互換性の判定やマクロの中身の理解はしない |
 | 5 | 敵対的レビュー（別エージェント）、無効化チェック、PROGRESS / DECISIONS の更新 | — | 未着手 |
 
 鍵の受け渡しの設計（鍵をどこから読むか）と、ヘッダ鎖の永続化などの未実装項目（O-006、O-013、O-016、O-017）は、この整理の後に別の提案として扱う。
