@@ -1,0 +1,79 @@
+$ cargo test --workspace --locked
+   Compiling sync-core v0.1.0 (/home/user/silent_sync_lab/crates/sync-core)
+   Compiling lab-cli v0.1.0 (/home/user/silent_sync_lab/crates/lab-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.25s
+     Running unittests src/main.rs (target/debug/deps/silent_sync-611aa6ad131a0677)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli.rs (target/debug/deps/cli-6877232f0f117598)
+
+running 8 tests
+test sync_on_fixture_reports_the_expected_outputs_as_json ... ok
+test sync_text_output_does_not_claim_a_balance ... ok
+test sync_fails_closed ... ok
+test address_show_uses_test_network_prefixes_only ... ok
+test unsupported_networks_are_rejected ... ok
+test unimplemented_backends_say_so_instead_of_pretending ... ok
+test there_is_no_send_or_balance_command ... ok
+test mainnet_is_refused_by_every_command ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running unittests src/lib.rs (target/debug/deps/sync_core-9e0293c41015f778)
+
+running 8 tests
+test network::tests::mainnet_bitcoin_network_is_refused ... ok
+test network::tests::mainnet_is_refused_by_the_deserializer ... ok
+test network::tests::mainnet_names_are_refused ... ok
+test network::tests::mainnet_genesis_is_rejected_even_when_labelled_regtest ... ok
+test network::tests::other_networks_are_unsupported ... ok
+test source::tests::coinbase_height_rejects_garbage ... ok
+test source::tests::coinbase_height_handles_small_and_large_heights ... ok
+test network::tests::supported_networks_round_trip ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/bip352_vectors.rs (target/debug/deps/bip352_vectors-f23774b21b7d763a)
+
+running 4 tests
+test not_eligible_vectors_report_the_bip352_reason ... ok
+test vector_file_is_the_pinned_canonical_file ... ok
+test all_receiving_vectors_except_k_max ... ok
+test k_max_vector ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 51.96s
+
+     Running tests/fixture_scan.rs (target/debug/deps/fixture_scan-10bae9637b51f97c)
+
+running 18 tests
+test eligibility_reasons_for_the_non_scannable_fixture_transactions ... ok
+test detects_exactly_the_outputs_created_for_the_receiver ... ok
+test engine_accepts_an_honest_wrapped_source ... ok
+test committed_fixture_is_exactly_what_the_generator_produces ... ok
+test fixture_adapter_never_returns_a_partial_range ... ok
+test fixture_adapter_refuses_mainnet ... ok
+test engine_alone_cannot_detect_an_omitted_transaction ... ok
+test fixture_adapter_rejects_tampered_data ... ok
+test fixture_adapter_reports_what_it_does_and_does_not_verify ... ok
+test engine_propagates_transaction_errors_and_refuses_other_chains ... ok
+test malformed_taproot_witness_is_contained_as_an_error ... ok
+test missing_prevouts_are_an_error_not_a_silent_miss ... ok
+test other_keys_do_not_detect_the_receivers_outputs ... ok
+test labels_decide_what_a_restored_wallet_can_see ... ok
+test engine_rejects_short_reordered_duplicated_or_unlinked_batches ... ok
+test segwit_v2_spending_transaction_is_skipped_although_upstream_would_match ... ok
+test reports_and_debug_output_contain_no_key_material ... ok
+test sub_ranges_detect_the_matching_subset ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+   Doc-tests sync_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+exit=0

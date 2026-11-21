@@ -1,0 +1,15 @@
+/target
+**/*.rs.bk
+# Secrets / local state must never be committed.
+.env
+.env.*
+*.cookie
+.cookie
+*.sqlite
+*.sqlite3
+*.db
+/data/
+/regtest-data/
+bitcoin.conf
+*.pem
+*.key

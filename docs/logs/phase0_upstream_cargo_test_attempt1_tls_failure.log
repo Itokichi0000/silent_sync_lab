@@ -1,0 +1,290 @@
+    Updating crates.io index
+    Updating git repository `https://github.com/bitcoindevkit/electrum_streaming_client`
+    Updating git repository `https://github.com/bitcoindevkit/bdk-tx`
+ Downloading crates ...
+  Downloaded adler2 v2.0.1
+  Downloaded bdk_testenv v0.11.1
+  Downloaded bitcoin-io v0.1.3
+  Downloaded bitcoin-internals v0.3.0
+  Downloaded bech32 v0.11.0
+  Downloaded bitcoin v0.32.7
+  Downloaded cipher v0.4.4
+  Downloaded pbkdf2 v0.11.0
+  Downloaded ppv-lite86 v0.2.21
+  Downloaded proc-macro2 v1.0.101
+  Downloaded once_cell v1.21.3
+  Downloaded shlex v1.3.0
+  Downloaded bitflags v2.9.4
+  Downloaded getrandom v0.3.3
+  Downloaded serde_core v1.0.225
+  Downloaded bdk_core v0.4.1
+  Downloaded jsonrpc v0.18.0
+  Downloaded serde v1.0.225
+  Downloaded serde_derive v1.0.225
+  Downloaded constant_time_eq v0.1.5
+  Downloaded ryu v1.0.20
+  Downloaded errno v0.3.14
+  Downloaded home v0.5.11
+  Downloaded bitflags v1.3.2
+  Downloaded block-buffer v0.10.4
+  Downloaded sha1 v0.10.6
+  Downloaded quote v1.0.40
+  Downloaded fastrand v2.3.0
+  Downloaded cfg-if v1.0.3
+  Downloaded cpufeatures v0.2.17
+  Downloaded autocfg v1.5.0
+  Downloaded crypto-common v0.1.6
+  Downloaded inout v0.1.4
+  Downloaded find-msvc-tools v0.1.1
+  Downloaded hmac v0.12.1
+  Downloaded password-hash v0.4.2
+  Downloaded num-conv v0.1.0
+  Downloaded powerfmt v0.2.0
+  Downloaded itoa v1.0.15
+  Downloaded rand_chacha v0.3.1
+  Downloaded memoffset v0.6.5
+  Downloaded rand_core v0.6.4
+  Downloaded arrayvec v0.7.6
+  Downloaded bdk_bitcoind_rpc v0.18.0
+  Downloaded bitcoincore-rpc v0.19.0
+  Downloaded pkg-config v0.3.32
+  Downloaded base64ct v1.8.0
+  Downloaded minreq v2.14.1
+  Downloaded base58ck v0.1.0
+  Downloaded pin-utils v0.1.0
+  Downloaded version_check v0.9.5
+  Downloaded bdk_core v0.6.2
+  Downloaded electrsd v0.28.0
+  Downloaded hex_lit v0.1.1
+  Downloaded byteorder v1.5.0
+  Downloaded deranged v0.5.3
+  Downloaded filetime v0.2.26
+  Downloaded generic-array v0.14.7
+  Downloaded jobserver v0.1.34
+  Downloaded bitcoincore-rpc-json v0.19.0
+  Downloaded ahash v0.8.12
+  Downloaded csv-core v0.1.12
+  Downloaded sct v0.7.1
+  Downloaded untrusted v0.9.0
+  Downloaded bzip2 v0.4.4
+  Downloaded which v4.4.2
+  Downloaded anyhow v1.0.99
+  Downloaded bitcoin-units v0.1.2
+  Downloaded time-core v0.1.6
+  Downloaded digest v0.10.7
+  Downloaded bitcoind v0.36.1
+  Downloaded bitcoin_hashes v0.14.0
+  Downloaded electrum-client v0.20.0
+  Downloaded hex-conservative v0.2.1
+  Downloaded crc32fast v1.5.0
+  Downloaded xattr v1.5.1
+  Downloaded either v1.15.0
+  Downloaded sha2 v0.10.9
+  Downloaded getrandom v0.2.16
+  Downloaded log v0.4.28
+  Downloaded zstd v0.11.2+zstd.1.5.2
+  Downloaded zstd-safe v5.0.2+zstd.1.5.2
+  Downloaded tempfile v3.22.0
+  Downloaded unicode-ident v1.0.19
+  Downloaded tar v0.4.44
+  Downloaded flate2 v1.1.2
+  Downloaded base64 v0.13.1
+  Downloaded typenum v1.18.0
+  Downloaded zip v0.6.6
+  Downloaded bdk_chain v0.21.1
+  Downloaded cc v1.2.37
+  Downloaded miniz_oxide v0.8.9
+  Downloaded rand v0.8.5
+  Downloaded bdk_chain v0.23.2
+  Downloaded memchr v2.7.5
+  Downloaded secp256k1 v0.29.1
+  Downloaded serde_json v1.0.145
+  Downloaded hashbrown v0.14.5
+  Downloaded aes v0.8.4
+  Downloaded time v0.3.43
+  Downloaded rustls-webpki v0.101.7
+  Downloaded rustix v1.1.2
+  Downloaded zerocopy v0.8.27
+  Downloaded webpki-roots v0.25.4
+  Downloaded nix v0.25.1
+  Downloaded rustls v0.21.12
+  Downloaded syn v2.0.106
+  Downloaded rustix v0.38.44
+  Downloaded subtle v2.6.1
+  Downloaded miniscript v12.3.5
+  Downloaded bzip2-sys v0.1.13+1.0.8
+  Downloaded zstd-sys v2.0.16+zstd.1.5.7
+  Downloaded libc v0.2.175
+  Downloaded csv v1.3.1
+  Downloaded ring v0.17.14
+  Downloaded linux-raw-sys v0.4.15
+  Downloaded secp256k1-sys v0.10.1
+  Downloaded linux-raw-sys v0.11.0
+   Compiling libc v0.2.175
+   Compiling find-msvc-tools v0.1.1
+   Compiling shlex v1.3.0
+   Compiling cfg-if v1.0.3
+   Compiling proc-macro2 v1.0.101
+   Compiling unicode-ident v1.0.19
+   Compiling serde_core v1.0.225
+   Compiling bitcoin-io v0.1.3
+   Compiling serde v1.0.225
+   Compiling arrayvec v0.7.6
+   Compiling hex-conservative v0.2.1
+   Compiling jobserver v0.1.34
+   Compiling cc v1.2.37
+   Compiling quote v1.0.40
+   Compiling syn v2.0.106
+   Compiling zerocopy v0.8.27
+   Compiling getrandom v0.2.16
+   Compiling bitcoin-internals v0.3.0
+   Compiling secp256k1-sys v0.10.1
+   Compiling rand_core v0.6.4
+   Compiling hex_lit v0.1.1
+   Compiling bitcoin v0.32.7
+   Compiling typenum v1.18.0
+   Compiling bech32 v0.11.0
+   Compiling serde_derive v1.0.225
+   Compiling version_check v0.9.5
+   Compiling ppv-lite86 v0.2.21
+   Compiling generic-array v0.14.7
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.8.5
+   Compiling memchr v2.7.5
+   Compiling pkg-config v0.3.32
+   Compiling ryu v1.0.20
+   Compiling itoa v1.0.15
+   Compiling crypto-common v0.1.6
+   Compiling log v0.4.28
+   Compiling ring v0.17.14
+   Compiling serde_json v1.0.145
+   Compiling subtle v2.6.1
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling block-buffer v0.10.4
+   Compiling bitcoin_hashes v0.14.0
+   Compiling digest v0.10.7
+   Compiling bitcoin-units v0.1.2
+   Compiling base58ck v0.1.0
+   Compiling secp256k1 v0.29.1
+   Compiling cpufeatures v0.2.17
+   Compiling untrusted v0.9.0
+   Compiling bitflags v2.9.4
+   Compiling bzip2-sys v0.1.13+1.0.8
+   Compiling crc32fast v1.5.0
+   Compiling zstd-safe v5.0.2+zstd.1.5.2
+   Compiling inout v0.1.4
+   Compiling powerfmt v0.2.0
+   Compiling adler2 v2.0.1
+   Compiling rustls v0.21.12
+   Compiling linux-raw-sys v0.11.0
+   Compiling base64ct v1.8.0
+   Compiling password-hash v0.4.2
+   Compiling miniz_oxide v0.8.9
+   Compiling deranged v0.5.3
+   Compiling sct v0.7.1
+   Compiling rustls-webpki v0.101.7
+   Compiling cipher v0.4.4
+   Compiling sha2 v0.10.9
+   Compiling minreq v2.14.1
+   Compiling hmac v0.12.1
+   Compiling rustix v1.1.2
+   Compiling base64 v0.13.1
+   Compiling num-conv v0.1.0
+   Compiling time-core v0.1.6
+   Compiling jsonrpc v0.18.0
+   Compiling time v0.3.43
+   Compiling pbkdf2 v0.11.0
+   Compiling flate2 v1.1.2
+   Compiling bzip2 v0.4.4
+   Compiling aes v0.8.4
+   Compiling bitcoincore-rpc-json v0.19.0
+   Compiling sha1 v0.10.6
+   Compiling byteorder v1.5.0
+   Compiling webpki-roots v0.25.4
+   Compiling constant_time_eq v0.1.5
+   Compiling once_cell v1.21.3
+   Compiling anyhow v1.0.99
+   Compiling xattr v1.5.1
+   Compiling bitcoincore-rpc v0.19.0
+   Compiling bdk_core v0.4.1
+   Compiling filetime v0.2.26
+   Compiling getrandom v0.3.3
+   Compiling autocfg v1.5.0
+   Compiling rustix v0.38.44
+   Compiling memoffset v0.6.5
+   Compiling tar v0.4.44
+   Compiling linux-raw-sys v0.4.15
+   Compiling zstd v0.11.2+zstd.1.5.2
+   Compiling zip v0.6.6
+   Compiling miniscript v12.3.5
+   Compiling bitcoind v0.36.1
+   Compiling either v1.15.0
+   Compiling home v0.5.11
+   Compiling fastrand v2.3.0
+   Compiling tempfile v3.22.0
+   Compiling which v4.4.2
+   Compiling electrsd v0.28.0
+   Compiling bitflags v1.3.2
+   Compiling pin-utils v0.1.0
+error: failed to run custom build command for `bitcoind v0.36.1`
+note: To improve backtraces for build dependencies, set the CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG=true environment variable to enable debug information generation.
+
+Caused by:
+  process didn't exit successfully: `<scratch>/upstream/bdk-sp/target/debug/build/bitcoind-4371f2f42069f02e/build-script-build` (exit status: 101)
+  --- stdout
+  filename:bitcoin-25.0-x86_64-linux-gnu.tar.gz version:25.0 hash:33930d432593e49d58a9bff4c30078823e9af5d98594d2935862788ce8a20aec
+
+  --- stderr
+
+  thread 'main' (2422) panicked at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitcoind-0.36.1/build.rs:9:23:
+  called `Result::unwrap()` on an `Err` value: cannot reach url https://bitcoincore.org/bin/bitcoin-core-25.0/bitcoin-25.0-x86_64-linux-gnu.tar.gz
+
+  Caused by:
+      0: invalid peer certificate: UnknownIssuer
+      1: invalid peer certificate: UnknownIssuer
+
+  Stack backtrace:
+     0: <minreq::error::Error as anyhow::context::ext::StdError>::ext_context::<alloc::string::String>
+     1: <core::result::Result<minreq::response::Response, minreq::error::Error> as anyhow::Context<minreq::response::Response, minreq::error::Error>>::with_context::<alloc::string::String, build_script_build::download::start::{closure#1}>
+     2: build_script_build::download::start
+     3: build_script_build::main
+     4: <fn() as core::ops::function::FnOnce<()>>::call_once
+     5: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+     6: std::rt::lang_start::<()>::{closure#0}
+     7: <&dyn core::ops::function::Fn<(), Output = i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe as core::ops::function::FnOnce<()>>::call_once
+               at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/ops/function.rs:287:21
+     8: std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe, i32>
+               at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:581:40
+     9: std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe>
+               at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:544:19
+    10: std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe, i32>
+               at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panic.rs:359:14
+    11: std::rt::lang_start_internal::{closure#0}
+               at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/rt.rs:175:24
+    12: std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize>
+               at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:581:40
+    13: std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}>
+               at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:544:19
+    14: std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize>
+               at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panic.rs:359:14
+    15: std::rt::lang_start_internal
+               at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/rt.rs:171:5
+    16: std::rt::lang_start::<()>
+    17: main
+    18: __libc_start_call_main
+               at ./csu/../sysdeps/nptl/libc_start_call_main.h:58:16
+    19: __libc_start_main_impl
+               at ./csu/../csu/libc-start.c:360:3
+    20: _start
+  stack backtrace:
+     0: __rustc::rust_begin_unwind
+               at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:689:5
+     1: core::panicking::panic_fmt
+               at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panicking.rs:80:14
+     2: core::result::unwrap_failed
+               at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/result.rs:1867:5
+     3: build_script_build::main
+     4: <fn() as core::ops::function::FnOnce<()>>::call_once
+  note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+warning: build failed, waiting for other jobs to finish...
+EXIT=101

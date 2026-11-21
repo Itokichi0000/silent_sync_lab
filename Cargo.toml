@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = ["crates/sync-core", "crates/lab-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85.0"
+publish = false
+
+[workspace.dependencies]
+# Pinned to an exact upstream commit (master HEAD as verified on 2026-11-21).
+# crates.io `bdk_sp 0.2.0` predates the BIP352 K_max fix (bdk-sp#75), so a git
+# revision is required. See docs/DEPENDENCIES.md before changing this.
+bdk_sp = { git = "https://github.com/bitcoindevkit/bdk-sp", rev = "bb373e566fa2a9ee037cb15de2cbe6e679aac7b0", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+
+# Dependencies (including the upstream scanner and secp256k1) are optimized even
+# in dev/test builds: the BIP352 K_max vector needs ~5.4M point operations and
+# takes minutes unoptimized.
+[profile.dev.package."*"]
+opt-level = 3

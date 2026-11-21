@@ -1,0 +1,8 @@
+   Compiling bdk_sp v0.2.0 (<scratch>/upstream/bdk-sp/silentpayments)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.31s
+     Running `target/debug/examples/send_and_scan`
+receiver publishes sprt1qqw7zfpjcuwvq4zd3d4aealxq3d669s3kcde4wgr3zl5ugxs40twv2qnwv34pd6hklrh6mqd87hw3c8y0qj2g3jdsmuyx5rvchx2tcn045uh80k5y
+sender broadcasts 09f9b37adbd9c88ab39347d635441f73254a49d99690fbb4523d61fd48466cd9
+receiver finds 0.00010000 BTC on label 7
+receiver can spend it
+EXIT=0
