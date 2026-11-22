@@ -453,8 +453,15 @@ fn parse_reorg_limit(value: &str) -> Result<ReorgLimit, String> {
         .map_err(|_| format!("expected a number of blocks or `none`, got `{value}`"))
 }
 
+/// This program scans for a receiver whose keys are public test values (see
+/// `lab_keys`), so it stays off mainnet even when `silent-sync` was built
+/// with its `mainnet` feature by another crate in the same build.
 fn parse_network(value: &str) -> Result<Network, String> {
-    value.parse::<Network>().map_err(|e| e.to_string())
+    let network = value.parse::<Network>().map_err(|e| e.to_string())?;
+    if network.is_mainnet() {
+        return Err(silent_sync::NetworkError::MainnetRefused.to_string());
+    }
+    Ok(network)
 }
 
 struct Failure {
@@ -552,8 +559,9 @@ fn run(cli: Cli) -> Result<(), Failure> {
 
 fn default_core_rest_url(network: Network) -> &'static str {
     match network {
-        Network::Regtest => "http://127.0.0.1:18443",
         Network::Signet => "http://127.0.0.1:38332",
+        // Regtest; `parse_network` lets nothing else through.
+        _ => "http://127.0.0.1:18443",
     }
 }
 

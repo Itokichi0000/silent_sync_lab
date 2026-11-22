@@ -141,12 +141,13 @@ impl fmt::Debug for ReceiverKeys {
     }
 }
 
-/// A silent payment address on a lab network.
+/// A silent payment address on one of this crate's networks.
 ///
 /// The upstream address type has a public, mutable `network` field, so handing
 /// it out would let a caller re-encode it for mainnet. This type keeps the
-/// network private and can only be created for a [`Network`]; its `Display`
-/// output therefore always carries a test-network prefix.
+/// network private and can only be created for a [`Network`]; without the
+/// `mainnet` feature its `Display` output therefore always carries a
+/// test-network prefix.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SilentPaymentAddress {
     network: Network,
@@ -174,8 +175,10 @@ impl SilentPaymentAddress {
     /// `network`.
     ///
     /// The prefix decides: `sprt` for regtest, `tsp` for the test networks
-    /// (signet here). A mainnet address (`sp`) is refused for every
-    /// `network`, since [`Network`] has no mainnet.
+    /// (signet here), `sp` for mainnet. Without the `mainnet` feature a
+    /// mainnet address is refused for every `network`, since [`Network`] then
+    /// has no mainnet; with it, a mainnet address is read for
+    /// `Network::Mainnet` and for no other network.
     pub fn parse(text: &str, network: Network) -> Result<Self, ProtocolError> {
         let code = SilentPaymentCode::try_from(text)
             .map_err(|e| ProtocolError::Address(format!("not a silent payment address: {e}")))?;

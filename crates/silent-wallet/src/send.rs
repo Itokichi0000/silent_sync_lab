@@ -162,6 +162,19 @@ pub enum SendError {
     #[error("{0}")]
     /// The destination could not be read, or is for another network.
     Destination(String),
+    #[error(
+        "this wallet is on {wallet}, but {what} is on {found}; nothing is signed across networks"
+    )]
+    /// The source, or an output offered as an input, is on another network
+    /// than the wallet.
+    AnotherNetwork {
+        /// The wallet's network.
+        wallet: Network,
+        /// What is elsewhere: the data source, or an output.
+        what: String,
+        /// Where it is.
+        found: Network,
+    },
     #[error("nothing to pay")]
     /// No payment was given.
     NoPayments,
@@ -326,8 +339,9 @@ fn unsigned(inputs: &[OutPoint], outputs: Vec<TxOut>) -> Transaction {
                 previous_output: *outpoint,
                 script_sig: ScriptBuf::new(),
                 // Does not ask to be replaceable: this wallet has no way to
-                // replace a transaction on purpose, and should not make it
-                // easier to do by accident.
+                // replace a transaction on purpose. This is a request, not
+                // a protection: nodes that replace any transaction for a
+                // higher fee (Bitcoin Core's default since 28) ignore it.
                 sequence: Sequence::ENABLE_LOCKTIME_NO_RBF,
                 witness: Witness::new(),
             })
@@ -376,6 +390,22 @@ pub fn build_and_sign(
 ) -> Result<BuiltTransaction, SendError> {
     let (keys, network, scanner) = (wallet.keys(), wallet.network(), wallet.scanner());
     let receiver = wallet.receiver();
+    // A wallet signs for its own network only. Scripts and signatures name
+    // no network, so nothing later would notice data from another chain.
+    if source.chain().network() != network {
+        return Err(SendError::AnotherNetwork {
+            wallet: network,
+            what: "the data source".to_string(),
+            found: source.chain().network(),
+        });
+    }
+    if let Some(foreign) = candidates.iter().find(|d| d.network != network) {
+        return Err(SendError::AnotherNetwork {
+            wallet: network,
+            what: format!("the output {}:{}", foreign.txid, foreign.vout),
+            found: foreign.network,
+        });
+    }
     if payments.is_empty() {
         return Err(SendError::NoPayments);
     }

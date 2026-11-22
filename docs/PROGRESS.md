@@ -3,7 +3,7 @@
 > **名称変更（2026-11-21、DECISIONS D-039）**: クレート `sync-core` → `silent-sync`、`lab-storage` → `silent-sync-sqlite`、型 `LabNetwork` → `Network`、`LabAddress` → `SilentPaymentAddress`。
 > 以下の Phase 0〜5 の記録は当時の名前のまま残している（`crates/sync-core/…` は現在の `crates/silent-sync/…`）。
 
-最終更新: 2026-11-21
+最終更新: 2026-11-22
 
 | Phase | 内容 | 状態 |
 |---|---|---|
@@ -16,7 +16,9 @@
 | 6 | 進路決定 | **所有者が決定**: まず SDK を完成させ、その後それを使ってウォレットを作りながら磨く（2026-11-21） |
 | SDK 化 | 公開 API の整理、文書、reorg 上限、ストアの監査、ラベル追加の再スキャン | **実装済み**（下の「SDK 化 Result」）。ヘッダ鎖の永続化は見送り（D-045） |
 | ウォレット W1〜W3 | 使用済みの追跡、鍵と tweak の受け渡し、regtest での送金 | **実装済み**（下の「ウォレット段階 Result」） |
-| ウォレット W4 | signet | **BLOCKED**（この環境から signet のピアに接続できない）。UNVERIFIED |
+| ウォレット W4 | signet | 未実施（cloud 環境からは signet のピアに届かなかった。作業は手元のマシンに移った）。UNVERIFIED |
+| mainnet | feature `mainnet`（SDK、ウォレット） | **実装済み**（下の「mainnet と窓口 API Result」）。ブロックのある実際の mainnet ノードでは UNVERIFIED |
+| 窓口 API | `silent_wallet::client`、シードフレーズ | **実装済み**（同上）。regtest の実ノードで送受金を確認 |
 | ウォレット W5 | UI | 未着手。形は所有者と決める |
 
 ## Done
@@ -64,7 +66,7 @@
 
 ## Unverified（確認できていないこと）
 
-- 実際の signet での動作。インターネット越し・mainnet 規模での性能。
+- 実際の signet での動作。インターネット越し・mainnet 規模での性能。ブロックのある実際の mainnet ノードでのスキャン・同期・送金（feature `mainnet`）。
 - 非 Linux 環境（ファイル権限、CPU 時間の計測）。
 - BlindBit Oracle の他の構成（cut-through、dust フィルタ）、gRPC、ノードの reorg に対する実 Oracle の挙動。
 - Oracle が先端の高さを報告するまでの時間が、インデックス完了を正しく表すか（BENCHMARK_REPORT §5.2）。
@@ -527,6 +529,35 @@ SDK の API に関する 4 つの判断（出力ごとの tweak は渡さない�
 4. **ソースが申告と違う種類の証拠を返しても通っていた**（レビューで発見）。使用済みの検査が黙って飛ばされるので、共通の検査で拒否するようにした。
 5. 送金の側では、「送信の結果が分からない」という状態を最初から設計に入れていなかった。成功と失敗の 2 つしか無い前提が、二重支払いの原因だった。
 
+## mainnet と窓口 API Result（2026-11-22）
+
+所有者の指示（2026-11-22）: (1) SDK を本番（mainnet）対応させる、(2) 本番対応した簡易ウォレットに SDK を入れて実際の送受金を検証していく、(3) その前に、Breez SDK のように誰でも簡単に導入できる形にする（ライトニングが難しければオンチェーンとサイレントペイメントでよい）。決定は D-050〜D-052。作業の場所は cloud 環境から所有者の手元のマシン（macOS）に移った。
+
+- **実装したファイル**:
+  - mainnet（SDK）: `crates/silent-sync/src/network.rs`（feature `mainnet`、`Network::Mainnet`、`is_mainnet()`、`#[non_exhaustive]`）、`source/{block_check,bitcoin_core,blindbit}.rs`、`crates/silent-sync-sqlite/Cargo.toml`
+  - mainnet（ウォレット）: `crates/silent-wallet/src/keys.rs`（`WalletError`、コイン種別 0）、`crates/wallet-cli/src/main.rs`（確認語、送金額の上限、表示）、`crates/lab-cli/src/main.rs`（どのビルドでも拒否）
+  - 窓口 API: `crates/silent-wallet/src/client.rs`（feature `client`）、`wallet-cli` の `new-phrase` と `SILENT_WALLET_PHRASE`
+  - 規約と文書: `CLAUDE.md`（規約 1・3・6）、`README.md`、`docs/{DECISIONS,THREAT_MODEL,DEPENDENCIES}.md`、`docs/api/`、`.github/workflows/ci.yml`、`scripts/{mutation_check.py,check_embedder_view.sh}`
+- **実行したコマンド**: `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、feature ごとの clippy、`cargo test --workspace --locked`、mainnet の feature を有効にした 2 通りのテスト（CLAUDE.md の「コマンド」）、`scripts/check_embedder_view.sh`、実ノードの `cargo test … -- --ignored`（手元の Bitcoin Core v30.99 開発ビルド）、`scripts/mutation_check.py`（該当分）
+- **テスト結果**: 既定の構成で高速テスト 244 件成功・失敗 0。mainnet の feature をすべて有効にした構成で 199 件成功・失敗 0、SDK の mainnet だけを有効にした構成（ウォレットと `lab-cli` が拒否すること）で 63 件成功・失敗 0（どちらも K_max の 2 件を除く）。実ノードを使うテストは 12 件成功、実 Oracle が要る 2 件は未実行（バイナリが無いため失敗として表示される）。mainnet の feature での実ノードテスト 3 件成功（mainnet パラメータのオフラインのノードへの接続、mainnet のウォレットの作成、別チェーンのノードへ tx を渡さないこと）。`scripts/check_embedder_view.sh` 成功。無効化チェックは、今回足した・変えた項目だけを実行した（結果は `docs/logs/mainnet_client_mutation_check.log`。全項目の再実行はしていない）
+- **独立レビュー（D-053）**: 文脈を共有しない別エージェントに依頼。高 0、中 2、低 7。中の 2 件は再現テストを書いてから修正した: (1) `build_and_sign` がウォレットのネットワークとデータ源・検出結果のネットワークを照合しておらず、SDK だけ mainnet になったビルドで regtest のウォレットが mainnet のデータに署名できた、(2) `WalletClient::send` が、別のウォレットのクライアントが準備した tx を受け付け、送信中の記録が別のウォレットに付いた
+- **出力証拠**: `docs/logs/mainnet_client_mutation_check.log`、テスト `crates/silent-wallet/tests/client.rs`（実ノード 2 件を含む）、`crates/wallet-cli/tests/cli.rs`
+- **調べた上流資料**: `bip39` 2.2.2 と 3.0.0 の feature 一覧（crates.io）。BIP39 の公式ベクトル（全ゼロのエントロピー、パスフレーズ `TREZOR`）で導出を検査。`bdk_sp` の rev と暗号スタックの版は変えていない
+- **安全性で気をつけたこと**:
+  - mainnet は**既定で無効**で、クレートごとに自分の feature で決める。feature の統合で SDK だけ mainnet になっても、ウォレットと `lab-cli` は拒否する（その構成のテストを CI に追加）
+  - mainnet の鍵はコイン種別 0。テストで使ったシードが mainnet で同じ鍵にならない
+  - mainnet の送金には、別の確認語と、1 回の送金額の既定の上限（100,000 sat）
+  - 窓口 API の送金は「組み立て」と「送信」を分け、準備後に状態が変わった tx は送らない。結果が分からない送信を「送られなかった」と報告しない
+  - シードフレーズは `Debug` に出ず、`Display` を持たない。読み取りエラーに入力を含めない
+  - 暗号は自作していない（BIP39 は `bip39`、乱数は OS、導出は `bitcoin` の BIP32）
+- **未完成 / ブロッカー**:
+  - **UNVERIFIED**: ブロックのある実際の mainnet ノードでのスキャン・同期・送金と、その所要時間。signet の実ネットワーク。「より速く正確に送受金できるか」の実測はこれから（手元のマシンに mainnet のチェーンデータは無い。signet のデータは 2025 年 10 月時点のものがある）
+  - **NOT IMPLEMENTED**: ライトニング、通常のオンチェーンのアドレスでの受信、手数料の見積もりと引き上げ、鍵の保存とメモリ上の消去、モバイル向けのバインディング、リモートのバックエンドでの同期（いまは同じマシンの自分のノードが前提）、UI
+  - 第三者の監査は受けていない
+  - `wallet-cli` と `client` に同じ流れが重複している（D-052）
+  - 実 Oracle を使うテスト 2 件は、手元に Oracle のバイナリが無いため今回は未実行（コードは変えていない経路）
+- **次に取り組む最小タスク**: (1) 手元の signet ノードを起動して、実ネットワークでの同期時間と検出の正確さを測る、(2) signet で実際に受け取って送る、(3) mainnet のノードを用意するかを決める
+
 ## Phase 6（進路決定）
 
 設計書は Phase 6 を「測定結果と実装体験にもとづき 3 択から選ぶ」と定めている。**選択は所有者が行った**（SDK を先に完成させ、その後ウォレット。上の「SDK 化 Result」）。
@@ -541,7 +572,9 @@ UI の作り込み、Tauri、製品形態の決め打ちは行っていない（
 | ~~進路（Phase 6）~~ | **決定済み**: SDK を先に完成させ、その後ウォレット |
 | ~~ヘッダ鎖の永続化（O-016）~~ | **見送り**（D-045） |
 | ~~ウォレット段階の設計案~~ | **承認済み**（D-046）。W1〜W3 を実装 |
-| signet での確認（W4） | この環境からは接続できない。signet に届く環境で実行するか、見送るか |
+| signet での確認（W4） | 手元のマシンに signet のデータ（2025 年 10 月時点）がある。ノードを起動して確認してよいか |
+| mainnet の実ノード | 実際の mainnet での確認には、同期済みのノード（数百 GB、同期に日単位）が要る。用意するか |
+| 窓口 API の次の範囲 | 通常のアドレスでの受信、手数料の見積もり、鍵の保存、モバイル向けバインディング、リモートのバックエンド。どれを先にするか |
 | UI（W5）と鍵の保管 | 形と方式を決める。鍵の保管は別の設計案を出す |
 | ~~O-018~~ | **記録のみ**（D-045）。マッチングは変えない |
 | ~~ライセンス（O-001）~~ | **決定済み**: MIT OR Apache-2.0（D-038） |

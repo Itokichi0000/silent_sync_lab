@@ -19,8 +19,10 @@ use silent_sync::{
 };
 use silent_sync_sqlite::SqliteStore;
 use silent_wallet::{
-    build_and_sign, holdings, BuiltTransaction, CoreRpc, Destination, Holdings, Payment,
-    PendingSpends, PendingTransaction, SendLimits, Settlement, Wallet, WalletKeys,
+    build_and_sign,
+    client::{SeedPhrase, WordCount, MAINNET_DEFAULT_MAX_AMOUNT_SATS},
+    holdings, BuiltTransaction, CoreRpc, Destination, Holdings, Payment, PendingSpends,
+    PendingTransaction, SendLimits, Settlement, Wallet, WalletKeys,
 };
 use std::{
     fmt::Write as _,
@@ -29,24 +31,46 @@ use std::{
     process::ExitCode,
 };
 
+/// Printed first on every run. A build that can be pointed at mainnet does
+/// not claim otherwise.
+#[cfg(not(feature = "mainnet"))]
 const EXPERIMENTAL_BANNER: &str =
     "EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS (unaudited research code)";
+#[cfg(feature = "mainnet")]
+const EXPERIMENTAL_BANNER: &str =
+    "EXPERIMENTAL — UNAUDITED research code, built with mainnet support. On mainnet it handles \
+     REAL FUNDS, and a mistake in it can lose them";
+/// Whether this program was built to accept mainnet. Its own decision: the
+/// libraries below may have been built with mainnet for another program.
+const MAINNET_ENABLED: bool = cfg!(feature = "mainnet");
 const SEED_VARIABLE: &str = "SILENT_WALLET_SEED";
+/// A BIP39 seed phrase, as an alternative to the hexadecimal seed.
+const PHRASE_VARIABLE: &str = "SILENT_WALLET_PHRASE";
+/// The optional BIP39 passphrase that goes with the phrase.
+const PASSPHRASE_VARIABLE: &str = "SILENT_WALLET_PASSPHRASE";
 const DEFAULT_DB: &str = "silent-wallet.sqlite3";
 /// What must be typed to send a transaction.
 const CONFIRMATION: &str = "SEND";
+/// What must be typed to send a transaction on mainnet.
+const MAINNET_CONFIRMATION: &str = "SEND REAL BITCOIN";
 
 #[derive(Parser)]
 #[command(
     name = "silent-wallet",
     version,
-    about = "Experimental silent payments wallet (regtest and signet only)",
-    long_about = "EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.\n\n\
-        The seed is read from the environment variable SILENT_WALLET_SEED (16 to 64 bytes as \
-        hexadecimal digits) on every run. It is never stored and never printed."
+    about = "Experimental silent payments wallet (regtest and signet; mainnet only in a build \
+             with the `mainnet` feature)",
+    long_about = "EXPERIMENTAL — unaudited research code. Regtest and signet; mainnet only when \
+        built with the `mainnet` feature, and then with real funds at your own risk.\n\n\
+        The wallet's secret is read from the environment on every run: either a BIP39 seed \
+        phrase in SILENT_WALLET_PHRASE (with an optional passphrase in \
+        SILENT_WALLET_PASSPHRASE), or a seed of 16 to 64 bytes as hexadecimal digits in \
+        SILENT_WALLET_SEED. It is never stored, and never printed except by `new-phrase`, \
+        which makes a new phrase and shows it once."
 )]
 struct Cli {
-    /// Network: regtest or signet. Mainnet does not exist here.
+    /// Network: regtest or signet. `mainnet` is accepted only by a build
+    /// with the `mainnet` feature.
     #[arg(long, global = true, default_value = "regtest", value_parser = parse_network)]
     network: Network,
     #[command(subcommand)]
@@ -54,7 +78,27 @@ struct Cli {
 }
 
 fn parse_network(value: &str) -> Result<Network, String> {
-    value.parse::<Network>().map_err(|e| e.to_string())
+    let network = value.parse::<Network>().map_err(|e| e.to_string())?;
+    if network.is_mainnet() && !MAINNET_ENABLED {
+        return Err(silent_sync::NetworkError::MainnetRefused.to_string());
+    }
+    Ok(network)
+}
+
+fn confirmation_for(network: Network) -> &'static str {
+    if network.is_mainnet() {
+        MAINNET_CONFIRMATION
+    } else {
+        CONFIRMATION
+    }
+}
+
+/// The most one transaction may pay: what was asked for, and on mainnet a
+/// small default when nothing was.
+fn amount_limit(network: Network, asked: Option<u64>) -> Option<u64> {
+    asked.or(network
+        .is_mainnet()
+        .then_some(MAINNET_DEFAULT_MAX_AMOUNT_SATS))
 }
 
 #[derive(clap::Args)]
@@ -74,6 +118,13 @@ struct NodeArg {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Make a new BIP39 seed phrase and print it, once. Write it down: it is
+    /// the wallet, and it is not stored anywhere.
+    NewPhrase {
+        /// Number of words: 12 or 24.
+        #[arg(long, default_value_t = 12, value_parser = clap::value_parser!(u8).range(12..=24))]
+        words: u8,
+    },
     /// Print the address to receive at.
     Address {
         /// A labelled address (the store must scan for the label). Label 0
@@ -145,6 +196,10 @@ struct SendArgs {
     /// Amount in satoshi.
     #[arg(long)]
     amount: u64,
+    /// Refuse to pay more than this many satoshi in one transaction
+    /// [default: 100000 on mainnet, no limit on regtest and signet].
+    #[arg(long)]
+    max_amount: Option<u64>,
     /// Fee rate in satoshi per virtual byte.
     #[arg(long)]
     fee_rate: u64,
@@ -209,15 +264,33 @@ fn main() -> ExitCode {
 
 /// The wallet for the seed in the environment and the given labels.
 fn wallet(network: Network, labels: &[u32]) -> Result<Wallet, Failure> {
-    let seed = std::env::var(SEED_VARIABLE).map_err(|_| {
-        Failure(format!(
-            "the environment variable {SEED_VARIABLE} is not set. It must hold the wallet's seed: \
-             16 to 64 bytes as hexadecimal digits. This program does not create, store or show \
-             seeds"
-        ))
-    })?;
-    let keys = WalletKeys::from_seed_hex(&seed, network)
-        .map_err(|e| Failure(format!("{SEED_VARIABLE}: {e}")))?;
+    let keys = match (
+        std::env::var(PHRASE_VARIABLE).ok(),
+        std::env::var(SEED_VARIABLE).ok(),
+    ) {
+        (Some(_), Some(_)) => {
+            return Err(Failure(format!(
+                "both {PHRASE_VARIABLE} and {SEED_VARIABLE} are set; set exactly one of them"
+            )))
+        }
+        (Some(phrase), None) => {
+            let passphrase = std::env::var(PASSPHRASE_VARIABLE).unwrap_or_default();
+            SeedPhrase::parse(&phrase)
+                .and_then(|phrase| phrase.keys(&passphrase, network))
+                .map_err(|e| Failure(format!("{PHRASE_VARIABLE}: {e}")))?
+        }
+        (None, Some(seed)) => WalletKeys::from_seed_hex(&seed, network)
+            .map_err(|e| Failure(format!("{SEED_VARIABLE}: {e}")))?,
+        (None, None) => {
+            return Err(Failure(format!(
+                "the environment variable {SEED_VARIABLE} is not set, and neither is \
+                 {PHRASE_VARIABLE}. One of them must hold the wallet's secret: a BIP39 seed \
+                 phrase in {PHRASE_VARIABLE} (`silent-wallet new-phrase` makes one), or 16 to 64 \
+                 bytes as hexadecimal digits in {SEED_VARIABLE}. This program does not store \
+                 either"
+            )))
+        }
+    };
     Wallet::new(keys, network, labels).map_err(fail)
 }
 
@@ -251,7 +324,8 @@ fn wallet_of(network: Network, meta: &StoreMeta) -> Result<Wallet, Failure> {
     let wallet = wallet(network, &extra)?;
     if wallet.scanner().wallet_id() != meta.wallet_id {
         return Err(Failure(format!(
-            "the seed in {SEED_VARIABLE} is not the one this store was created with"
+            "the seed in the environment ({SEED_VARIABLE} or {PHRASE_VARIABLE}) is not the one \
+             this store was created with"
         )));
     }
     Ok(wallet)
@@ -266,6 +340,21 @@ fn pending_path(db: &Path) -> PathBuf {
 fn run(cli: Cli) -> Result<(), Failure> {
     let network = cli.network;
     match cli.command {
+        Command::NewPhrase { words } => {
+            let count = match words {
+                12 => WordCount::Twelve,
+                24 => WordCount::TwentyFour,
+                _ => return Err(Failure("--words must be 12 or 24".to_string())),
+            };
+            let phrase = SeedPhrase::generate(count).map_err(fail)?;
+            eprintln!(
+                "This is the wallet: whoever has these words can spend from it, and without \
+                 them it cannot be restored.\nWrite them down now. They are shown once and not \
+                 stored anywhere. To use the wallet, put them in the environment variable \
+                 {PHRASE_VARIABLE}."
+            );
+            emit(&format!("{}\n", phrase.reveal()))
+        }
         Command::Address { label } => {
             // (The library refuses label 0, the change label.)
             let address = wallet(network, &[])?.address(label).map_err(fail)?;
@@ -609,6 +698,15 @@ struct SendJson<'a> {
 }
 
 fn send(network: Network, args: SendArgs) -> Result<(), Failure> {
+    if let Some(limit) = amount_limit(network, args.max_amount) {
+        if args.amount > limit {
+            return Err(Failure(format!(
+                "{} sat is more than the limit of {limit} sat for one transaction on {network} \
+                 (raise it with --max-amount)\nnothing was built or sent",
+                args.amount
+            )));
+        }
+    }
     let (mut store, meta) = open_store(network, &args.db.db)?;
     let wallet = wallet_of(network, &meta)?;
     let destination = Destination::parse(&args.to, network).map_err(fail)?;
@@ -697,19 +795,43 @@ fn send(network: Network, args: SendArgs) -> Result<(), Failure> {
         return show(false);
     };
     // The decision to send is the user's, on what is shown here.
+    let confirmation = confirmation_for(network);
+    let stakes = if network.is_mainnet() {
+        "\nThis is MAINNET: the transaction moves real bitcoin, with unaudited software."
+    } else {
+        ""
+    };
     eprint!(
-        "{}\nThis hands the transaction to your {network} node; it cannot be taken back.\n\
-         Type {CONFIRMATION} to send it: ",
+        "{}\nThis hands the transaction to your {network} node; it cannot be taken back.{stakes}\n\
+         Type {confirmation} to send it: ",
         render_built(&built)
     );
     let _ = io::stderr().flush();
     let mut answer = String::new();
     io::stdin().lock().read_line(&mut answer).map_err(fail)?;
-    if answer.trim() != CONFIRMATION {
+    if answer.trim() != confirmation {
         return Err(Failure("not confirmed; nothing was sent".to_string()));
     }
-    rpc.would_accept(&built.transaction)
-        .map_err(|e| Failure(format!("{e}\nnothing was sent")))?;
+    if let Err(e) = rpc.would_accept(&built.transaction) {
+        // The node has it already: it went out before. That is not "nothing
+        // was sent"; put it on record so that its inputs are not used again.
+        if e.means_already_with_node() {
+            let txid = built.txid;
+            let mut pending = PendingSpends::load(&pending_file).map_err(fail)?;
+            pending.record(PendingTransaction {
+                txid,
+                inputs: built.inputs.iter().map(|i| i.outpoint).collect(),
+                sent_at_height: held.as_of.map_or(0, |b| b.height),
+                confirmed_at: None,
+            });
+            pending.save(&pending_file).map_err(fail)?;
+            return Err(Failure(format!(
+                "your node already has transaction {txid}: it was sent before. Nothing new was \
+                 sent; it is recorded as pending"
+            )));
+        }
+        return Err(Failure(format!("{e}\nnothing was sent")));
+    }
 
     // Record the transaction as pending *before* it leaves: if the answer is
     // lost, or this process dies, its inputs must not be offered again. The

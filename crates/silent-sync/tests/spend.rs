@@ -194,6 +194,19 @@ fn addresses_are_read_for_their_own_network_only() {
     for network in [Network::Regtest, Network::Signet] {
         assert!(SilentPaymentAddress::parse(&mainnet, network).is_err());
     }
+    // With the `mainnet` feature the same text is read for mainnet, and for
+    // mainnet only; what this crate prints for mainnet is that very text.
+    #[cfg(feature = "mainnet")]
+    {
+        let address = SilentPaymentAddress::parse(&mainnet, Network::Mainnet).unwrap();
+        assert_eq!(address, keys.address(Network::Mainnet));
+        assert_eq!(address.to_string(), mainnet);
+        assert!(address.network().is_mainnet());
+        for network in [Network::Regtest, Network::Signet] {
+            let text = keys.address(network).to_string();
+            assert!(SilentPaymentAddress::parse(&text, Network::Mainnet).is_err());
+        }
+    }
     for garbage in [
         "",
         "sprt1",

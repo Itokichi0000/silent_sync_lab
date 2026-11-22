@@ -186,16 +186,22 @@ fn an_oracle_on_another_chain_or_network_is_refused() {
     assert_refused(setup.scan(), "oracle block 6: the oracle indexed block");
 
     let setup = Setup::new();
-    setup.oracle.set_info("main", TIP, false);
-    assert_eq!(
-        setup.connect().err(),
-        Some(SourceError::Network(NetworkError::MainnetRefused))
-    );
-    setup.oracle.set_info("mainnet", TIP, false);
-    assert_eq!(
-        setup.connect().err(),
-        Some(SourceError::Network(NetworkError::MainnetRefused))
-    );
+    // Without the `mainnet` feature the name is refused; with it, the name
+    // is a network, and not the one the header source is on.
+    for name in ["main", "mainnet"] {
+        setup.oracle.set_info(name, TIP, false);
+        let error = setup.connect().err();
+        #[cfg(not(feature = "mainnet"))]
+        assert_eq!(
+            error,
+            Some(SourceError::Network(NetworkError::MainnetRefused))
+        );
+        #[cfg(feature = "mainnet")]
+        assert!(
+            matches!(&error, Some(SourceError::InvalidData(m)) if m.contains("indexes mainnet")),
+            "{error:?}"
+        );
+    }
     setup.oracle.set_info("testnet", TIP, false);
     assert!(matches!(
         setup.connect(),
@@ -215,9 +221,19 @@ fn an_oracle_on_another_chain_or_network_is_refused() {
     setup
         .node
         .set_chain_info("main", TIP, setup.node.hashes[TIP as usize]);
+    let error = setup.connect().err();
+    #[cfg(not(feature = "mainnet"))]
     assert_eq!(
-        setup.connect().err(),
+        error,
         Some(SourceError::Network(NetworkError::MainnetRefused))
+    );
+    #[cfg(feature = "mainnet")]
+    assert!(
+        matches!(
+            error,
+            Some(SourceError::Network(NetworkError::GenesisMismatch { .. }))
+        ),
+        "{error:?}"
     );
 }
 

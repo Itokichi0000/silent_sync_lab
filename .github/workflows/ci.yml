@@ -9,6 +9,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  MAINNET_FEATURES: silent-sync/mainnet,silent-sync/core-rest,silent-sync/blindbit-http,silent-sync/fixture,silent-sync/local-index,silent-sync/low-level,silent-sync/spend,silent-sync/secret-output-tweaks,silent-sync-sqlite/mainnet,silent-wallet/mainnet,silent-wallet/client,wallet-cli/mainnet
 
 jobs:
   check:
@@ -32,7 +33,7 @@ jobs:
       # embedder can choose (the workspace build above enables them all).
       - name: Clippy (library alone, each feature set)
         run: |
-          for features in "" core-rest blindbit-http fixture local-index low-level secret-output-tweaks spend; do
+          for features in "" core-rest blindbit-http fixture local-index low-level secret-output-tweaks spend mainnet "mainnet,core-rest,spend"; do
             echo "::group::features: ${features:-none}"
             cargo clippy -p silent-sync --lib --locked --features "$features" -- -D warnings
             echo "::endgroup::"
@@ -46,6 +47,15 @@ jobs:
       # `#[ignore]`d here and run in the regtest-e2e job below.
       - name: Test
         run: cargo test --workspace --locked
+      # Mainnet is off by default. First with every `mainnet` feature on; then
+      # with only the SDK's on, as when another crate in a build asks for it:
+      # the wallet and the lab CLI must still refuse mainnet on their own.
+      - name: Test (mainnet features)
+        run: |
+          cargo test -p silent-sync -p silent-sync-sqlite -p silent-wallet -p wallet-cli --locked \
+            --features "$MAINNET_FEATURES" -- --skip k_max
+          cargo test -p silent-wallet -p wallet-cli -p lab-cli --locked \
+            --features silent-sync/mainnet -- --skip k_max
 
   # End-to-end tests against a real Bitcoin Core regtest node. They are
   # `#[ignore]`d in the normal suite because they need the binary.
@@ -71,3 +81,9 @@ jobs:
           echo "BLINDBIT_ORACLE_EXE=$exe" >> "$GITHUB_ENV"
       - name: End-to-end tests
         run: cargo test --workspace --locked -- --ignored
+      # A node with mainnet parameters and no network access (genesis only):
+      # refused by a default build above, a source like any other here.
+      - name: End-to-end tests (mainnet features, offline mainnet-parameter node)
+        run: |
+          cargo test -p silent-sync -p silent-wallet -p wallet-cli --locked \
+            --features "$MAINNET_FEATURES" -- --ignored mainnet a_transaction_is_never

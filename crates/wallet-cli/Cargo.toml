@@ -1,6 +1,6 @@
 [package]
 name = "wallet-cli"
-description = "EXPERIMENTAL command line silent payments wallet on silent-sync and silent-wallet. Regtest and signet only. NOT FOR MAINNET OR REAL FUNDS."
+description = "EXPERIMENTAL, unaudited command line silent payments wallet on silent-sync and silent-wallet. Regtest and signet; mainnet only when built with the `mainnet` feature."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,8 +13,13 @@ path = "src/main.rs"
 # The library crate has the same name; only one of them can own the docs.
 doc = false
 
+[features]
+# Accepts `--network mainnet`: receiving and sending real funds with
+# unaudited code. Off by default.
+mainnet = ["silent-wallet/mainnet", "silent-sync-sqlite/mainnet"]
+
 [dependencies]
-silent-wallet = { path = "../silent-wallet" }
+silent-wallet = { path = "../silent-wallet", features = ["client"] }
 silent-sync = { path = "../silent-sync", features = ["core-rest"] }
 silent-sync-sqlite = { path = "../silent-sync-sqlite" }
 clap = { version = "4.5", features = ["derive"] }

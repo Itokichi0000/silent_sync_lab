@@ -28,6 +28,26 @@ pub enum KeyError {
     Derivation,
 }
 
+/// Why a wallet could not be made.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum WalletError {
+    #[error(
+        "mainnet is refused: this wallet was built without its `mainnet` feature, and signs \
+         on regtest and signet only"
+    )]
+    /// A wallet for mainnet was asked for, and this crate was built without
+    /// its `mainnet` feature.
+    MainnetNotEnabled,
+    #[error(transparent)]
+    /// The scanner could not be made for these keys and labels.
+    Protocol(#[from] ProtocolError),
+}
+
+/// Whether this build may make a wallet on mainnet. Decided by this crate's
+/// own feature, not by whether `silent-sync` can name mainnet.
+const MAINNET_ENABLED: bool = cfg!(feature = "mainnet");
+
 /// The scan and spend private keys of one wallet.
 #[derive(Clone)]
 pub struct WalletKeys {
@@ -36,11 +56,11 @@ pub struct WalletKeys {
 }
 
 impl WalletKeys {
-    /// Derives the keys from a BIP32 seed along the BIP352 paths for test
-    /// networks: `m/352'/1'/0'/1'/0` (scan) and `m/352'/1'/0'/0'/0` (spend).
+    /// Derives the keys from a BIP32 seed along the BIP352 paths
+    /// `m/352'/coin'/0'/1'/0` (scan) and `m/352'/coin'/0'/0'/0` (spend).
     ///
-    /// Coin type 1 is used for both networks this crate knows; mainnet's
-    /// coin type 0 is never derived.
+    /// The coin type is 1 for regtest and signet and 0 for mainnet, so one
+    /// seed gives unrelated keys on test networks and on mainnet.
     pub fn from_seed(seed: &[u8], network: Network) -> Result<Self, KeyError> {
         if !(16..=64).contains(&seed.len()) {
             return Err(KeyError::InvalidSeed);
@@ -55,9 +75,10 @@ impl WalletKeys {
                 .map(|key| key.private_key)
                 .map_err(|_| KeyError::Derivation)
         };
+        let coin = if network.is_mainnet() { 0 } else { 1 };
         Ok(Self {
-            scan: derive("352h/1h/0h/1h/0")?,
-            spend: derive("352h/1h/0h/0h/0")?,
+            scan: derive(&format!("352h/{coin}h/0h/1h/0"))?,
+            spend: derive(&format!("352h/{coin}h/0h/0h/0"))?,
         })
     }
 
@@ -108,7 +129,15 @@ pub struct Wallet {
 impl Wallet {
     /// A wallet that scans for the unlabelled address, the change label and
     /// the labels in `labels`.
-    pub fn new(keys: WalletKeys, network: Network, labels: &[u32]) -> Result<Self, ProtocolError> {
+    ///
+    /// Mainnet is refused unless this crate was built with its `mainnet`
+    /// feature. Every signature this crate makes goes through a `Wallet`,
+    /// and `build_and_sign` refuses a source or an output on another network
+    /// than the wallet's; together the two keep a default build off mainnet.
+    pub fn new(keys: WalletKeys, network: Network, labels: &[u32]) -> Result<Self, WalletError> {
+        if network.is_mainnet() && !MAINNET_ENABLED {
+            return Err(WalletError::MainnetNotEnabled);
+        }
         let scanner = ReceiveScanner::new(&keys.receiver(), labels)?;
         Ok(Self {
             keys,

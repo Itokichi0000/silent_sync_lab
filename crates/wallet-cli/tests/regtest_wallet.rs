@@ -58,9 +58,7 @@ fn wallet(seed: &str, args: &[&str], input: &str) -> Run {
     for text in [&run.stdout, &run.stderr] {
         assert!(!text.to_lowercase().contains(seed), "the seed was printed");
     }
-    assert!(run
-        .stderr
-        .starts_with("EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS"));
+    assert!(run.stderr.starts_with("EXPERIMENTAL — "));
     run
 }
 

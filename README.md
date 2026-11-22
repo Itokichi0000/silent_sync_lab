@@ -1,33 +1,35 @@
 # Silent Sync Lab
 
-> **EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS**
+> **EXPERIMENTAL — 未監査の実験用コードです**
 >
-> 未監査の実験用コードです。mainnet・実資金・本番運用には使えません（mainnet の指定はコードで拒否されます）。
-> 安全性について一切の保証をしません。
+> 既定のビルドでは mainnet を指定できません（コードで拒否されます）。mainnet は、feature `mainnet` を明示的に有効にしたビルドでだけ使えます。
+> その場合は**実資金を扱います**が、第三者の監査は受けておらず、安全性について一切の保証をしません。バグがあれば資金を失います。
 
 Bitcoin [BIP352 (Silent Payments)](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki) の**受信側の同期**を、
-再現可能な形で検証・計測するための実験環境と、その上に作った**実験用のウォレット**（regtest / signet 専用）です。製品ではありません。
+再現可能な形で検証・計測するための実験環境と、その上に作った**実験用のウォレット**と、アプリに組み込むための**窓口 API**（`silent_wallet::client`）です。製品ではありません。
 
 - 同期の部分（`silent-sync`、`silent-sync-sqlite`、CLI `silent-sync`）は受信専用で、送金・署名の機能を持ちません。
-- ウォレットの部分（`silent-wallet`、CLI `silent-wallet`）は、無価値のコインで「受け取る → 未使用を確認する → 送る」を試すためのものです。mainnet は指定できません。
+- ウォレットの部分（`silent-wallet`、CLI `silent-wallet`）は、「受け取る → 未使用を確認する → 送る」を行います。既定では regtest / signet だけで、mainnet は feature `mainnet` を有効にしたビルドでだけ指定できます。
+- 受信専用の CLI（`silent-sync`）は公開のテスト鍵で動くので、どのビルドでも mainnet を拒否します。
 
 - 要求仕様: [`SILENT_SYNC_LAB_DESIGN.md`](SILENT_SYNC_LAB_DESIGN.md)
-- 現在地: [`docs/PROGRESS.md`](docs/PROGRESS.md)（Phase 0〜5、SDK 化、ウォレット段階 W1〜W3 を実施。signet での確認と UI は未了）
+- 現在地: [`docs/PROGRESS.md`](docs/PROGRESS.md)（Phase 0〜5、SDK 化、ウォレット段階 W1〜W3、mainnet の feature、窓口 API を実施。signet と mainnet の実ネットワークでの確認、UI は未了）
 - ウォレットの範囲と設計: [`docs/WALLET_DESIGN_PROPOSAL.md`](docs/WALLET_DESIGN_PROPOSAL.md)、脅威モデルは [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) §4.6
 
 ## 出来ること / 出来ないこと
 
 | 出来る | 出来ない |
 |---|---|
-| BIP352 公式テストベクトル（v1.1.2、29 件）による受信検出の検証 | mainnet、実資金（指定そのものができません） |
+| BIP352 公式テストベクトル（v1.1.2、29 件）による受信検出の検証 | 既定のビルドでの mainnet（指定そのものができません。feature `mainnet` が必要） |
+| **窓口 API**（`silent_wallet::client`）: シードフレーズ（BIP39）の作成と復元、接続、受信アドレス、同期、未使用の集計、送金（組み立てと送信の 2 段階） | ライトニング、通常のオンチェーンのアドレスでの受信、手数料の見積もり |
 | 4 種のデータ源からの検出: オフライン fixture、自分の Bitcoin Core（REST）、BlindBit Oracle v2（HTTP）、手元で計算した tweak インデックス | リモート（ループバック以外）のサーバへの接続 |
 | 永続同期: チェックポイント、中断からの再開、reorg の巻き戻しと報告（深さの上限つき）、birthday からの復元 | 未承認の tx（mempool）の追跡。外から届いた入金は、ブロックに入るまで見えません |
 | フルブロックで検出した出力が使われたことの記録（reorg で取り消し） | インデックス由来の検出についての使用済みの判定（入力が見えないため「不明」） |
 | 2 つのデータ源の突き合わせ（`verify`）と、差分の tx 単位の説明 | 監査結果による証拠種別の格上げ |
 | 保存済みの検出結果と使用済みの記録を、参照ソース（自分のノード）で照合する監査（`audit`） | ラベルの削除、再スキャンなしでのラベル追加 |
-| ラベルの追加（`lab add-label`。範囲全体を別ファイルへスキャンし直し、何も失わないことを確かめてから差し替える） | 鍵・シードの保管（毎回、環境変数で渡します） |
-| **ウォレット（regtest / signet）**: アドレスの表示、未使用の集計、送金 tx の組み立て・署名・自分のノードへの送信 | 手数料の引き上げ（RBF / CPFP）、複数の宛先への同時送金（CLI）、ハードウェアウォレット、マルチシグ |
-| ベンチマーク（JSON / CSV / Markdown）と故障注入 | signet での動作確認（この環境から接続できず未確認）、GUI |
+| ラベルの追加（`lab add-label`。範囲全体を別ファイルへスキャンし直し、何も失わないことを確かめてから差し替える） | 鍵・シード・シードフレーズの保管（毎回、環境変数や引数で渡します） |
+| **ウォレット**（regtest / signet。mainnet は feature `mainnet`）: アドレスの表示、未使用の集計、サイレントペイメントと通常のアドレスへの送金 tx の組み立て・署名・自分のノードへの送信 | 手数料の引き上げ（RBF / CPFP）、複数の宛先への同時送金（CLI）、ハードウェアウォレット、マルチシグ |
+| ベンチマーク（JSON / CSV / Markdown）と故障注入 | signet と、ブロックのある mainnet ノードでの動作確認（未実施）、GUI |
 
 「検出した出力」は、それだけでは「未使用残高」でも「着金の確認」でもありません。ウォレットが「未使用」と呼ぶのは、**フルブロックで検出し、使用済みの記録が無い出力**だけです。
 特に **tweak インデックス由来の検出は、サーバの申告をそのまま照合した結果**で、サーバは入金を省略することも、存在しない入金を見せることもできます
@@ -117,11 +119,51 @@ cargo run -p lab-cli -- lab add-label --db /tmp/lab.sqlite3 --backend fixture --
 - 終了コード: 0 成功、1 エラー、2 引数エラー、4 `verify` / `audit` で差分あり。
 - `--json` で機械可読な出力になります。
 
-### ウォレット（regtest / signet 専用）
+### アプリに組み込む（窓口 API）
+
+`silent-wallet` の feature `client` を有効にすると、数個の関数でウォレットを組み込めます。データ源は、同じマシンで動く自分の Bitcoin Core（`-rest=1 -server=1`）です。
+
+```toml
+silent-wallet = { path = "crates/silent-wallet", features = ["client"] }
+```
+
+```rust
+use silent_wallet::client::{ClientConfig, SeedPhrase, WalletClient, WordCount};
+use silent_sync::Network;
+
+// 初回だけ: シードフレーズを作り、利用者に書き留めてもらう（保存はしません）
+let phrase = SeedPhrase::generate(WordCount::Twelve)?;
+
+// 起動のたびに: フレーズを渡して接続する（ストアは初回に作られます）
+let config = ClientConfig::new(Network::Signet, "wallet.sqlite3", "http://127.0.0.1:38332")
+    .with_rpc_cookie_file("/path/to/signet/.cookie");
+let mut wallet = WalletClient::connect(config, &phrase, "")?;
+
+println!("受け取り用アドレス: {}", wallet.receive_address(None)?);
+wallet.sync()?;
+println!("未使用: {} sat", wallet.holdings()?.unspent_sats());
+
+// 送金は 2 段階: 組み立てて内容を見せ、利用者が決めてから送る
+let prepared = wallet.prepare_send("tsp1q…", 10_000, 2)?;
+println!("{prepared}");
+let txid = wallet.send(prepared)?;
+```
+
+- 受信はサイレントペイメントのアドレス、送金はサイレントペイメントと通常のオンチェーンのアドレスの両方に対応します。ライトニングと、通常のアドレスでの受信はありません。
+- `send` が `OutcomeUnknown` を返したら、**送られたかどうかは分かりません**。「送られなかった」として扱わないでください（その tx は送信中として記録され、入力は再利用されません）。
+- mainnet で使うには `features = ["client", "mainnet"]` が必要です。1 回の送金額には既定の上限（100,000 sat）があります。
+
+### ウォレットの CLI（regtest / signet。mainnet は feature `mainnet`）
 
 自分の Bitcoin Core ノード（`-rest=1 -server=1`、ループバック）が必要です。下は regtest の例です。
 
-シードは実行のたびに環境変数 `SILENT_WALLET_SEED`（16〜64 バイトを 16 進数で）から読みます。**保存も表示もしません。このプログラムはシードを作りません。** 試すときは、たとえば次のように自分で用意します（この値に価値のあるものを結び付けないでください）。
+ウォレットの秘密は、実行のたびに環境変数から読みます。**保存はしません。** シードフレーズ（BIP39）を使う場合は、まず作って書き留めます（このコマンドだけが、作ったフレーズを 1 回表示します）。
+
+```bash
+cargo run -p wallet-cli -- new-phrase
+```
+
+表示された語を環境変数 `SILENT_WALLET_PHRASE` に入れます（BIP39 のパスフレーズを使う場合は `SILENT_WALLET_PASSPHRASE` にも）。16 進のシード（16〜64 バイト）を `SILENT_WALLET_SEED` で渡す方法も使えます。設定するのはどちらか一方です。
 
 ```bash
 export SILENT_WALLET_SEED="$(openssl rand -hex 32)"
@@ -157,6 +199,7 @@ cargo run -p wallet-cli -- send --db ~/silent-wallet.sqlite3 --core-rest-url htt
 - 送ったあとブロックに入るまでの tx は `pending` で確認できます。
 - シードを失うと、そのウォレットの出力は使えなくなります。保管の仕組みはありません（実験用です）。
 - signet での動作は未確認です（`docs/PROGRESS.md`）。
+- **mainnet**: `cargo run -p wallet-cli --features mainnet -- --network mainnet …` のように、feature を有効にしたビルドでだけ指定できます。実資金が動きます。確認語は `SEND REAL BITCOIN`、1 回の送金額の既定の上限は 100,000 sat（`--max-amount` で上げられます）。手数料の率は自分で指定し、あとから引き上げる手段はありません。ブロックのある実際の mainnet ノードでの動作は未確認です。
 
 ### 実ノードを使うテストとベンチマーク
 

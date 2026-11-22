@@ -59,6 +59,12 @@ WR = "crates/silent-wallet/src/rpc.rs"
 WK = "crates/silent-wallet/src/keys.rs"
 WP = "crates/silent-wallet/src/pending.rs"
 WC = "crates/wallet-cli/src/main.rs"
+CL = "crates/silent-wallet/src/client.rs"
+# Entries with a fifth element are run with those cargo arguments instead of
+# the whole workspace: checks that only exist, or only matter, when some
+# crate in the build has turned on a `mainnet` feature.
+SDK_MAINNET = ["-p", "silent-sync", "--features", "mainnet,core-rest,blindbit-http,fixture,local-index,low-level,spend"]
+UNIFIED = ["--features", "silent-sync/mainnet"]
 muts = [
     # --- block structure checks shared by the fixture and Core backends ---
     ("pow check removed", B, "    header.validate_pow(target).map_err(|e| e.to_string())", "    Ok(header.block_hash())"),
@@ -94,7 +100,7 @@ muts = [
     ("http: non-200 success statuses accepted", H, "            (200, body) => Ok(body),", "            (status, body) if status < 400 => Ok(body),"),
     ("http: response size unbounded", H, "if body.len() as u64 > self.max_body_bytes {", "if false {"),
     # --- Bitcoin Core REST backend ---
-    ("core: mainnet chain name accepted", C, '"main" => Err(NetworkError::MainnetRefused.into()),', '"main" => Ok(Network::Regtest),'),
+    ("core: mainnet chain name accepted", C, '"main" => Ok(crate::network::mainnet()?),', '"main" => Ok(Network::Regtest),'),
     ("core: node's block 0 not compared with genesis", C, "ChainIdentity::verified(network, genesis)?;", "let _ = genesis;"),
     ("core: header chain links unchecked", C, "if header.prev_blockhash != parent {", "if false {"),
     ("core: header proof of work unchecked", C, "let hash = check_proof_of_work(header, network)", "let hash = Ok::<_, String>(header.block_hash())"),
@@ -109,7 +115,7 @@ muts = [
     ("core: tip not bound to the header chain", C, "if tip.hash != info.bestblockhash {", "if false {"),
     ("core: block not checked against requested hash", C, "hash: Some(hash),", "hash: None,"),
     # --- BlindBit Oracle backend ---
-    ("oracle: mainnet name accepted", O, '"main" | "mainnet" => Err(NetworkError::MainnetRefused.into()),', '"main" | "mainnet" => Ok(Network::Regtest),'),
+    ("oracle: mainnet name accepted", O, '"main" | "mainnet" => Ok(crate::network::mainnet()?),', '"main" | "mainnet" => Ok(Network::Regtest),'),
     ("oracle: network not compared with header source", O, "if network != source.headers.chain().network() {", "if false {"),
     ("oracle: tweaks_only accepted", O, "if info.tweaks_only {", "if false {"),
     ("oracle: block hash not compared with header source", O, "if hash != expected.hash {", "if false {"),
@@ -251,6 +257,34 @@ muts = [
     ("wallet: RPC to a non-loopback address accepted", WR, ".filter(|address| address.ip().is_loopback() && *address.ip() != Ipv4Addr::UNSPECIFIED)", ".filter(|_| true)"),
     ("wallet: seed of any length accepted", WK, "        if !(16..=64).contains(&seed.len()) {", "        if false {"),
     ("wallet cli: store of another seed accepted", WC, "    if wallet.scanner().wallet_id() != meta.wallet_id {", "    if false {"),
+    # --- mainnet: off unless asked for, per crate ---
+    ("mainnet: named without the feature", N, "    Err(NetworkError::MainnetRefused)\n}", "    Ok(Network::Regtest)\n}"),
+    ("mainnet: regtest's proof of work limit used", B, "Network::Mainnet => Target::MAX_ATTAINABLE_MAINNET,", "Network::Mainnet => Target::MAX_ATTAINABLE_REGTEST,", SDK_MAINNET),
+    ("mainnet: lab CLI accepts it when the SDK can name it", M, "    if network.is_mainnet() {", "    if false {", ["-p", "lab-cli"] + UNIFIED),
+    ("mainnet: wallet made without the wallet's feature", WK, "        if network.is_mainnet() && !MAINNET_ENABLED {", "        if false {", ["-p", "silent-wallet"] + UNIFIED),
+    ("mainnet: wallet CLI accepts it without its feature", WC, "    if network.is_mainnet() && !MAINNET_ENABLED {", "    if false {", ["-p", "wallet-cli"] + UNIFIED),
+    ("mainnet: test network keys derived", WK, "        let coin = if network.is_mainnet() { 0 } else { 1 };", "        let coin = 1;", ["-p", "silent-wallet", "--features", "mainnet"]),
+    ("mainnet: wallet CLI has no default amount limit", WC, "        .is_mainnet()\n        .then_some(MAINNET_DEFAULT_MAX_AMOUNT_SATS))", "        .is_mainnet()\n        .then_some(u64::MAX))", ["-p", "wallet-cli", "--features", "mainnet"]),
+    # Not listed, because no fast test can reach them (they need a mainnet
+    # node with blocks, or a confirmed send): the mainnet confirmation phrase
+    # of the wallet CLI, and the client's default amount limit on mainnet
+    # (covered by the node test `a_mainnet_wallet_opens_on_a_mainnet_node`).
+    # --- the one-stop client ---
+    ("client: amount limit ignored", CL, "            if amount_sats > limit_sats {", "            if false {"),
+    ("client: node on another network accepted", CL, "        if source.chain().network() != network {", "        if false {"),
+    ("client: store of another phrase opened", CL, "            if wallet.scanner().wallet_id() != meta.wallet_id {", "            if false {"),
+    ("client: labels of the store not compared", CL, "            if !asked.is_empty() && asked != stored {", "            if false {"),
+    ("client: label the store does not scan handed out", CL, "            if !self.meta.labels.contains(&m) {", "            if false {"),
+    ("client: phrase of another length accepted", CL, "        if !matches!(phrase.word_count(), 12 | 24) {", "        if false {"),
+    ("client: entropy of another size accepted", CL, "        if !matches!(entropy.len(), 16 | 32) {", "        if false {"),
+    # Not listed (node tests only, `receive_and_send_between_two_wallets_on_a_node`):
+    # the stale-transaction check of `send`, and the pending record written
+    # before a transaction leaves.
+    ("wallet: source on another network signed for", W, "    if source.chain().network() != network {", "    if false {"),
+    ("wallet: output of another network signed for", W, "    if let Some(foreign) = candidates.iter().find(|d| d.network != network) {", "    if let Some(foreign) = candidates.iter().find(|_| false) {"),
+    ("wallet: transaction the node already has reported as not sent", WR, "        !self.means_already_with_node()\n            && matches!(", "        matches!("),
+    ("client: change label in the configuration refused", CL, "            asked.retain(|&m| m != 0);\n", ""),
+    ("wallet cli: amount limit ignored", WC, "        if args.amount > limit {", "        if false {"),
     ("sync: zero chunk size accepted", S, "if options.chunk_size == 0 {", "if false {"),
     ("sync: binding chain unchecked", S, "if meta.chain != chain {", "if false {"),
     ("sync: binding wallet unchecked", S, "if meta.wallet_id != wallet_id {", "if false {"),
@@ -361,13 +395,14 @@ survived = []
 if only:
     muts = [m for m in muts if any(m[0].startswith(prefix) for prefix in only)]
     print(f"running {len(muts)} selected entries: {only}")
-for name, path, old, new in muts:
+for name, path, old, new, *scope in muts:
+    scope = scope[0] if scope else ["--workspace"]
     full = os.path.join(root, path)
     src = open(full).read()
     if src.count(old) != 1:
         print(f"SETUP-ERROR  {name}: pattern count {src.count(old)}"); survived.append(name + " (setup)"); continue
     open(full, "w").write(src.replace(old, new))
-    r = subprocess.run(["cargo", "test", "--locked", "-q", "--workspace", "--", "--skip", "k_max"], cwd=root, env=env, capture_output=True, text=True, timeout=1800)
+    r = subprocess.run(["cargo", "test", "--locked", "-q", *scope, "--", "--skip", "k_max"], cwd=root, env=env, capture_output=True, text=True, timeout=1800)
     open(full, "w").write(src)
     out = r.stdout + r.stderr
     if r.returncode == 0:

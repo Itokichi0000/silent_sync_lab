@@ -39,6 +39,7 @@ echo "== documentation (default features, all features)"
 RUSTDOCFLAGS="-D warnings" cargo doc -p silent-sync --no-deps --locked --quiet
 RUSTDOCFLAGS="-D warnings" cargo doc -p silent-sync --no-deps --locked --quiet --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc -p silent-sync-sqlite --no-deps --locked --quiet
+RUSTDOCFLAGS="-D warnings" cargo doc -p silent-wallet --no-deps --locked --quiet --features client
 
 echo "== CLI built on its own"
 target="${CARGO_TARGET_DIR:-target}/cli-alone"
@@ -58,8 +59,11 @@ cargo build -p wallet-cli --locked --quiet --target-dir "$target"
 seed="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 out="$(SILENT_WALLET_SEED="$seed" "$target/debug/silent-wallet" address 2>/dev/null)"
 grep -q "^sprt1" <<<"$out" || { echo "unexpected wallet address output" >&2; exit 1; }
-if "$target/debug/silent-wallet" --network mainnet address >/dev/null 2>&1; then
-  echo "the wallet accepted mainnet" >&2; exit 1
+if SILENT_WALLET_SEED="$seed" "$target/debug/silent-wallet" --network mainnet address >/dev/null 2>&1; then
+  echo "the wallet accepted mainnet in a default build" >&2; exit 1
+fi
+if "$target/debug/silent-sync" --network mainnet address show >/dev/null 2>&1; then
+  echo "the lab CLI accepted mainnet" >&2; exit 1
 fi
 
 echo "== examples"

@@ -57,6 +57,17 @@
 
 **外部の依存は増やしていない。** `silent-wallet` は `silent-sync`（feature `spend`、`low-level`）、`bdk_sp`（送信側の関数。ワークスペースと同じ固定 rev）、`serde`、`serde_json`、`thiserror` を使う。`wallet-cli` は加えて `silent-sync-sqlite` と `clap`（`lab-cli` と同じ版）。ノードへの送信に使う JSON-RPC（HTTP）と Basic 認証の base64 は、依存を足さずに `silent-wallet/src/rpc.rs` に書いた（暗号ではない。RFC の例でテスト）。`Cargo.lock` の差分はこの 2 クレートの追加だけ。
 
+### 窓口 API（`silent-wallet` の feature `client`。DECISIONS D-052）
+
+| crate | バージョン | ライセンス | 使用箇所 |
+|---|---|---|---|
+| `bip39` | 2.2.2（厳密に固定。`default-features = false`、feature `std`。英語の単語表のみ、`rand` なし） | CC0-1.0 | シードフレーズ ⇔ エントロピー ⇔ シード（BIP39）。rust-bitcoin のクレートで、ハッシュは既存の `bitcoin_hashes 0.14.0` を使う |
+| `getrandom` | 0.2.17 | MIT OR Apache-2.0 | 新しいフレーズのエントロピー（OS の乱数源） |
+
+- 推移的に増えたもの: `unicode-normalization 0.1.26`、`tinyvec 1.13.3`（`bip39` 経由）、`cfg-if 1.0.5`、`libc 0.2.191`、`wasi 0.11.1`（`getrandom` 経由。`wasi` は WASI 向けのビルドでだけ使われる）。いずれも MIT OR Apache-2.0 系（`tinyvec` は Zlib OR Apache-2.0 OR MIT）。
+- `wallet-cli` は `silent-wallet` の feature `client` を有効にする（`new-phrase` とフレーズの読み取りのため）。`silent-wallet` を `client` なしで使う場合、これらは入らない。
+- 暗号スタック（上の表）の版は変わっていない。`Cargo.lock` の差分は、これらの追加だけ。
+
 ## 推移的依存（すべて）
 
 `anstream 1.0.0`, `anstyle 1.0.14`, `anstyle-parse 1.0.0`, `anstyle-query 1.1.5`, `arrayvec 0.7.8`, `cc 1.11.3`, `clap_builder 4.6.7`, `clap_derive 4.6.9`, `clap_lex 1.1.2`, `colorchoice 1.0.5`, `find-msvc-tools 0.1.15`, `heck 0.5.0`, `is_terminal_polyfill 1.70.2`, `itoa 1.0.19`, `proc-macro2 1.0.107`, `quote 1.0.47`, `serde_core 1.0.229`, `serde_derive 1.0.229`, `shlex 2.0.1`, `syn 3.0.10`, `thiserror-impl 2.0.21`, `utf8parse 0.2.2` — いずれも MIT OR Apache-2.0。

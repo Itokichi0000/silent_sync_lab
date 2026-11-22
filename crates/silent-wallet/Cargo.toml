@@ -1,11 +1,28 @@
 [package]
 name = "silent-wallet"
-description = "EXPERIMENTAL silent payments wallet logic on top of silent-sync: unspent outputs, building and signing transactions. Regtest and signet only; no mainnet."
+description = "EXPERIMENTAL, unaudited silent payments wallet logic on top of silent-sync: unspent outputs, building and signing transactions. Mainnet only with the `mainnet` feature."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+
+[features]
+# Lets a wallet be made for mainnet: it then signs transactions that spend
+# real funds. Unaudited code; off by default. Without it `Wallet::new`
+# refuses mainnet even if `silent-sync` was built with its own `mainnet`
+# feature by another crate.
+mainnet = ["silent-sync/mainnet"]
+# The one-stop interface (`client`): seed phrases (BIP39), a store on disk,
+# your own Bitcoin Core node as the data source, receive / sync / send behind
+# a handful of calls. Pulls in SQLite, a small HTTP client, the BIP39 word
+# list and the operating system's random number source.
+client = [
+    "dep:silent-sync-sqlite",
+    "dep:bip39",
+    "dep:getrandom",
+    "silent-sync/core-rest",
+]
 
 [dependencies]
 # `spend`: the tweak needed to spend an output, derived again from a full
@@ -14,6 +31,11 @@ publish.workspace = true
 silent-sync = { path = "../silent-sync", features = ["spend", "low-level"] }
 # The upstream sender: which output keys pay a silent payment address.
 bdk_sp = { workspace = true }
+silent-sync-sqlite = { path = "../silent-sync-sqlite", optional = true }
+# BIP39: phrase <-> entropy <-> seed. English word list only, no `rand`.
+bip39 = { version = "=2.2.2", optional = true, default-features = false, features = ["std"] }
+# Entropy for a new phrase, from the operating system.
+getrandom = { version = "0.2", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

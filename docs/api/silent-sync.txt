@@ -6,6 +6,7 @@ local-index = []
 low-level = []
 secret-output-tweaks = ["low-level"]
 spend = []
+mainnet = []
 
 ## audit.rs
 #[derive(Debug, Clone, Default, PartialEq, Eq)] #[non_exhaustive] pub struct AuditOptions
@@ -162,9 +163,11 @@ pub use verify::{cross_check, Difference, Explanation, Side, VerificationReport}
     pub spending_txid: Txid,
 
 ## network.rs
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)] #[serde(try_from = "String", into = "String")] pub enum Network
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)] #[serde(try_from = "String", into = "String")] #[non_exhaustive] pub enum Network
     Regtest,
     Signet,
+    #[cfg(feature = "mainnet")]
+    Mainnet,
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)] #[non_exhaustive] pub enum NetworkError
     #[error(
         "mainnet is refused: this is experimental, unaudited software and must not be used \
@@ -181,6 +184,7 @@ pub use verify::{cross_check, Difference, Explanation, Side, VerificationReport}
     },
 impl Network
     pub const fn as_str(self) -> &'static str
+    pub const fn is_mainnet(self) -> bool
     pub const fn to_bitcoin(self) -> BitcoinNetwork
     pub fn try_from_bitcoin(network: BitcoinNetwork) -> Result<Self, NetworkError>
     pub fn genesis_hash(self) -> BlockHash

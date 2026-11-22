@@ -1,6 +1,7 @@
 //! # silent-sync
 //!
-//! **EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.** Unaudited research code.
+//! **EXPERIMENTAL.** Unaudited research code. Mainnet cannot be named unless
+//! the crate is built with the `mainnet` feature.
 //!
 //! Receive-side synchronisation for BIP352 (Silent Payments): find the
 //! outputs that pay a receiver, keep track of how far the chain has been
@@ -17,8 +18,11 @@
 //!   ([`rescan_into`]).
 //! * **Does not**: send, sign, track spent outputs or balances, or store
 //!   keys. A detected output is not a balance.
-//! * **Mainnet is not representable**: [`Network`] has no mainnet variant,
-//!   and every source refuses a mainnet chain.
+//! * **Mainnet is opt-in**: without the `mainnet` feature [`Network`] has no
+//!   mainnet variant and every source refuses a mainnet chain. With it,
+//!   mainnet is one more network for everything above. Nothing in this crate
+//!   signs or sends on any network; code built on top that does must check
+//!   [`Network::is_mainnet`] itself.
 //! * All BIP352 cryptography (key extraction, input hash, ECDH, output
 //!   matching) is done by the upstream `bdk_sp` crate. This crate adds
 //!   orchestration, script-level eligibility checks, validation of what data

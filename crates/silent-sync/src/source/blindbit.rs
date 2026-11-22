@@ -85,7 +85,7 @@ fn network_from_oracle(name: &str) -> Result<Network, SourceError> {
     match name {
         "regtest" => Ok(Network::Regtest),
         "signet" => Ok(Network::Signet),
-        "main" | "mainnet" => Err(NetworkError::MainnetRefused.into()),
+        "main" | "mainnet" => Ok(crate::network::mainnet()?),
         other => Err(NetworkError::Unsupported(printable(other)).into()),
     }
 }
@@ -266,10 +266,13 @@ mod tests {
         assert_eq!(network_from_oracle("regtest").ok(), Some(Network::Regtest));
         assert_eq!(network_from_oracle("signet").ok(), Some(Network::Signet));
         for name in ["main", "mainnet"] {
+            #[cfg(not(feature = "mainnet"))]
             assert_eq!(
                 network_from_oracle(name),
                 Err(SourceError::Network(NetworkError::MainnetRefused))
             );
+            #[cfg(feature = "mainnet")]
+            assert_eq!(network_from_oracle(name).ok(), Some(Network::Mainnet));
         }
         for name in ["testnet", "", "Main", "regtest "] {
             assert!(matches!(

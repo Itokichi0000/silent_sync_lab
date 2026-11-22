@@ -1,6 +1,7 @@
 //! Keep a store on disk in sync with your own Bitcoin Core node.
 //!
-//! EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS. Regtest and signet only.
+//! EXPERIMENTAL, unaudited. Regtest and signet; a mainnet node is accepted
+//! only when the example is built with `--features mainnet`.
 //!
 //! The node must run on this machine with `-rest=1`; only loopback URLs of
 //! the form `http://127.0.0.1:<port>` are accepted. The keys are read from

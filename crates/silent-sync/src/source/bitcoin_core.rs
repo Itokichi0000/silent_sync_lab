@@ -74,7 +74,12 @@ struct ChainInfo {
 
 impl CoreRestSource {
     /// Connects to `rest_url` (e.g. `http://127.0.0.1:18443`), refusing
-    /// non-loopback hosts, non-HTTP schemes and mainnet nodes.
+    /// non-loopback hosts and non-HTTP schemes, and — unless the crate is
+    /// built with the `mainnet` feature — mainnet nodes.
+    ///
+    /// The network is the one the node is on. Compare
+    /// [`ScanSource::chain`] with the network you expect before using the
+    /// source; `sync` does so against the store's binding.
     pub fn connect(rest_url: &str) -> Result<Self, SourceError> {
         let http = LoopbackHttp::new(rest_url, "REST")?;
         let info = chain_info(&http)?;
@@ -246,12 +251,13 @@ fn chain_info(http: &LoopbackHttp) -> Result<ChainInfo, SourceError> {
     })
 }
 
-/// Maps Bitcoin Core's chain names. `main` is refused explicitly.
+/// Maps Bitcoin Core's chain names. `main` is refused explicitly unless the
+/// crate is built with the `mainnet` feature.
 fn network_from_core_chain(chain: &str) -> Result<Network, SourceError> {
     match chain {
         "regtest" => Ok(Network::Regtest),
         "signet" => Ok(Network::Signet),
-        "main" => Err(NetworkError::MainnetRefused.into()),
+        "main" => Ok(crate::network::mainnet()?),
         other => Err(NetworkError::Unsupported(super::http::printable(other)).into()),
     }
 }
@@ -432,10 +438,13 @@ mod tests {
             network_from_core_chain("signet").ok(),
             Some(Network::Signet)
         );
+        #[cfg(not(feature = "mainnet"))]
         assert_eq!(
             network_from_core_chain("main"),
             Err(SourceError::Network(NetworkError::MainnetRefused))
         );
+        #[cfg(feature = "mainnet")]
+        assert_eq!(network_from_core_chain("main").ok(), Some(Network::Mainnet));
         for chain in ["test", "testnet4", "", "Main", "mainnet"] {
             assert!(
                 matches!(

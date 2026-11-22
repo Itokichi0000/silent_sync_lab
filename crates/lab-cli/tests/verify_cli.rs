@@ -277,8 +277,13 @@ fn oracle_backend_scan_verify_doctor_and_persistent_sync() {
     let args = with(&["scan"], &[]);
     let (code, stdout, stderr) = run(&refs(&args));
     assert_eq!(code, Some(1));
+    // (Worded as a network mismatch when another crate in the build turned
+    // on `silent-sync`'s `mainnet` feature.)
     assert!(
-        stdout.is_empty() && stderr.contains("mainnet is refused"),
+        stdout.is_empty()
+            && (stderr.contains("mainnet is refused")
+                || stderr.contains("the oracle indexes mainnet but the header source is on"))
+            && stderr.contains("nothing was scanned"),
         "{stderr}"
     );
     oracle.set_info("regtest", 5, false);

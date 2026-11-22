@@ -68,15 +68,31 @@ impl RpcError {
     /// error the outcome is unknown, and a transaction that was being sent
     /// must be treated as possibly sent.
     pub fn means_not_done(&self) -> bool {
-        matches!(
-            self,
-            RpcError::Url
-                | RpcError::Cookie { .. }
-                | RpcError::Unavailable(_)
-                | RpcError::Unauthorized
-                | RpcError::Rejected(_)
-                | RpcError::WrongChain
-        )
+        // "I have that transaction already" is a refusal of the request and
+        // the opposite of "not sent".
+        !self.means_already_with_node()
+            && matches!(
+                self,
+                RpcError::Url
+                    | RpcError::Cookie { .. }
+                    | RpcError::Unavailable(_)
+                    | RpcError::Unauthorized
+                    | RpcError::Rejected(_)
+                    | RpcError::WrongChain
+            )
+    }
+
+    /// Whether the node refused a transaction because it **has it already**:
+    /// in its mempool, or in a block. The transaction is on its way or done;
+    /// it must never be reported as not sent.
+    pub fn means_already_with_node(&self) -> bool {
+        const ALREADY: [&str; 4] = [
+            "txn-already-in-mempool",
+            "txn-already-known",
+            "already in utxo set",
+            "already in block chain",
+        ];
+        matches!(self, RpcError::Rejected(reason) if ALREADY.iter().any(|a| reason.contains(a)))
     }
 }
 

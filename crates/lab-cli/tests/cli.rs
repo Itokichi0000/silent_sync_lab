@@ -1,7 +1,7 @@
 //! End-to-end tests of the `silent-sync` binary.
 #![allow(clippy::unwrap_used)] // test code: a panic is the failure report
 
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
 
 const BIN: &str = env!("CARGO_BIN_EXE_silent-sync");
 const FIXTURE: &str = concat!(
@@ -328,8 +328,14 @@ fn core_backend_through_the_cli_matches_the_fixture_scan() {
     node.set_chain_info("main", 8, node.hashes[8]);
     let (output, stdout, stderr) = run(&["scan", "--backend", "core", "--core-rest-url", &url]);
     assert_eq!(output.status.code(), Some(1));
+    // (Worded as a genesis mismatch when another crate in the build turned
+    // on `silent-sync`'s `mainnet` feature: "main" is then a network, and
+    // the chain served is not that network's.)
     assert!(
-        stdout.is_empty() && stderr.contains("mainnet is refused"),
+        stdout.is_empty()
+            && (stderr.contains("mainnet is refused")
+                || stderr.contains("genesis hash mismatch for mainnet"))
+            && stderr.contains("nothing was scanned"),
         "{stderr}"
     );
 }
@@ -361,8 +367,8 @@ fn unwritable_stdout_is_an_error_not_a_panic() {
             .unwrap();
         let output = Command::new(BIN)
             .args(&args)
-            .stdout(Stdio::from(full))
-            .stderr(Stdio::piped())
+            .stdout(std::process::Stdio::from(full))
+            .stderr(std::process::Stdio::piped())
             .output()
             .unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();

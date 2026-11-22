@@ -121,6 +121,8 @@ pub(crate) fn check_proof_of_work(header: &Header, network: Network) -> Result<B
     let limit = match network {
         Network::Regtest => Target::MAX_ATTAINABLE_REGTEST,
         Network::Signet => Target::MAX_ATTAINABLE_SIGNET,
+        #[cfg(feature = "mainnet")]
+        Network::Mainnet => Target::MAX_ATTAINABLE_MAINNET,
     };
     if target > limit {
         return Err(format!(
@@ -329,5 +331,38 @@ mod tests {
                 assert!(err.contains(&spent.to_string()), "{err}");
             }
         }
+    }
+
+    /// Mainnet's block 1 (public data). It meets mainnet's limit; a header
+    /// mined at regtest's difficulty does not, even though its own proof of
+    /// work is valid. And mainnet's limit is not regtest's: the same header
+    /// passes there.
+    #[cfg(feature = "mainnet")]
+    #[test]
+    fn mainnet_has_its_own_proof_of_work_limit() {
+        use crate::bitcoin::{
+            blockdata::constants::genesis_block, consensus::deserialize, hex::FromHex,
+        };
+
+        let bytes = Vec::<u8>::from_hex(
+            "010000006fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000\
+             982051fd1e4ba744bbbe680e1fee14677ba1a3c3540bf7b1cdb606e857233e0e\
+             61bc6649ffff001d01e36299",
+        )
+        .expect("hex");
+        let block_1: Header = deserialize(&bytes).expect("header");
+        assert_eq!(block_1.prev_blockhash, Network::Mainnet.genesis_hash());
+        assert_eq!(
+            check_proof_of_work(&block_1, Network::Mainnet).map(|h| h.to_string()),
+            Ok("00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048".to_string())
+        );
+
+        let easy = genesis_block(Network::Regtest.to_bitcoin()).header;
+        assert!(check_proof_of_work(&easy, Network::Regtest).is_ok());
+        let refused = check_proof_of_work(&easy, Network::Mainnet).expect_err("too easy");
+        assert!(
+            refused.contains("easier than the mainnet limit"),
+            "{refused}"
+        );
     }
 }

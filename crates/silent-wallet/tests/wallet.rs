@@ -1147,3 +1147,187 @@ fn answers_of_the_node_are_classified_by_what_they_prove() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Mainnet is this crate's own decision. Built without its `mainnet`
+/// feature it makes no wallet for mainnet — also when `silent-sync` can name
+/// mainnet because another crate in the build asked for it. (When it cannot,
+/// there is no value to refuse.)
+#[cfg(not(feature = "mainnet"))]
+#[test]
+fn no_wallet_is_made_for_mainnet_without_the_feature() {
+    use silent_wallet::WalletError;
+    let Ok(mainnet) = "mainnet".parse::<Network>() else {
+        return;
+    };
+    assert!(mainnet.is_mainnet());
+    let keys = WalletKeys::from_seed_hex(&random_seed_hex(), mainnet).unwrap();
+    assert_eq!(
+        Wallet::new(keys, mainnet, &[]).err(),
+        Some(WalletError::MainnetNotEnabled)
+    );
+}
+
+/// With the feature: a mainnet wallet has keys of its own (coin type 0), so
+/// a seed used on a test network does not give the same wallet on mainnet,
+/// and its address carries the mainnet prefix.
+#[cfg(feature = "mainnet")]
+#[test]
+fn a_mainnet_wallet_has_keys_of_its_own() {
+    let seed = random_seed_hex();
+    let wallet_on = |network: Network| {
+        Wallet::new(
+            WalletKeys::from_seed_hex(&seed, network).unwrap(),
+            network,
+            &[],
+        )
+        .unwrap()
+    };
+    let (mainnet, signet, regtest) = (
+        wallet_on(Network::Mainnet),
+        wallet_on(Network::Signet),
+        wallet_on(Network::Regtest),
+    );
+    assert!(mainnet
+        .address(None)
+        .unwrap()
+        .to_string()
+        .starts_with("sp1"));
+    let keys = |w: &Wallet| {
+        let a = w.address(None).unwrap();
+        (a.scan_public_key(), a.spend_public_key())
+    };
+    assert_ne!(keys(&mainnet), keys(&signet));
+    assert_ne!(keys(&mainnet).0, keys(&signet).1);
+    assert_ne!(mainnet.scanner().wallet_id(), signet.scanner().wallet_id());
+    // Pinned against the BIP32 library directly: coin type 0, not 1.
+    use bdk_sp::bitcoin::{
+        bip32::{DerivationPath, Xpriv},
+        hex::FromHex,
+        secp256k1::Secp256k1,
+    };
+    use std::str::FromStr as _;
+    let secp = Secp256k1::new();
+    let master = Xpriv::new_master(
+        bdk_sp::bitcoin::Network::Bitcoin,
+        &Vec::<u8>::from_hex(&seed).unwrap(),
+    )
+    .unwrap();
+    let public = |path: &str| {
+        master
+            .derive_priv(&secp, &DerivationPath::from_str(path).unwrap())
+            .unwrap()
+            .private_key
+            .public_key(&secp)
+    };
+    assert_eq!(
+        keys(&mainnet),
+        (public("352h/0h/0h/1h/0"), public("352h/0h/0h/0h/0"))
+    );
+    assert_eq!(
+        keys(&signet),
+        (public("352h/1h/0h/1h/0"), public("352h/1h/0h/0h/0"))
+    );
+    assert_eq!(keys(&regtest), keys(&signet));
+    // Destinations are read for the wallet's network only.
+    let to_mainnet = mainnet.address(None).unwrap().to_string();
+    assert!(Destination::parse(&to_mainnet, Network::Mainnet).is_ok());
+    assert!(Destination::parse(&to_mainnet, Network::Signet).is_err());
+    assert!(
+        Destination::parse(&signet.address(None).unwrap().to_string(), Network::Mainnet).is_err()
+    );
+    assert!(Destination::parse(
+        "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+        Network::Mainnet
+    )
+    .is_ok());
+    assert!(Destination::parse(
+        "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+        Network::Signet
+    )
+    .is_err());
+}
+
+/// The wallet signs for its own network only: a source on another chain, or
+/// outputs detected on another network, are refused before anything is
+/// derived. (Scripts and signatures do not name a network, so a transaction
+/// signed for one chain's data would be valid on that chain.)
+#[test]
+fn nothing_is_signed_for_another_network_than_the_wallets() {
+    let source = TestSource::new();
+    let wallet = wallet();
+    let store = synced(&source, &wallet);
+    let candidates = unspent(&store);
+    let payments = [Payment {
+        to: Destination::parse(
+            "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080",
+            Network::Regtest,
+        )
+        .unwrap(),
+        amount_sats: 5_000,
+    }];
+    let build = |source: &TestSource, candidates: &[DetectedOutput]| {
+        build_and_sign(
+            &wallet,
+            source,
+            candidates,
+            &payments,
+            2,
+            &SendLimits::default(),
+        )
+    };
+    assert!(build(&source, &candidates).is_ok());
+
+    // The same data, said to be another network's: by the source and the
+    // detections together, by the source alone, by one detection alone.
+    let elsewhere = silent_sync::ChainIdentity::for_network(Network::Signet);
+    let mut relabelled = candidates.clone();
+    for d in &mut relabelled {
+        d.network = Network::Signet;
+    }
+    let mut one_relabelled = candidates.clone();
+    one_relabelled.last_mut().unwrap().network = Network::Signet;
+
+    source.chain_override.set(Some(elsewhere));
+    for candidates in [&relabelled, &candidates] {
+        let error = build(&source, candidates).unwrap_err();
+        assert!(
+            matches!(error, SendError::AnotherNetwork { .. }),
+            "{error:?}"
+        );
+    }
+    source.chain_override.set(None);
+    for candidates in [&relabelled, &one_relabelled] {
+        let error = build(&source, candidates).unwrap_err();
+        assert!(
+            matches!(error, SendError::AnotherNetwork { .. }),
+            "{error:?}"
+        );
+    }
+}
+
+/// "I already have that transaction" is a refusal, but it is not "not
+/// sent": such an answer must not let the pending record be taken back.
+#[test]
+fn a_transaction_the_node_already_has_is_not_classified_as_not_sent() {
+    use silent_wallet::RpcError;
+    for reason in [
+        "txn-already-in-mempool",
+        "txn-already-known",
+        "Transaction outputs already in utxo set",
+        "Transaction already in block chain",
+    ] {
+        let error = RpcError::Rejected(reason.to_string());
+        assert!(error.means_already_with_node(), "{reason}");
+        assert!(!error.means_not_done(), "{reason}");
+    }
+    for reason in [
+        "min relay fee not met",
+        "bad-txns-inputs-missingorspent",
+        "",
+    ] {
+        let error = RpcError::Rejected(reason.to_string());
+        assert!(!error.means_already_with_node(), "{reason}");
+        assert!(error.means_not_done(), "{reason}");
+    }
+    assert!(!RpcError::NoAnswer("timed out".to_string()).means_already_with_node());
+}

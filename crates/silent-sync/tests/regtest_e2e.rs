@@ -19,7 +19,7 @@ use lab_testkit::{
 use silent_sync::{
     engine::{scan_range, ScanError, ScanReport},
     models::EvidenceKind,
-    network::{ChainIdentity, Network, NetworkError},
+    network::{ChainIdentity, Network},
     protocol::ReceiveScanner,
     source::{bitcoin_core::CoreRestSource, ScanSource, SourceError},
 };
@@ -195,10 +195,27 @@ fn mainnet_node_is_refused() {
         0,
         "it holds nothing but the genesis block"
     );
+    #[cfg(not(feature = "mainnet"))]
     assert_eq!(
         CoreRestSource::connect(&node.rest_url()).err(),
-        Some(SourceError::Network(NetworkError::MainnetRefused))
+        Some(SourceError::Network(
+            silent_sync::NetworkError::MainnetRefused
+        ))
     );
+    // With the `mainnet` feature the same node is a source like any other:
+    // on mainnet, anchored to mainnet's genesis block, with nothing above it.
+    #[cfg(feature = "mainnet")]
+    {
+        use silent_sync::{ChainIdentity, Network, ScanSource as _};
+        let source = CoreRestSource::connect(&node.rest_url()).unwrap();
+        assert_eq!(source.chain(), ChainIdentity::for_network(Network::Mainnet));
+        let tip = source.tip().unwrap();
+        assert_eq!((tip.height, tip.hash), (0, Network::Mainnet.genesis_hash()));
+        assert!(matches!(
+            source.fetch_range(1, 1),
+            Err(SourceError::RangeUnavailable { .. })
+        ));
+    }
 }
 
 /// T06 on a real node: a longer chain of signed transactions (more than one

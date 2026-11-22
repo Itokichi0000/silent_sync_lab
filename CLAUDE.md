@@ -2,15 +2,16 @@
 
 要求仕様は `SILENT_SYNC_LAB_DESIGN.md`。現在地は `docs/PROGRESS.md`。迷ったら仕様書に戻る。
 ウォレット段階の範囲は `docs/WALLET_DESIGN_PROPOSAL.md`（所有者が 2026-11-21 に承認。DECISIONS D-046）。規約 3・5・6 は、その承認の範囲に限って改訂してある。
+mainnet（feature `mainnet`）と窓口 API（`silent_wallet::client`、シードフレーズ）は、所有者の 2026-11-22 の指示による（DECISIONS D-050〜D-052）。規約 1・3・6 はその範囲で改訂した。
 
 ## 最重要ルール
 
-1. **EXPERIMENTAL — NOT FOR MAINNET OR REAL FUNDS.** mainnet 接続・実資金・本番運用はしない。`Network` に mainnet を足さない。
+1. **EXPERIMENTAL — 未監査。mainnet は明示的な feature でだけ。** 既定のビルドでは mainnet を型として表現できない（`Network::Mainnet` は feature `mainnet` の下にだけある）。`mainnet` をどのクレートの既定の feature にも入れない。mainnet を許すかどうかは**クレートごとに自分の feature で**決める: Cargo は feature をビルド全体で統合するので、「`silent-sync` が mainnet を名指しできる」ことを根拠にせず、`Network::is_mainnet()` を見て自分で拒否する。`lab-cli` は公開のテスト鍵で動くので、どのビルドでも mainnet を拒否する。「監査済み」「本番で安全」と書かない（第三者の監査は受けていない。上流 `bdk_sp` も mainnet を推奨していない）。
 2. **独自の暗号を書かない。** 楕円曲線演算・ハッシュ・BIP352 のマッチングは上流 `bdk_sp` を呼ぶ。`silent-sync` が足してよいのは script の検査、データの検証、エラー分類、オーケストレーションだけ。
-3. **秘密を出さない。** scan 秘密鍵・spend 秘密鍵・シード・出力ごとの tweak・RPC 認証情報を、stdout / ログ / JSON / `Debug` / panic / テスト成果物 / コミットに書かない。新しい秘密鍵をリポジトリに追加しない（テスト鍵は BIP352 公式ベクトルの公開値のみ。テストが使う使い捨ての鍵は実行時に作る）。鍵とシードはファイルに保存しない（起動時に受け取る）。出力ごとの tweak は保存せず、支出するときにだけフルブロックから再計算して使う。
+3. **秘密を出さない。** scan 秘密鍵・spend 秘密鍵・シード・出力ごとの tweak・RPC 認証情報を、stdout / ログ / JSON / `Debug` / panic / テスト成果物 / コミットに書かない。新しい秘密鍵をリポジトリに追加しない（テスト鍵は BIP352 公式ベクトルの公開値のみ。テストが使う使い捨ての鍵は実行時に作る）。鍵とシードはファイルに保存しない（起動時に受け取る）。シードフレーズを外に出してよいのは、新しく作ったものを 1 回見せる経路だけ（ライブラリの `SeedPhrase::reveal()` と、CLI `silent-wallet new-phrase` の stdout）。使用中のフレーズやシードを表示するコマンドは作らない。出力ごとの tweak は保存せず、支出するときにだけフルブロックから再計算して使う。
 4. **fail-closed。** 部分応答・順序違い・重複・ハッシュ不連続・ネットワーク不一致・tx 単位のエラーは、範囲全体の失敗にする。静かに「同期済み」としない。
 5. **検出は残高ではない。** 受信専用の部分（`silent-sync`、`lab-cli`）の表示は `detected_received_outputs`。「未使用」と呼んでよいのは、**フルブロック由来の検出のうち、使用済みの記録が無いもの**だけで、根拠（自分のノードで確認）と条件（承認数）を必ず添える。インデックス由来の検出は合計に入れない。根拠を添えずに「残高」「利用可能額」と書かない。
-6. **送金・署名は `crates/silent-wallet` と `crates/wallet-cli` だけ。** `silent-sync`・`silent-sync-sqlite`・`lab-cli` には置かない（上流の送信関数と tx の署名を使ってよいのは、この 2 つとテスト専用の `crates/lab-testkit` だけ）。regtest と signet のみ。送信の前に必ず内容を表示し、標準入力からの確認語を待つ（確認を省くフラグを作らない）。送信の結果が分からないときは「送られなかった」と言わない。通常の依存に `lab-testkit` を入れない（`dev-dependencies` のみ）。
+6. **送金・署名は `crates/silent-wallet` と `crates/wallet-cli` だけ。** `silent-sync`・`silent-sync-sqlite`・`lab-cli` には置かない（上流の送信関数と tx の署名を使ってよいのは、この 2 つとテスト専用の `crates/lab-testkit` だけ）。regtest と signet、および feature `mainnet` を有効にしたビルドでの mainnet（実資金が動く）。CLI は送信の前に必ず内容を表示し、標準入力からの確認語を待つ（確認を省くフラグを作らない。mainnet の確認語は `SEND REAL BITCOIN`）。ライブラリの窓口（`client`）は「組み立てて署名する（`prepare_send`、何も送らない）」と「送る（`send`）」を分ける。両方を 1 回で行う関数を作らない。mainnet では 1 回の送金額に既定の上限（100,000 sat）があり、明示的に上げたときだけ超えられる。送信の結果が分からないときは「送られなかった」と言わない。通常の依存に `lab-testkit` を入れない（`dev-dependencies` のみ）。
 7. **嘘をつかない。** テスト未実行で「完成」と言わない。未実装は `NOT IMPLEMENTED`、未確認は `UNVERIFIED`、外部要因で進めないものは `BLOCKED` と書く。計測値を捏造しない。モックで成功を装わない。
 8. **API を記憶から推測しない。** 上流の実コードを読んで確認し、commit SHA を `docs/RESEARCH.md` に残す。
 9. **Phase Gate を飛ばさない。** UI の作り込み、Tauri、製品形態（SDK / ウォレット）の決め打ちは Phase 6 まで行わない。
@@ -23,7 +24,7 @@
 
 ```
 crates/silent-sync/   同期コア（SDK 候補）。CLI・表示・ストレージに依存しない
-  src/network.rs      Network（mainnet 不可）, ChainIdentity
+  src/network.rs      Network（mainnet は feature `mainnet` の下だけ）, ChainIdentity
   src/protocol.rs     上流スキャナのラッパー（適格性、K_max 補正、panic 封じ込め、tweak インデックスからのスキャン）
   src/engine.rs       scan_range（ステートレス）、バッチ整合性検査、インデックス申告の上限検査
   src/store.rs        SyncStore トレイト、全実装共通の不変条件 check_append、MemoryStore
@@ -39,6 +40,7 @@ crates/silent-sync/   同期コア（SDK 候補）。CLI・表示・ストレー
   src/source/local_index.rs   フルブロックから手元で計算する tweak インデックス
 crates/silent-sync-sqlite/ SyncStore の SQLite 実装と、再スキャン後のファイル差し替え。依存方向は silent-sync-sqlite → silent-sync
 crates/silent-wallet/ ウォレットのライブラリ: 未使用の集計、コイン選択、送金 tx の組み立てと署名（上流の関数を呼ぶ）
+  src/client.rs       窓口 API（feature `client`）: シードフレーズ（BIP39）、ストア、接続・受信・同期・送金を数個の関数で
 crates/wallet-cli/  ウォレットの CLI（バイナリ名 silent-wallet）。依存方向は wallet-cli → silent-wallet → silent-sync, silent-sync-sqlite
 crates/lab-cli/     薄い CLI（バイナリ名 silent-sync）。受信専用。依存方向は lab-cli → silent-sync, silent-sync-sqlite
   src/bench.rs        計測・集計・エクスポート（結果に個人データを入れない）
@@ -62,6 +64,12 @@ cargo run -p lab-testkit --bin fault_report        # docs/FAULT_INJECTION.md の
 UPDATE_API_LISTS=1 cargo test -p silent-sync --test public_api   # 公開 API を変えたら docs/api/ を更新
 cargo clippy -p silent-sync --lib --locked --features <feature> -- -D warnings   # ライブラリ単体・feature ごと（CI と同じ）
 cargo test -p silent-wallet -p wallet-cli --locked                # ウォレット（オフライン）。実ノードでの送金は下の --ignored
+
+# mainnet の feature を有効にした構成（CI と同じ 2 通り）
+MAINNET=silent-sync/mainnet,silent-sync/core-rest,silent-sync/blindbit-http,silent-sync/fixture,silent-sync/local-index,silent-sync/low-level,silent-sync/spend,silent-sync/secret-output-tweaks,silent-sync-sqlite/mainnet,silent-wallet/mainnet,silent-wallet/client,wallet-cli/mainnet
+cargo test -p silent-sync -p silent-sync-sqlite -p silent-wallet -p wallet-cli --locked --features "$MAINNET"
+# 別のクレートが SDK の mainnet だけを有効にした場合でも、ウォレットと lab-cli が拒否すること
+cargo test -p silent-wallet -p wallet-cli -p lab-cli --locked --features silent-sync/mainnet
 
 # 実ノードを使う E2E（通常の cargo test では ignored。バイナリが無いと失敗する）
 export BITCOIND_EXE="$(VERIFY_SIGNATURES=1 scripts/fetch_bitcoind.sh /path/outside/repo/core)"
@@ -92,5 +100,7 @@ cargo test --workspace --locked -- --ignored
 | 5 | ベンチマーク・故障注入 | 完了（Gate 5 通過） |
 | 6 | 進路決定 | 所有者が決定: SDK を先に完成させ、その後ウォレット（`docs/PROGRESS.md` の「SDK 化 Result」） |
 | W1〜W3 | ウォレット: 使用済みの追跡、鍵と tweak の受け渡し、regtest での送金 | 実装済み（`docs/PROGRESS.md` の「ウォレット段階 Result」） |
-| W4 | signet | BLOCKED（この環境から signet のピアに届かない）。UNVERIFIED |
+| W4 | signet | 未実施（cloud 環境からは signet のピアに届かなかった。手元のマシンで試す）。UNVERIFIED |
+| M1 | mainnet（feature `mainnet`。SDK とウォレット） | 実装済み（D-050、D-051）。ブロックのある実際の mainnet ノードでの動作は UNVERIFIED |
+| C1 | 窓口 API（`silent_wallet::client`）とシードフレーズ | 実装済み（D-052）。regtest の実ノードで送受金を確認 |
 | W5 | UI | 未着手。形は所有者と決める |

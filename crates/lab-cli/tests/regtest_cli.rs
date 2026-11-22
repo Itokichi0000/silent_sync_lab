@@ -115,8 +115,12 @@ fn cli_refuses_a_mainnet_node() {
     let (code, stdout, stderr) = run(&["scan", "--backend", "core", "--core-rest-url", &url]);
     assert_eq!(code, Some(1));
     assert!(stdout.is_empty());
+    // (A chain mismatch when another crate in the build turned on
+    // `silent-sync`'s `mainnet` feature: this program stays on regtest and
+    // signet either way.)
     assert!(
-        stderr.contains("mainnet is refused") && stderr.contains("nothing was scanned"),
+        (stderr.contains("mainnet is refused") || stderr.contains("chain mismatch"))
+            && stderr.contains("nothing was scanned"),
         "{stderr}"
     );
     let (code, stdout, _) = run(&["doctor", "--core-rest-url", &url]);
@@ -126,7 +130,8 @@ fn cli_refuses_a_mainnet_node() {
         "doctor must not exit successfully for a mainnet node"
     );
     assert!(
-        stdout.contains("UNAVAILABLE: mainnet is refused"),
+        stdout.contains("UNAVAILABLE: mainnet is refused")
+            || stdout.contains("UNUSABLE: the node is on mainnet"),
         "{stdout}"
     );
 }

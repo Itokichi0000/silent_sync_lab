@@ -1,6 +1,6 @@
 [package]
 name = "silent-sync"
-description = "Experimental BIP352 (Silent Payments) receive-side sync core. NOT FOR MAINNET OR REAL FUNDS."
+description = "Experimental, unaudited BIP352 (Silent Payments) receive-side sync core. Mainnet only with the `mainnet` feature; never signs or sends."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -31,6 +31,12 @@ secret-output-tweaks = ["low-level"]
 # the tweak needed to spend one detected output. Nothing here signs, sends or
 # stores a tweak. See the module documentation.
 spend = []
+# Bitcoin mainnet for the receive side (scanning, syncing, storing). Without
+# it mainnet cannot be named at all. The code is unaudited; nothing in this
+# crate signs or sends on any network. Anything that does (a wallet built on
+# top) must refuse `Network::is_mainnet()` on its own: Cargo turns a feature
+# on for every crate in a build once one of them asks for it.
+mainnet = []
 
 [dependencies]
 bdk_sp = { workspace = true }

@@ -1,21 +1,35 @@
-//! Network identity. Mainnet is not representable in this crate's types.
+//! Network identity.
+//!
+//! Without the `mainnet` feature, mainnet is not representable in this crate's
+//! types. With it, `Network::Mainnet` exists for the receive side only.
 
 use crate::bitcoin::{blockdata::constants::genesis_block, BlockHash, Network as BitcoinNetwork};
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 
-/// The only networks the lab may operate on.
+/// The networks this crate may operate on.
 ///
-/// There is deliberately no mainnet variant: code that holds a `Network`
-/// cannot be pointed at mainnet, and every parser rejects mainnet names with a
-/// dedicated error (design spec §5.1).
+/// Unless the crate is built with the `mainnet` feature there is no mainnet
+/// variant: code that holds a `Network` cannot be pointed at mainnet, and
+/// every parser rejects mainnet names with a dedicated error.
+///
+/// The enum is `#[non_exhaustive]` so that code written against the default
+/// build keeps compiling when another crate in the same build enables
+/// `mainnet`. Code that must stay off mainnet (anything that signs or sends)
+/// should check [`Network::is_mainnet`] rather than rely on the feature being
+/// off: Cargo enables a feature for every user of the crate at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
+#[non_exhaustive]
 pub enum Network {
     /// Local regression-test chain.
     Regtest,
     /// The default public signet.
     Signet,
+    /// Bitcoin mainnet. Receive-side scanning only; this code is unaudited.
+    /// Exists only with the `mainnet` feature.
+    #[cfg(feature = "mainnet")]
+    Mainnet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -26,7 +40,8 @@ pub enum NetworkError {
         "mainnet is refused: this is experimental, unaudited software and must not be used \
          with mainnet or real funds"
     )]
-    /// Mainnet was named. It is refused by design.
+    /// Mainnet was named, and the crate was built without the `mainnet`
+    /// feature.
     MainnetRefused,
     #[error("unsupported network `{0}`: only `regtest` and `signet` are supported")]
     /// A network this crate does not support (the name is given).
@@ -44,28 +59,48 @@ pub enum NetworkError {
 }
 
 impl Network {
-    /// The network's name as used in text and JSON (`regtest`, `signet`).
+    /// The network's name as used in text and JSON (`regtest`, `signet`,
+    /// and `mainnet` with the feature of that name).
     pub const fn as_str(self) -> &'static str {
         match self {
             Network::Regtest => "regtest",
             Network::Signet => "signet",
+            #[cfg(feature = "mainnet")]
+            Network::Mainnet => "mainnet",
         }
     }
 
-    /// The corresponding `bitcoin::Network`. Never returns `bitcoin::Network::Bitcoin`.
+    /// Whether this is Bitcoin mainnet. Always `false` in a build without
+    /// the `mainnet` feature.
+    ///
+    /// Code that handles spending keys must refuse a network for which this
+    /// is `true`: the feature covers receive-side scanning only.
+    pub const fn is_mainnet(self) -> bool {
+        match self {
+            Network::Regtest | Network::Signet => false,
+            #[cfg(feature = "mainnet")]
+            Network::Mainnet => true,
+        }
+    }
+
+    /// The corresponding `bitcoin::Network`. Returns
+    /// `bitcoin::Network::Bitcoin` only for `Network::Mainnet`.
     pub const fn to_bitcoin(self) -> BitcoinNetwork {
         match self {
             Network::Regtest => BitcoinNetwork::Regtest,
             Network::Signet => BitcoinNetwork::Signet,
+            #[cfg(feature = "mainnet")]
+            Network::Mainnet => BitcoinNetwork::Bitcoin,
         }
     }
 
-    /// Fallible conversion from `bitcoin::Network`; mainnet is refused.
+    /// Fallible conversion from `bitcoin::Network`; mainnet is refused
+    /// without the `mainnet` feature.
     pub fn try_from_bitcoin(network: BitcoinNetwork) -> Result<Self, NetworkError> {
         match network {
             BitcoinNetwork::Regtest => Ok(Network::Regtest),
             BitcoinNetwork::Signet => Ok(Network::Signet),
-            BitcoinNetwork::Bitcoin => Err(NetworkError::MainnetRefused),
+            BitcoinNetwork::Bitcoin => mainnet(),
             other => Err(NetworkError::Unsupported(other.to_string())),
         }
     }
@@ -77,6 +112,18 @@ impl Network {
     pub fn genesis_hash(self) -> BlockHash {
         genesis_block(self.to_bitcoin()).block_hash()
     }
+}
+
+/// The one place that decides whether mainnet may be named.
+#[cfg(feature = "mainnet")]
+pub(crate) const fn mainnet() -> Result<Network, NetworkError> {
+    Ok(Network::Mainnet)
+}
+
+/// The one place that decides whether mainnet may be named.
+#[cfg(not(feature = "mainnet"))]
+pub(crate) const fn mainnet() -> Result<Network, NetworkError> {
+    Err(NetworkError::MainnetRefused)
 }
 
 impl fmt::Display for Network {
@@ -92,9 +139,9 @@ impl FromStr for Network {
         match s.trim().to_ascii_lowercase().as_str() {
             "regtest" => Ok(Network::Regtest),
             "signet" => Ok(Network::Signet),
-            "mainnet" | "main" | "bitcoin" | "livenet" | "prod" | "production" => {
-                Err(NetworkError::MainnetRefused)
-            }
+            "mainnet" | "main" | "bitcoin" => mainnet(),
+            // Never a network name here, with or without the feature.
+            "livenet" | "prod" | "production" => Err(NetworkError::MainnetRefused),
             other => Err(NetworkError::Unsupported(other.to_string())),
         }
     }
@@ -119,8 +166,8 @@ impl From<Network> for String {
 ///
 /// Invariant: `genesis_hash` is the genesis block of `network`. The fields are
 /// private and deserialization goes through [`ChainIdentity::verified`], so a
-/// value that pairs a lab network name with another chain's genesis (mainnet's
-/// in particular) cannot exist.
+/// value that pairs a network name with another chain's genesis (mainnet's
+/// under a test network's name in particular) cannot exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "RawChainIdentity", into = "RawChainIdentity")]
 pub struct ChainIdentity {
@@ -194,6 +241,7 @@ impl ChainIdentity {
 mod tests {
     use super::*;
 
+    #[cfg(not(feature = "mainnet"))]
     #[test]
     fn mainnet_names_are_refused() {
         for name in [
@@ -212,6 +260,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "mainnet"))]
     #[test]
     fn mainnet_is_refused_by_the_deserializer() {
         let err = serde_json::from_str::<Network>("\"mainnet\"")
@@ -220,6 +269,7 @@ mod tests {
         assert!(serde_json::from_str::<Network>("\"bitcoin\"").is_err());
     }
 
+    #[cfg(not(feature = "mainnet"))]
     #[test]
     fn mainnet_bitcoin_network_is_refused() {
         assert_eq!(
@@ -247,6 +297,7 @@ mod tests {
         for network in [Network::Regtest, Network::Signet] {
             assert_eq!(network.as_str().parse::<Network>(), Ok(network));
             assert_ne!(network.to_bitcoin(), BitcoinNetwork::Bitcoin);
+            assert!(!network.is_mainnet());
             let json = serde_json::to_string(&network).expect("serialize");
             assert_eq!(serde_json::from_str::<Network>(&json).ok(), Some(network));
         }
@@ -280,7 +331,10 @@ mod tests {
             format!(r#"{{"network":"regtest","genesis_hash":"{mainnet}"}}"#),
             format!(r#"{{"network":"signet","genesis_hash":"{mainnet}"}}"#),
             format!(r#"{{"network":"regtest","genesis_hash":"{signet}"}}"#),
+            #[cfg(not(feature = "mainnet"))]
             format!(r#"{{"network":"mainnet","genesis_hash":"{mainnet}"}}"#),
+            #[cfg(feature = "mainnet")]
+            format!(r#"{{"network":"mainnet","genesis_hash":"{signet}"}}"#),
         ] {
             assert!(
                 serde_json::from_str::<ChainIdentity>(&json).is_err(),
@@ -310,5 +364,61 @@ mod tests {
             assert_ne!(network.genesis_hash(), mainnet_genesis);
         }
         assert!(ChainIdentity::verified(Network::Regtest, Network::Regtest.genesis_hash()).is_ok());
+    }
+
+    /// With the feature, mainnet has its own name, its own genesis block and
+    /// its own `bitcoin::Network`, and nothing else maps to it.
+    #[cfg(feature = "mainnet")]
+    #[test]
+    fn mainnet_is_a_network_of_its_own_with_the_feature() {
+        for name in ["mainnet", "main", "bitcoin", "Mainnet", " BITCOIN "] {
+            assert_eq!(name.parse::<Network>(), Ok(Network::Mainnet), "{name}");
+        }
+        for name in ["livenet", "prod", "production"] {
+            assert_eq!(
+                name.parse::<Network>(),
+                Err(NetworkError::MainnetRefused),
+                "{name}"
+            );
+        }
+        assert!(Network::Mainnet.is_mainnet());
+        assert_eq!(Network::Mainnet.as_str(), "mainnet");
+        assert_eq!(Network::Mainnet.to_bitcoin(), BitcoinNetwork::Bitcoin);
+        assert_eq!(
+            Network::try_from_bitcoin(BitcoinNetwork::Bitcoin),
+            Ok(Network::Mainnet)
+        );
+        assert_eq!(
+            Network::Mainnet.genesis_hash().to_string(),
+            "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+        );
+        assert_eq!(
+            serde_json::from_str::<Network>("\"mainnet\"").ok(),
+            Some(Network::Mainnet)
+        );
+        assert_eq!(
+            serde_json::to_string(&Network::Mainnet).ok().as_deref(),
+            Some("\"mainnet\"")
+        );
+
+        // The identity pairs the name with mainnet's genesis block and with
+        // no other; a test network's name does not go with mainnet's block.
+        let mainnet = ChainIdentity::for_network(Network::Mainnet);
+        assert_ne!(mainnet, ChainIdentity::for_network(Network::Signet));
+        for other in [Network::Regtest, Network::Signet] {
+            assert!(matches!(
+                ChainIdentity::verified(Network::Mainnet, other.genesis_hash()),
+                Err(NetworkError::GenesisMismatch { .. })
+            ));
+            assert!(matches!(
+                ChainIdentity::verified(other, Network::Mainnet.genesis_hash()),
+                Err(NetworkError::GenesisMismatch { .. })
+            ));
+        }
+        let json = serde_json::to_string(&mainnet).expect("serialize");
+        assert_eq!(
+            serde_json::from_str::<ChainIdentity>(&json).ok(),
+            Some(mainnet)
+        );
     }
 }

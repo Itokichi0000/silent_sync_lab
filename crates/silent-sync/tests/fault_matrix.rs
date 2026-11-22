@@ -159,8 +159,11 @@ fn every_fault_has_the_documented_verdict() {
         "docs/FAULT_INJECTION.md has rows the matrix does not produce"
     );
     let table = fault_matrix::render_markdown(&rows);
+    // The document shows the default build. With the `mainnet` feature the
+    // two "says it is on mainnet" faults (F10, I15) are refused for another
+    // reason — the chain served is not mainnet's — so their rows differ.
     assert!(
-        DOC.contains(&table),
+        cfg!(feature = "mainnet") || DOC.contains(&table),
         "docs/FAULT_INJECTION.md is out of date; regenerate its table with \
          `cargo run -p lab-testkit --bin fault_report`:\n{table}"
     );

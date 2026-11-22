@@ -385,8 +385,15 @@ fn fixture_adapter_reports_what_it_does_and_does_not_verify() {
 fn fixture_adapter_refuses_mainnet() {
     let json = FIXTURE_JSON.replacen("\"network\": \"regtest\"", "\"network\": \"mainnet\"", 1);
     assert_ne!(json, FIXTURE_JSON);
+    // Without the `mainnet` feature the name is refused; with it, the name
+    // is a network whose genesis block the fixture does not start from.
+    let expected = if cfg!(feature = "mainnet") {
+        "genesis hash mismatch"
+    } else {
+        "mainnet is refused"
+    };
     match FixtureSource::from_json_str(&json) {
-        Err(SourceError::InvalidData(msg)) => assert!(msg.contains("mainnet is refused"), "{msg}"),
+        Err(SourceError::InvalidData(msg)) => assert!(msg.contains(expected), "{msg}"),
         other => panic!("mainnet fixture must be refused, got {other:?}"),
     }
 

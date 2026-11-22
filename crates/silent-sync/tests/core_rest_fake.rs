@@ -123,10 +123,7 @@ fn mainnet_and_foreign_chains_are_refused_by_name() {
     let best = node.hashes[TIP as usize];
 
     node.set_chain_info("main", TIP, best);
-    assert_eq!(
-        CoreRestSource::connect(&node.url()).err(),
-        Some(SourceError::Network(NetworkError::MainnetRefused))
-    );
+    assert_mainnet_claim_refused(CoreRestSource::connect(&node.url()).err());
     for chain in ["test", "testnet4", "MAIN"] {
         node.set_chain_info(chain, TIP, best);
         assert!(matches!(
@@ -159,9 +156,30 @@ fn mainnet_and_foreign_chains_are_refused_by_name() {
     let node = fresh();
     let source = CoreRestSource::connect(&node.url()).unwrap();
     node.set_chain_info("main", TIP, best);
+    assert!(source.tip().is_err());
+    #[cfg(not(feature = "mainnet"))]
     assert_eq!(
         source.tip().err(),
         Some(SourceError::Network(NetworkError::MainnetRefused))
+    );
+}
+
+/// A responder that says "main" while serving the fixture (regtest) chain.
+/// Without the `mainnet` feature the name alone is refused; with it, the
+/// name is a network, and the chain served is not that network's.
+fn assert_mainnet_claim_refused(error: Option<SourceError>) {
+    #[cfg(not(feature = "mainnet"))]
+    assert_eq!(
+        error,
+        Some(SourceError::Network(NetworkError::MainnetRefused))
+    );
+    #[cfg(feature = "mainnet")]
+    assert!(
+        matches!(
+            error,
+            Some(SourceError::Network(NetworkError::GenesisMismatch { .. }))
+        ),
+        "{error:?}"
     );
 }
 
