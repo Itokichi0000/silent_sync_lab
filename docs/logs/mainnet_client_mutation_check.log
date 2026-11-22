@@ -22,3 +22,27 @@ killed       wallet cli: amount limit ignored  <- a_payment_above_the_given_limi
 
 SURVIVORS: none
 exit 0
+
+# After the independent review (D-053): entries added or re-run on the corrected tree
+running 18 selected entries: ['wallet: source on another', 'wallet: output of another', 'wallet: transaction the node already', 'client:', 'mainnet:']
+killed       mainnet: named without the feature  <- failed_and_differing_runs_are_recorded_and_fail_the_command
+killed       mainnet: regtest's proof of work limit used  <- source::block_check::tests::mainnet_has_its_own_proof_of_work_limit
+killed       mainnet: lab CLI accepts it when the SDK can name it  <- failed_and_differing_runs_are_recorded_and_fail_the_command
+killed       mainnet: wallet made without the wallet's feature  <- no_wallet_is_made_for_mainnet_without_the_feature
+killed       mainnet: wallet CLI accepts it without its feature  <- the_address_comes_from_the_seed_in_the_environment
+killed       mainnet: test network keys derived  <- a_mainnet_wallet_has_keys_of_its_own
+killed       mainnet: wallet CLI has no default amount limit  <- mainnet_build_has_its_own_keys_and_a_default_amount_limit
+killed       client: amount limit ignored  <- Err(ClientError::AmountAboveLimit, a_wallet_is_opened_with_a_phrase_and_bound_to_it
+killed       client: node on another network accepted  <- Err(ClientError::NodeOnAnotherNetwork, a_wallet_is_opened_with_a_phrase_and_bound_to_it
+killed       client: store of another phrase opened  <- Err(ClientError::WrongSeed)), a_wallet_is_opened_with_a_phrase_and_bound_to_it
+killed       client: labels of the store not compared  <- a_wallet_is_opened_with_a_phrase_and_bound_to_it
+killed       client: label the store does not scan handed out  <- a_wallet_is_opened_with_a_phrase_and_bound_to_it
+killed       client: phrase of another length accepted  <- seed_phrases_are_bip39_and_are_never_shown_unasked
+killed       client: entropy of another size accepted  <- seed_phrases_are_bip39_and_are_never_shown_unasked
+killed       wallet: source on another network signed for  <- nothing_is_signed_for_another_network_than_the_wallets
+killed       wallet: output of another network signed for  <- nothing_is_signed_for_another_network_than_the_wallets
+killed       wallet: transaction the node already has reported as not sent  <- a_transaction_the_node_already_has_is_not_classified_as_not_sent
+killed       client: change label in the configuration refused  <- a_wallet_is_opened_with_a_phrase_and_bound_to_it
+
+SURVIVORS: none
+exit 0
