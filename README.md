@@ -9,6 +9,7 @@ Bitcoin [BIP352 (Silent Payments)](https://github.com/bitcoin/bips/blob/master/b
 再現可能な形で検証・計測するための実験環境と、その上に作った**実験用のウォレット**と、アプリに組み込むための**窓口 API**（`silent_wallet::client`）です。製品ではありません。
 
 - 同期の部分（`silent-sync`、`silent-sync-sqlite`、CLI `silent-sync`）は受信専用で、送金・署名の機能を持ちません。
+- 送金 tx は、チェーンを見る者に余計な手がかりを与えないように組み立てます（入力と出力の順序は乱数、lock time は Bitcoin Core のウォレットと同じ規則、別々のラベルで受け取った出力はなるべく一緒に使わない、お釣り無しで払える組み合わせを優先、使わせたくない出力の保留）。何が残るかは `docs/THREAT_MODEL.md` §4.8。ペイジョインは入っていません（理由は `docs/DECISIONS.md` D-054）。
 - ウォレットの部分（`silent-wallet`、CLI `silent-wallet`）は、「受け取る → 未使用を確認する → 送る」を行います。既定では regtest / signet だけで、mainnet は feature `mainnet` を有効にしたビルドでだけ指定できます。
 - 受信専用の CLI（`silent-sync`）は公開のテスト鍵で動くので、どのビルドでも mainnet を拒否します。
 

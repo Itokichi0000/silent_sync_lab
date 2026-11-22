@@ -20,7 +20,6 @@ mainnet = ["silent-sync/mainnet"]
 client = [
     "dep:silent-sync-sqlite",
     "dep:bip39",
-    "dep:getrandom",
     "silent-sync/core-rest",
 ]
 
@@ -34,8 +33,10 @@ bdk_sp = { workspace = true }
 silent-sync-sqlite = { path = "../silent-sync-sqlite", optional = true }
 # BIP39: phrase <-> entropy <-> seed. English word list only, no `rand`.
 bip39 = { version = "=2.2.2", optional = true, default-features = false, features = ["std"] }
-# Entropy for a new phrase, from the operating system.
-getrandom = { version = "0.2", optional = true }
+# Random numbers from the operating system: the order of inputs and outputs
+# and the lock time of a transaction, and (feature `client`) the entropy of a
+# new phrase.
+getrandom = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

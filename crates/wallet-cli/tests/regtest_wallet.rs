@@ -145,6 +145,34 @@ fn receive_then_send_between_two_wallets() {
         "{text}"
     );
 
+    // An output can be held back: listed apart, not counted, not spent.
+    let apart = format!("{}:{}", received[0].0, unspent[0]["output"]["vout"]);
+    assert!(ok(&alice, &["hold", "--db", &db_a, "--outpoint", &apart]).contains("is held back"));
+    let status = json(&alice, &["status", "--db", &db_a, "--json"]);
+    assert_eq!(status["unspent"].as_array().unwrap().len(), 1);
+    assert_eq!(status["held_back"].as_array().unwrap().len(), 1);
+    let text = ok(&alice, &["status", "--db", &db_a]);
+    assert!(
+        text.contains(&format!(
+            "unspent          : {} sat in 1 output(s)",
+            received[1].1
+        )) && text.contains("held back by you"),
+        "{text}"
+    );
+    let unknown = format!("{}:7", received[0].0);
+    let refused = wallet(&alice, &["hold", "--db", &db_a, "--outpoint", &unknown], "");
+    assert_eq!(refused.code, Some(1));
+    assert!(refused
+        .stderr
+        .contains("is not an output this store has detected"));
+    assert!(ok(
+        &alice,
+        &["hold", "--db", &db_a, "--outpoint", &apart, "--release"]
+    )
+    .contains("is released"));
+    let status = json(&alice, &["status", "--db", &db_a, "--json"]);
+    assert_eq!(status["unspent"].as_array().unwrap().len(), 2);
+
     // Alice pays Bob more than one of her outputs holds: two inputs, change.
     let amount = received[0].1 + 10_000;
     let send = |input: &str, extra: &[&str]| {

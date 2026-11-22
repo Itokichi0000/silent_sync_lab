@@ -58,7 +58,7 @@ use crate::{
     rpc::{CoreRpc, RpcError},
     send::{build_and_sign, BuiltTransaction, Destination, Payment, SendError, SendLimits},
 };
-use bdk_sp::bitcoin::Txid;
+use bdk_sp::bitcoin::{OutPoint, Txid};
 use silent_sync::{
     new_store_meta,
     source::{CoreRestSource, SourceError},
@@ -655,6 +655,33 @@ impl WalletClient {
             pending.save(&path)?;
         }
         Ok(found)
+    }
+
+    /// Sets an output aside: it is not spent until released with
+    /// [`WalletClient::release`], and is listed under
+    /// [`Holdings::held_back`] instead of `unspent`. Returns whether that
+    /// changed anything. For an output you do not want to spend together
+    /// with your others (spending outputs together shows that they belong
+    /// to one wallet).
+    pub fn hold_back(&mut self, outpoint: OutPoint) -> Result<bool, ClientError> {
+        let path = pending_path(&self.config.store_path);
+        let mut pending = PendingSpends::load(&path)?;
+        let changed = pending.hold_back(outpoint);
+        if changed {
+            pending.save(&path)?;
+        }
+        Ok(changed)
+    }
+
+    /// Releases an output that was set aside. Returns whether it was.
+    pub fn release(&mut self, outpoint: OutPoint) -> Result<bool, ClientError> {
+        let path = pending_path(&self.config.store_path);
+        let mut pending = PendingSpends::load(&path)?;
+        let changed = pending.release(outpoint);
+        if changed {
+            pending.save(&path)?;
+        }
+        Ok(changed)
     }
 
     fn rpc(&self) -> Result<CoreRpc, ClientError> {

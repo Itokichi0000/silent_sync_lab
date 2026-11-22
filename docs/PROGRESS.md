@@ -558,6 +558,21 @@ SDK の API に関する 4 つの判断（出力ごとの tweak は渡さない�
   - 実 Oracle を使うテスト 2 件は、手元に Oracle のバイナリが無いため今回は未実行（コードは変えていない経路）
 - **次に取り組む最小タスク**: (1) 手元の signet ノードを起動して、実ネットワークでの同期時間と検出の正確さを測る、(2) signet で実際に受け取って送る、(3) mainnet のノードを用意するかを決める
 
+## 送金 tx のプライバシー Result（2026-11-22。D-054）
+
+所有者の指示: ペイジョインと、プライバシー関連で必要そうな部品を入れる。
+
+- **実装したファイル**: `crates/silent-wallet/src/send.rs`（ラベルごとの入力の選択、お釣り無しの組み合わせの探索、入力・出力の順序の乱数化、Bitcoin Core と同じ規則の lock time、`BuiltTransaction::mixes_labels`、`SendError::{Tip, NoRandomness}`）、`pending.rs` と `holdings.rs`（出力の保留、`Holdings::held_back`）、`client.rs`（`hold_back` / `release`）、`crates/wallet-cli/src/main.rs`（`hold` コマンド、ラベルを混ぜたときの表示）、`scripts/mutation_check.py`
+- **実行したコマンド**: `cargo fmt --all -- --check`、clippy（既定と mainnet の構成）、`cargo test --workspace --locked`、mainnet の 2 構成のテスト、`cargo test --workspace --locked -- --ignored`（`BITCOIND_EXE` は手元の Bitcoin Core 開発ビルド）、`scripts/check_embedder_view.sh`、`scripts/mutation_check.py`（`wallet:` と `privacy:` の 44 項目）
+- **テスト結果**: 既定の構成 248 件成功・失敗 0。mainnet の全 feature 203 件成功・失敗 0、SDK の mainnet だけの構成 67 件成功・失敗 0（どちらも K_max の 2 件を除く）。実ノードのテスト 12 件成功（実ノードが lock time つきの tx を受け付け、採掘されることを含む）、実 Oracle が要る 2 件は未実行（バイナリが無いため失敗として表示される）。無効化チェックは 44 項目すべて検出（1 項目は検索パターンが古く、直して再実行した。`docs/logs/privacy_mutation_check.log`）。全項目の再実行はしていない
+- **調べた上流資料**: `docs/RESEARCH.md` §6.3（BIP の本文、`payjoin` 1.3.0、Bitcoin Core と `bdk_wallet` の該当箇所。別エージェントが読んだもので、実行はしていない）
+- **安全性で気をつけたこと**: 暗号は変えていない（鍵の導出と署名は従来の上流の関数。乱数は順序と lock time にだけ使い、得られなければ tx を作らない）。お釣り無しの選択は手数料の上限の内側でだけ採る。出力の位置を乱数にしたあとも、「自分のスキャナがお釣りを見つけること」の検査は従来どおり通す
+- **未完成 / ブロッカー**:
+  - **NOT IMPLEMENTED: ペイジョイン**。サイレントペイメントのお釣りと両立せず、暗号スタックの版上げと外部との通信が要る（D-054）。所有者の設計書（Komorebi。通常の taproot アドレスを持つウォレットにペイジョインを載せ、宛先がサイレントペイメントのときは無効にする）の形で扱うのが筋で、このリポジトリのウォレット（サイレントペイメントだけを受け取る）には入れていない
+  - NOT IMPLEMENTED: 先頭が 8 時間以上古いときに lock time を 0 にする Core の分岐、BIP326、金額の端数からの推定への対処、頼んでいない入金の自動判定
+  - 独立レビューは未実施（この変更に対して。D-018 の手順は次の区切りで行う）
+  - UNVERIFIED: 実ネットワーク（signet / mainnet）での送金
+
 ## Phase 6（進路決定）
 
 設計書は Phase 6 を「測定結果と実装体験にもとづき 3 択から選ぶ」と定めている。**選択は所有者が行った**（SDK を先に完成させ、その後ウォレット。上の「SDK 化 Result」）。

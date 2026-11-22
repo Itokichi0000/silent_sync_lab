@@ -12,7 +12,7 @@
 
 use clap::{Parser, Subcommand};
 use silent_sync::{
-    bitcoin::{consensus::encode::serialize_hex, Txid},
+    bitcoin::{consensus::encode::serialize_hex, OutPoint, Txid},
     source::CoreRestSource,
     sync::{new_store_meta, sync_with_progress, SyncError, SyncOptions, SyncReport},
     DetectedOutput, EvidenceKind, Network, ScanSource, StoreMeta, SyncStore,
@@ -180,6 +180,20 @@ enum Command {
         /// count as unspent again.
         #[arg(long)]
         forget: Option<Txid>,
+    },
+    /// Set an output aside so that it is not spent (or release it again).
+    /// Spending outputs together shows that they belong to one wallet; an
+    /// output you would rather keep apart — an unrequested small payment,
+    /// say — can be held back.
+    Hold {
+        #[command(flatten)]
+        db: DbArg,
+        /// The output, as <txid>:<index>.
+        #[arg(long)]
+        outpoint: OutPoint,
+        /// Release the output instead of holding it back.
+        #[arg(long)]
+        release: bool,
     },
 }
 
@@ -424,6 +438,39 @@ fn run(cli: Cli) -> Result<(), Failure> {
             }
             emit(&out)
         }
+        Command::Hold {
+            db,
+            outpoint,
+            release,
+        } => {
+            let (store, _) = open_store(network, &db.db)?;
+            let known = store
+                .detections()
+                .map_err(fail)?
+                .iter()
+                .any(|d| OutPoint::new(d.txid, d.vout) == outpoint);
+            if !known {
+                return Err(Failure(format!(
+                    "{outpoint} is not an output this store has detected"
+                )));
+            }
+            let path = pending_path(&db.db);
+            let mut pending = PendingSpends::load(&path).map_err(fail)?;
+            let changed = if release {
+                pending.release(outpoint)
+            } else {
+                pending.hold_back(outpoint)
+            };
+            if changed {
+                pending.save(&path).map_err(fail)?;
+            }
+            emit(&match (release, changed) {
+                (false, true) => format!("{outpoint} is held back: it will not be spent\n"),
+                (false, false) => format!("{outpoint} was held back already\n"),
+                (true, true) => format!("{outpoint} is released: it can be spent again\n"),
+                (true, false) => format!("{outpoint} was not held back\n"),
+            })
+        }
     }
 }
 
@@ -630,6 +677,15 @@ fn render_holdings(held: &Holdings) -> String {
             line(output_line(&h.output, Some(h.confirmations)));
         }
     }
+    if !held.held_back.is_empty() {
+        line(format!(
+            "held back by you (`hold`), not spent and not counted above: {} output(s)",
+            held.held_back.len()
+        ));
+        for h in &held.held_back {
+            line(output_line(&h.output, Some(h.confirmations)));
+        }
+    }
     line(format!("spent (recorded) : {} output(s)", held.spent));
     if !held.index_claims.is_empty() {
         line(format!(
@@ -670,6 +726,14 @@ fn render_built(built: &BuiltTransaction) -> String {
             change.amount_sats, change.vout
         )),
         None => line("change      : none".to_string()),
+    }
+    if built.mixes_labels {
+        line(
+            "note        : this spends outputs received under different labels together, \
+             which shows an observer that they belong to one wallet (no single label's \
+             outputs could pay this)"
+                .to_string(),
+        );
     }
     line(format!(
         "fee         : {} sat ({} vB; {} sat/vB asked for, {:.2} sat/vB paid)",

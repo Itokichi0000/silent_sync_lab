@@ -62,7 +62,7 @@
 | crate | バージョン | ライセンス | 使用箇所 |
 |---|---|---|---|
 | `bip39` | 2.2.2（厳密に固定。`default-features = false`、feature `std`。英語の単語表のみ、`rand` なし） | CC0-1.0 | シードフレーズ ⇔ エントロピー ⇔ シード（BIP39）。rust-bitcoin のクレートで、ハッシュは既存の `bitcoin_hashes 0.14.0` を使う |
-| `getrandom` | 0.2.17 | MIT OR Apache-2.0 | 新しいフレーズのエントロピー（OS の乱数源） |
+| `getrandom` | 0.2.17 | MIT OR Apache-2.0 | 新しいフレーズのエントロピー（OS の乱数源）。D-054 から `silent-wallet` の必須の依存: 送金 tx の入力・出力の順序と lock time にも使う（鍵と署名には使わない） |
 
 - 推移的に増えたもの: `unicode-normalization 0.1.26`、`tinyvec 1.13.3`（`bip39` 経由）、`cfg-if 1.0.5`、`libc 0.2.191`、`wasi 0.11.1`（`getrandom` 経由。`wasi` は WASI 向けのビルドでだけ使われる）。いずれも MIT OR Apache-2.0 系（`tinyvec` は Zlib OR Apache-2.0 OR MIT）。
 - `wallet-cli` は `silent-wallet` の feature `client` を有効にする（`new-phrase` とフレーズの読み取りのため）。`silent-wallet` を `client` なしで使う場合、これらは入らない。

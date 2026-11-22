@@ -189,6 +189,26 @@ B-1 と B-2 は上流への報告候補（未報告。DECISIONS O-002）。
 - `generateblock <address> ["<rawtx>", …]` は mempool のポリシーを通さずにブロックへ入れる（コンセンサス検証は行う）。SegWit v2 を使う tx や 1 sat 出力の tx を実チェーンに載せるのに使用。
 - regtest の高さ 1〜16 の coinbase は高さを `OP_1`〜`OP_16` で符号化する（DECISIONS D-016 のとおり）。
 
+## 6.3 ペイジョインと送金 tx のプライバシー（2026-11-22 に調査。D-054）
+
+別エージェントが一次資料を読んだ結果。実行して確かめたものは無い（読んだだけ）。
+
+| 資料 | 版 | 読んだもの |
+|---|---|---|
+| bitcoin/bips | master `fdcd8024` | BIP77（Draft 0.2.0）、BIP78（Deployed）、BIP352、BIP374（Draft 0.3.1）、BIP375（Draft 0.1.4）、BIP326（Draft）、BIP69 |
+| rust-payjoin | `6e8cd4bc87fde72541381f9f6ed07614501cb278`（`payjoin` 1.3.0） | `Cargo.toml`、`send::v1` / `send::v2` / `receive::v2`、`payjoin-cli/README.md`、`payjoin-mailroom/README.md` |
+| bdk-sp | `bb373e566fa2a9ee037cb15de2cbe6e679aac7b0`（固定している rev。調査時点の HEAD でもある） | `dleq/src/lib.rs`、`silentpayments/src/send/psbt/{mod,sign}.rs`、`silentpayments/src/receive/mod.rs` |
+| Bitcoin Core | master `19128e8b` | `src/wallet/spend.cpp`（`DiscourageFeeSniping`、お釣りの位置、入力の並べ替え）、`src/wallet/coinselection.cpp`、`doc/release-notes/release-notes-31.0.md`（`-privatebroadcast`） |
+| bdk_wallet | master `f6f45f4d` | `src/wallet/tx_builder.rs`（`TxOrdering::Shuffle` が既定） |
+
+- **`payjoin` の `bitcoin` への要求**: 1.1.0〜1.3.0 は `^0.32.102`、1.0.0 は `^0.32.9`、0.24.0 は `^0.32.5`。固定している 0.32.7 で使えるのは 0.24.0（1.0 より前の API）だけ。`bitcoin 0.32.102` は `secp256k1 ^0.29.0` のままで、`bitcoin_hashes ^0.14.101`・`bitcoin-io`・`bitcoin-units ^0.1.101` が動く。`bdk_sp` がその版でビルドできるかは UNVERIFIED。
+- **`payjoin` の feature**: 既定は `v2`。`v1` は状態機械だけ（HTTP クライアントも TLS も含まない）。`io` で `reqwest 0.12` と `rustls 0.23` が入る。`v2` は `bitcoin-hpke 0.20`、`bitcoin-ohttp 0.7`、`hkdf`、`bhttp` が入る。
+- **BIP78 の送り手の検査**: 提案には、送り手の元の出力がすべて残っていなければならず、nLockTime と version は変えられない。受け手は入力を足す。
+- **BIP352**: 「入力は、送り手が署名したあとで変わってはならない。あとで変えられるなら、受け手は出力を見つけて使うのに必要な共有秘密を計算できない」。共同で作る tx での利用は「正式な安全性の証明が無いので推奨しない」。ラベルは同じ `B_scan` を共有し、別人格を管理するためのものではない。`m = 0` はお釣り用で、渡してはならない。
+- **bdk-sp にあるもの**: BIP374 の `dleq_generate_proof` / `dleq_verify_proof`（別クレート `dleq` 0.1.0）、単独の署名者向けの `send::psbt`（秘密鍵と独自の PSBT フィールドを使う。BIP375 の ECDH 共有のフィールドではない）。
+- **Core の lock time**: 先頭の高さ。10% の確率で、そこから 0〜99 の乱数を引く。先頭が 8 時間より古ければ 0。
+- **UNVERIFIED**: signet 向けのペイジョインの公開サービス。`payjoin-mailroom` 0.1.3（ディレクトリとリレーを 1 つにしたバイナリ）で全部を手元で動かせるか。BIP77 / BIP78 とサイレントペイメントを組み合わせたウォレットが無いこと（検索で見つからなかっただけ）。
+
 ## 7. 未確認の参考資料
 
 | 資料 | 状態 |

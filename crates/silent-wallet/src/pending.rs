@@ -48,6 +48,9 @@ pub enum Settlement {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingSpends {
     transactions: Vec<PendingTransaction>,
+    /// Outputs the user has set aside: never offered to a transaction.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    held_back: BTreeSet<OutPoint>,
 }
 
 /// Why the record could not be read or written.
@@ -87,6 +90,24 @@ impl PendingSpends {
             .filter(|t| t.confirmed_at.is_none())
             .flat_map(|t| t.inputs.iter().copied())
             .collect()
+    }
+
+    /// Outputs set aside by the user: they are not offered to a transaction
+    /// until released. For an output you do not want to spend together with
+    /// your others — for example an unrequested small payment from someone
+    /// who would then see which outputs are yours.
+    pub fn held_back(&self) -> &BTreeSet<OutPoint> {
+        &self.held_back
+    }
+
+    /// Sets an output aside. Returns whether that changed anything.
+    pub fn hold_back(&mut self, outpoint: OutPoint) -> bool {
+        self.held_back.insert(outpoint)
+    }
+
+    /// Releases an output that was set aside. Returns whether it was.
+    pub fn release(&mut self, outpoint: OutPoint) -> bool {
+        self.held_back.remove(&outpoint)
     }
 
     /// Records a transaction that is about to be handed to the node.

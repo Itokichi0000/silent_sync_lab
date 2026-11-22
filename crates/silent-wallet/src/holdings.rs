@@ -34,9 +34,13 @@ pub struct Holdings {
     /// Confirmations an output needs to be listed in `unspent`.
     pub min_confirmations: u32,
     /// Detected through full blocks, no spend recorded, enough
-    /// confirmations, and not an input of a transaction this wallet sent
-    /// that is still waiting for a block.
+    /// confirmations, not an input of a transaction this wallet sent that is
+    /// still waiting for a block, and not set aside by the user.
     pub unspent: Vec<Held>,
+    /// Like `unspent`, but set aside by the user
+    /// ([`PendingSpends::hold_back`]): not offered to a transaction and not
+    /// part of `unspent`.
+    pub held_back: Vec<Held>,
     /// Like `unspent`, but with fewer confirmations than asked for.
     pub unconfirmed_enough: Vec<Held>,
     /// Inputs of transactions this wallet sent that are not in a scanned
@@ -75,6 +79,7 @@ pub fn holdings(
         as_of,
         min_confirmations,
         unspent: Vec::new(),
+        held_back: Vec::new(),
         unconfirmed_enough: Vec::new(),
         spent_by_pending: Vec::new(),
         spent: 0,
@@ -100,6 +105,8 @@ pub fn holdings(
         };
         if waiting.contains(&outpoint) {
             result.spent_by_pending.push(held);
+        } else if pending.held_back().contains(&outpoint) {
+            result.held_back.push(held);
         } else if confirmations >= min_confirmations {
             result.unspent.push(held);
         } else {

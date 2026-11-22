@@ -297,6 +297,24 @@ fn receive_and_send_between_two_wallets_on_a_node() {
         .max()
         .unwrap();
 
+    // An output that is held back is not spent, and is listed apart.
+    let apart = held.unspent[0].output.clone();
+    let apart = bdk_sp::bitcoin::OutPoint::new(apart.txid, apart.vout);
+    assert!(alice.hold_back(apart).unwrap());
+    assert!(!alice.hold_back(apart).unwrap());
+    let now = alice.holdings().unwrap();
+    assert_eq!((now.unspent.len(), now.held_back.len()), (1, 1));
+    assert!(now.unspent_sats() < total);
+    assert!(matches!(
+        alice.prepare_send(&to_bob, largest + 30_000, 2),
+        Err(ClientError::Build(
+            silent_wallet::SendError::InsufficientFunds { .. }
+        ))
+    ));
+    assert!(alice.release(apart).unwrap());
+    assert!(!alice.release(apart).unwrap());
+    assert_eq!(alice.holdings().unwrap().unspent_sats(), total);
+
     // Prepared, not sent: nothing reaches the node, nothing is pending.
     let amount = largest + 10_000; // needs both outputs
     let prepared = alice.prepare_send(&to_bob, amount, 2).unwrap();

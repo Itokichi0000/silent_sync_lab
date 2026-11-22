@@ -296,33 +296,43 @@ fn a_payment_is_signed_validly_and_found_by_both_sides() {
     .unwrap();
     let tx = &built.transaction;
 
-    // Inputs: the candidates, in the order given, as many as needed.
+    // Inputs: candidates, each once, as many as needed (in any order).
     assert!(built.inputs.len() >= 2);
-    for (input, candidate) in built.inputs.iter().zip(&candidates) {
-        assert_eq!(
-            input.outpoint,
-            OutPoint::new(candidate.txid, candidate.vout)
-        );
+    let mut seen = std::collections::BTreeSet::new();
+    for (input, txin) in built.inputs.iter().zip(&tx.input) {
+        let candidate = candidates
+            .iter()
+            .find(|c| OutPoint::new(c.txid, c.vout) == input.outpoint)
+            .expect("an input that was not offered");
         assert_eq!(input.value_sats, candidate.value_sats);
+        assert_eq!(txin.previous_output, input.outpoint);
+        assert!(seen.insert(input.outpoint));
     }
     assert_eq!(tx.input.len(), built.inputs.len());
-    // Outputs: the payments in order, then the change.
+    // Outputs: the payments and the change, each where the result says.
     assert_eq!(built.payments.len(), 2);
-    assert_eq!(tx.output[0].value.to_sat(), amount);
-    assert_eq!(tx.output[1].value.to_sat(), 5_000);
+    let (first, second) = (
+        built.payments[0].vout as usize,
+        built.payments[1].vout as usize,
+    );
+    assert_eq!(tx.output[first].value.to_sat(), amount);
+    assert_eq!(tx.output[second].value.to_sat(), 5_000);
     assert_eq!(
-        tx.output[1].script_pubkey,
-        silent_sync::bitcoin::Address::from_script(
-            &tx.output[1].script_pubkey,
-            silent_sync::bitcoin::Network::Regtest
-        )
-        .unwrap()
-        .script_pubkey()
+        tx.output[second].script_pubkey,
+        "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"
+            .parse::<silent_sync::bitcoin::Address<_>>()
+            .unwrap()
+            .assume_checked()
+            .script_pubkey()
     );
     let change = built.change.clone().expect("change");
-    assert_eq!(change.vout, 2);
     assert_eq!(tx.output.len(), 3);
-    assert_eq!(tx.output[2].value.to_sat(), change.amount_sats);
+    let places: std::collections::BTreeSet<usize> = [first, second, change.vout as usize].into();
+    assert_eq!(places.len(), 3);
+    assert_eq!(
+        tx.output[change.vout as usize].value.to_sat(),
+        change.amount_sats
+    );
     // The fee is what the inputs leave, and at least the rate asked for.
     let spent: u64 = built.inputs.iter().map(|i| i.value_sats).sum();
     let sent: u64 = tx.output.iter().map(|o| o.value.to_sat()).sum();
@@ -366,11 +376,11 @@ fn a_payment_is_signed_validly_and_found_by_both_sides() {
             .collect::<Vec<_>>(),
         TxScanOutcome::NotEligible(reason) => panic!("not eligible: {reason:?}"),
     };
-    assert_eq!(found(&recipient), vec![(0, amount, None)]);
+    assert_eq!(found(&recipient), vec![(first as u32, amount, None)]);
     // ... and the wallet's own finds its change, under the change label.
     assert_eq!(
         found(wallet.scanner()),
-        vec![(2, change.amount_sats, Some(0))]
+        vec![(change.vout, change.amount_sats, Some(0))]
     );
     // Nothing secret is in what is returned.
     let (scan, spend) = fixture_gen::vector_secret_keys(LAB_RECEIVER.0, LAB_RECEIVER.1);
@@ -418,13 +428,16 @@ fn a_payment_is_signed_validly_and_found_by_both_sides() {
     };
     mine.sort();
     let change = built.change.unwrap();
+    let mut expected = vec![
+        (built.payments[0].vout, 2_000, Some(LABEL_USED)),
+        (built.payments[1].vout, 3_000, Some(LABEL_USED)),
+        (change.vout, change.amount_sats, Some(0)),
+    ];
+    expected.sort();
+    assert_eq!(mine, expected);
     assert_eq!(
-        mine,
-        vec![
-            (0, 2_000, Some(LABEL_USED)),
-            (1, 3_000, Some(LABEL_USED)),
-            (2, change.amount_sats, Some(0)),
-        ]
+        expected.iter().map(|e| e.0).collect::<Vec<_>>(),
+        vec![0, 1, 2]
     );
 }
 
@@ -877,18 +890,15 @@ fn change_starts_at_the_relay_minimum_and_worthless_inputs_are_skipped() {
     assert_eq!(below.fee_sats, fee_with_change + 329);
     assert!(below.fee_sats < below.vsize * rate + 330 + 43 * rate);
 
-    // Not replaceable by signalling, and not time-locked.
+    // Not replaceable by signalling; the sequence lets the lock time apply.
     for input in &exact.transaction.input {
         assert_eq!(
             input.sequence,
             silent_sync::bitcoin::Sequence::ENABLE_LOCKTIME_NO_RBF
         );
         assert!(!input.sequence.is_rbf());
+        assert!(input.sequence.enables_absolute_lock_time());
     }
-    assert_eq!(
-        exact.transaction.lock_time,
-        silent_sync::bitcoin::absolute::LockTime::ZERO
-    );
 
     // The fixture's 1 sat output costs more to spend than it holds: it is
     // never taken, wherever it stands among the candidates.
@@ -1330,4 +1340,279 @@ fn a_transaction_the_node_already_has_is_not_classified_as_not_sent() {
         assert!(error.means_not_done(), "{reason}");
     }
     assert!(!RpcError::NoAnswer("timed out".to_string()).means_already_with_node());
+}
+
+/// What an observer could otherwise read from a transaction: the change is
+/// not in a fixed place, the inputs are not in the wallet's order, and the
+/// lock time is the one Bitcoin Core's wallet sets (the tip's height, now
+/// and then up to 99 blocks lower) — never 0, and never in the future.
+#[test]
+fn order_and_lock_time_give_nothing_away() {
+    let source = TestSource::new();
+    let wallet = wallet();
+    let store = synced(&source, &wallet);
+    let candidates = unspent(&store);
+    let tip = source.tip().unwrap().height;
+    assert!(tip > 0);
+    let largest = candidates.iter().map(|d| d.value_sats).max().unwrap();
+    let payments = [Payment {
+        to: Destination::parse(
+            "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080",
+            Network::Regtest,
+        )
+        .unwrap(),
+        amount_sats: largest + 1_000,
+    }];
+    let mut change_places = std::collections::BTreeSet::new();
+    let mut input_orders = std::collections::BTreeSet::new();
+    let mut lock_times = std::collections::BTreeSet::new();
+    for _ in 0..200 {
+        let built = build_and_sign(
+            &wallet,
+            &source,
+            &candidates,
+            &payments,
+            2,
+            &SendLimits::default(),
+        )
+        .unwrap();
+        change_places.insert(built.change.expect("change").vout);
+        assert!(built.inputs.len() >= 2);
+        input_orders.insert(built.inputs.iter().map(|i| i.outpoint).collect::<Vec<_>>());
+        let lock_time = built.transaction.lock_time;
+        assert!(lock_time.is_block_height());
+        let height = lock_time.to_consensus_u32();
+        assert!(
+            height <= tip && height >= tip.saturating_sub(99),
+            "{height}"
+        );
+        lock_times.insert(height);
+    }
+    // (Each of these fails by chance less often than once in 2^190.)
+    assert_eq!(change_places, [0, 1].into());
+    assert!(input_orders.len() >= 2);
+    // Mostly the tip itself; a lower one in about a tenth of the cases.
+    assert!(lock_times.contains(&tip));
+}
+
+/// Outputs received under different labels are spent together only when no
+/// label's outputs can pay alone, and the result says when that happened.
+#[test]
+fn labels_are_not_spent_together_unless_it_takes_all() {
+    let source = TestSource::new();
+    let wallet = wallet();
+    let store = synced(&source, &wallet);
+    let candidates = unspent(&store);
+    let mut by_label = std::collections::BTreeMap::<Option<u32>, u64>::new();
+    for d in &candidates {
+        *by_label.entry(d.label).or_default() += d.value_sats;
+    }
+    assert!(by_label.len() >= 2, "the fixture pays more than one label");
+    let build = |candidates: &[DetectedOutput], amount_sats: u64| {
+        build_and_sign(
+            &wallet,
+            &source,
+            candidates,
+            &[Payment {
+                to: Destination::parse(
+                    "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080",
+                    Network::Regtest,
+                )
+                .unwrap(),
+                amount_sats,
+            }],
+            2,
+            &SendLimits::default(),
+        )
+    };
+    let label_of = |outpoint: OutPoint| {
+        candidates
+            .iter()
+            .find(|c| OutPoint::new(c.txid, c.vout) == outpoint)
+            .unwrap()
+            .label
+    };
+
+    // Whichever label stands first among the candidates: a payment that the
+    // richest label can make alone spends that label's outputs only, even
+    // if outputs of other labels were offered before them.
+    let (&rich, &holds) = by_label.iter().max_by_key(|(_, sats)| **sats).unwrap();
+    let mut others_first = candidates.clone();
+    others_first.sort_by_key(|d| d.label == rich);
+    assert_ne!(others_first[0].label, rich);
+    let second = by_label
+        .iter()
+        .filter(|(label, _)| **label != rich)
+        .map(|(_, sats)| *sats)
+        .max()
+        .unwrap();
+    assert!(holds > second + 5_000, "one label must hold clearly more");
+    for offered in [&candidates, &others_first] {
+        let built = build(offered, second + 1_000).unwrap();
+        assert!(!built.mixes_labels);
+        assert!(built.inputs.iter().all(|i| label_of(i.outpoint) == rich));
+    }
+
+    // More than any one label holds: everything is used, and it is said.
+    let built = build(&candidates, holds + 1_000).unwrap();
+    assert!(built.mixes_labels);
+    let labels: std::collections::BTreeSet<_> =
+        built.inputs.iter().map(|i| label_of(i.outpoint)).collect();
+    assert!(labels.len() >= 2);
+}
+
+/// When some outputs pay the amount and the fee with (almost) nothing left,
+/// those are spent and no change is made — whatever stands before them among
+/// the candidates. Nothing in such a transaction leads back to the wallet.
+#[test]
+fn a_payment_that_some_outputs_cover_exactly_leaves_no_change() {
+    let source = TestSource::new();
+    let wallet = wallet();
+    let store = synced(&source, &wallet);
+    let candidates = unspent(&store);
+    let rate = 2;
+    let build = |amount_sats: u64| {
+        build_and_sign(
+            &wallet,
+            &source,
+            &candidates,
+            &[Payment {
+                to: Destination::parse(
+                    "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080",
+                    Network::Regtest,
+                )
+                .unwrap(),
+                amount_sats,
+            }],
+            rate,
+            &SendLimits::default(),
+        )
+    };
+    // The last candidate with a value of its own, well above the fee.
+    let target = candidates
+        .iter()
+        .rev()
+        .find(|c| {
+            c.value_sats > 5_000
+                && candidates
+                    .iter()
+                    .filter(|o| o.value_sats == c.value_sats)
+                    .count()
+                    == 1
+        })
+        .unwrap();
+    assert_ne!(
+        (candidates[0].txid, candidates[0].vout),
+        (target.txid, target.vout)
+    );
+    // The fee of a transaction with one input and one output of this kind.
+    let one_in_one_out = {
+        let built = build_and_sign(
+            &wallet,
+            &source,
+            std::slice::from_ref(target),
+            &[Payment {
+                to: Destination::parse(
+                    "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080",
+                    Network::Regtest,
+                )
+                .unwrap(),
+                amount_sats: target.value_sats - 400,
+            }],
+            rate,
+            &SendLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(built.change, None);
+        built.vsize * rate
+    };
+    for spare in [0, 40] {
+        let built = build(target.value_sats - one_in_one_out - spare).unwrap();
+        assert_eq!(built.change, None);
+        assert_eq!(built.inputs.len(), 1);
+        assert_eq!(
+            built.inputs[0].outpoint,
+            OutPoint::new(target.txid, target.vout)
+        );
+        assert_eq!(built.fee_sats, one_in_one_out + spare);
+        assert_eq!(built.transaction.output.len(), 1);
+    }
+
+    // At a high fee rate a change output costs more — to make now and to
+    // spend later — than a few thousand satoshi are worth: they become fee.
+    // Unless that takes the fee above a limit; then change is made after all.
+    let rich = candidates.iter().max_by_key(|c| c.value_sats).unwrap();
+    let high = 50;
+    let base = one_in_one_out / rate * high;
+    let spare = 4_000;
+    let build = |limits: SendLimits| {
+        build_and_sign(
+            &wallet,
+            &source,
+            std::slice::from_ref(rich),
+            &[Payment {
+                to: Destination::parse(
+                    "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080",
+                    Network::Regtest,
+                )
+                .unwrap(),
+                amount_sats: rich.value_sats - base - spare,
+            }],
+            high,
+            &limits,
+        )
+        .unwrap()
+    };
+    let built = build(SendLimits::default());
+    assert_eq!((built.change.clone(), built.fee_sats), (None, base + spare));
+    let built = build(SendLimits::default().with_max_fee_sats(base + 3_000));
+    let change = built
+        .change
+        .expect("change, because the fee limit asks for it");
+    assert_eq!(built.fee_sats, base + 43 * high);
+    assert_eq!(change.amount_sats, spare - 43 * high);
+}
+
+/// An output the user set aside is not among the unspent ones — so it is
+/// not offered to a transaction — until it is released; the list survives
+/// being written and read, and an older record without one still reads.
+#[test]
+fn outputs_held_back_are_listed_apart_and_not_offered() {
+    let source = TestSource::new();
+    let wallet = wallet();
+    let store = synced(&source, &wallet);
+    let all = holdings(&store, 1, &PendingSpends::default()).unwrap();
+    assert!(all.held_back.is_empty());
+    let apart = all.unspent[0].output.clone();
+    let outpoint = OutPoint::new(apart.txid, apart.vout);
+
+    let mut record = PendingSpends::default();
+    assert!(record.hold_back(outpoint));
+    assert!(!record.hold_back(outpoint));
+    let dir = std::env::temp_dir().join(format!("silent-wallet-held-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("pending.json");
+    record.save(&file).unwrap();
+    let record = PendingSpends::load(&file).unwrap();
+    assert_eq!(
+        record.held_back().iter().collect::<Vec<_>>(),
+        vec![&outpoint]
+    );
+
+    let held = holdings(&store, 1, &record).unwrap();
+    assert_eq!(held.held_back.len(), 1);
+    assert_eq!(held.held_back[0].output, apart);
+    assert_eq!(held.unspent.len(), all.unspent.len() - 1);
+    assert_eq!(held.unspent_sats(), all.unspent_sats() - apart.value_sats);
+    assert!(held.unspent.iter().all(|h| h.output != apart));
+
+    let mut record = record;
+    assert!(record.release(outpoint));
+    assert!(!record.release(outpoint));
+    assert_eq!(holdings(&store, 1, &record).unwrap(), all);
+
+    // A record written before there was such a list.
+    std::fs::write(&file, r#"{"transactions":[]}"#).unwrap();
+    assert!(PendingSpends::load(&file).unwrap().held_back().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
 }

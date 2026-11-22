@@ -1,0 +1,52 @@
+# Wallet and privacy entries after D-054 (2026-11-22). 43 of 44 killed in the first run;
+# the 44th had a stale pattern (setup error), was corrected and re-run below.
+running 44 selected entries: ['wallet:', 'privacy:']
+killed       wallet: payment below the relay minimum accepted  <- nothing_is_built_that_should_not_be_sent
+killed       wallet: zero fee rate accepted  <- nothing_is_built_that_should_not_be_sent
+killed       wallet: fee rate above the limit accepted  <- nothing_is_built_that_should_not_be_sent
+killed       wallet: fee above the limit accepted  <- nothing_is_built_that_should_not_be_sent
+killed       wallet: input limit ignored  <- nothing_is_built_that_should_not_be_sent
+killed       wallet: payment without enough inputs built  <- labels_are_not_spent_together_unless_it_takes_all, nothing_is_built_that_should_not_be_sent, |, |
+killed       wallet: address of another network accepted  <- nothing_is_built_that_should_not_be_sent
+killed       wallet: amount above the total supply accepted  <- seed_phrases_are_bip39_and_are_never_shown_unasked
+killed       wallet: the same output taken twice  <- nothing_is_built_that_should_not_be_sent
+killed       wallet: outputs worth less than their fee spent  <- change_starts_at_the_relay_minimum_and_worthless_inputs_are_skipped, nothing_is_built_that_should_not_be_sent
+killed       wallet: fee large next to the payment accepted  <- nothing_is_built_that_should_not_be_sent
+killed       wallet: change of exactly the relay minimum dropped  <- change_starts_at_the_relay_minimum_and_worthless_inputs_are_skipped
+killed       wallet: change the wallet cannot find is sent  <- change_the_wallet_could_not_find_again_is_never_sent, |, |
+killed       wallet: change label handed out as an address  <- a_wallet_is_opened_with_a_phrase_and_bound_to_it
+killed       wallet: refused credentials not recognised  <- answers_of_the_node_are_classified_by_what_they_prove
+killed       wallet: error answer of the node ignored  <- answers_of_the_node_are_classified_by_what_they_prove
+killed       wallet: answer under a failure status accepted  <- answers_of_the_node_are_classified_by_what_they_prove
+killed       wallet: verdict of the node on a transaction ignored  <- answers_of_the_node_are_classified_by_what_they_prove
+killed       wallet: transaction id reported by the node not compared  <- answers_of_the_node_are_classified_by_what_they_prove
+killed       wallet: cookie file that is not a cookie accepted  <- answers_of_the_node_are_classified_by_what_they_prove, the_node_connection_is_loopback_only_and_hides_the_cookie
+killed       wallet: node on another chain accepted  <- answers_of_the_node_are_classified_by_what_they_prove, |, |, |
+killed       wallet: confirmed transaction forgotten at once  <- sent_transactions_stay_on_record_while_their_block_can_still_be_abandoned, |, |
+killed       wallet: transaction of an abandoned block not put back on hold  <- sent_transactions_stay_on_record_while_their_block_can_still_be_abandoned
+killed       wallet: input spent by another transaction not noticed  <- sent_transactions_stay_on_record_while_their_block_can_still_be_abandoned
+killed       wallet: index claims counted as unspent  <- only_what_full_blocks_show_unspent_is_counted
+killed       wallet: spent outputs counted as unspent  <- only_what_full_blocks_show_unspent_is_counted
+killed       wallet: inputs of pending transactions counted as unspent  <- only_what_full_blocks_show_unspent_is_counted
+killed       wallet: outputs without enough confirmations counted  <- only_what_full_blocks_show_unspent_is_counted
+killed       wallet: RPC to a non-loopback address accepted  <- the_node_connection_is_loopback_only_and_hides_the_cookie
+killed       wallet: seed of any length accepted  <- keys_come_from_the_seed_and_are_never_shown
+killed       privacy: lock time left at zero  <- order_and_lock_time_give_nothing_away, |, |, |, |
+killed       privacy: lock time above the tip  <- order_and_lock_time_give_nothing_away
+killed       privacy: outputs left in the order built (change last)  <- order_and_lock_time_give_nothing_away, |, |
+killed       privacy: inputs left in the wallet's order  <- order_and_lock_time_give_nothing_away, |, |
+killed       privacy: labels not kept apart  <- labels_are_not_spent_together_unless_it_takes_all
+killed       privacy: spending labels together not reported  <- labels_are_not_spent_together_unless_it_takes_all
+killed       privacy: no search for a payment without change  <- a_payment_that_some_outputs_cover_exactly_leaves_no_change
+killed       privacy: change made although inputs were chosen to leave none  <- a_payment_that_some_outputs_cover_exactly_leaves_no_change, |, |
+killed       privacy: fee limits ignored when leaving no change  <- a_payment_that_some_outputs_cover_exactly_leaves_no_change, |, |
+killed       privacy: output held back still offered  <- outputs_held_back_are_listed_apart_and_not_offered
+killed       wallet: source on another network signed for  <- nothing_is_signed_for_another_network_than_the_wallets
+killed       wallet: output of another network signed for  <- nothing_is_signed_for_another_network_than_the_wallets
+killed       wallet: transaction the node already has reported as not sent  <- a_transaction_the_node_already_has_is_not_classified_as_not_sent
+
+
+running 1 selected entries: ['wallet: lost answer']
+killed       wallet: lost answer treated as not sent  <- answers_of_the_node_are_classified_by_what_they_prove
+
+SURVIVORS: none
