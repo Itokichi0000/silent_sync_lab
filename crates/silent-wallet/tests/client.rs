@@ -354,6 +354,18 @@ fn receive_and_send_between_two_wallets_on_a_node() {
     assert!(matches!(alice.send(stale), Err(ClientError::Stale { .. })));
     assert_eq!(mempool(), 0);
 
+    // An output held back after the transaction was prepared is not spent
+    // by it: the hold is what was asked for last.
+    let before_hold = alice.prepare_send(&to_bob, amount, 2).unwrap();
+    assert!(alice.hold_back(apart).unwrap());
+    assert!(matches!(
+        alice.send(before_hold),
+        Err(ClientError::Stale { .. })
+    ));
+    assert_eq!(mempool(), 0);
+    assert!(alice.pending().unwrap().is_empty());
+    assert!(alice.release(apart).unwrap());
+
     // Sent: in the node's mempool, on record as pending, its inputs taken.
     let prepared = alice.prepare_send(&to_bob, amount, 2).unwrap();
     let (txid, fee) = (prepared.txid(), prepared.fee_sats());

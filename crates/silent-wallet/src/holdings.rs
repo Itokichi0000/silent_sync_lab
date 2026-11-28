@@ -54,6 +54,20 @@ pub struct Holdings {
 }
 
 impl Holdings {
+    /// Whether `outpoint` may be set aside ([`PendingSpends::hold_back`]):
+    /// detected through full blocks with no spend recorded — listed in
+    /// `unspent`, `unconfirmed_enough` or (already) `held_back`. Not an
+    /// output that is spent, being spent by a transaction waiting for a
+    /// block, claimed only by an index, or unknown: holding those would
+    /// promise something about an output that will not be spent anyway, or
+    /// that is not known to exist.
+    pub fn can_hold(&self, outpoint: OutPoint) -> bool {
+        let is = |h: &Held| OutPoint::new(h.output.txid, h.output.vout) == outpoint;
+        self.unspent.iter().any(is)
+            || self.unconfirmed_enough.iter().any(is)
+            || self.held_back.iter().any(is)
+    }
+
     /// Sum of `unspent`, in satoshi: outputs detected through full blocks,
     /// without a recorded spend, with at least `min_confirmations`.
     pub fn unspent_sats(&self) -> u64 {

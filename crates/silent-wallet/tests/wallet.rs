@@ -1391,8 +1391,11 @@ fn order_and_lock_time_give_nothing_away() {
     // (Each of these fails by chance less often than once in 2^190.)
     assert_eq!(change_places, [0, 1].into());
     assert!(input_orders.len() >= 2);
-    // Mostly the tip itself; a lower one in about a tenth of the cases.
+    // Mostly the tip itself; a lower one in about a tenth of the cases
+    // (none in 200 happens by chance less often than once in 10^9). How far
+    // lower is checked with a higher tip in `send.rs`.
     assert!(lock_times.contains(&tip));
+    assert!(lock_times.len() >= 2, "{lock_times:?}");
 }
 
 /// Outputs received under different labels are spent together only when no
@@ -1450,12 +1453,14 @@ fn labels_are_not_spent_together_unless_it_takes_all() {
     for offered in [&candidates, &others_first] {
         let built = build(offered, second + 1_000).unwrap();
         assert!(!built.mixes_labels);
+        assert!(built.warnings().is_empty());
         assert!(built.inputs.iter().all(|i| label_of(i.outpoint) == rich));
     }
 
     // More than any one label holds: everything is used, and it is said.
     let built = build(&candidates, holds + 1_000).unwrap();
     assert!(built.mixes_labels);
+    assert!(built.warnings()[0].contains("different labels together"));
     let labels: std::collections::BTreeSet<_> =
         built.inputs.iter().map(|i| label_of(i.outpoint)).collect();
     assert!(labels.len() >= 2);
@@ -1571,6 +1576,97 @@ fn a_payment_that_some_outputs_cover_exactly_leaves_no_change() {
         .expect("change, because the fee limit asks for it");
     assert_eq!(built.fee_sats, base + 43 * high);
     assert_eq!(change.amount_sats, spare - 43 * high);
+    // The same with the limit as a share of the amount.
+    let amount = rich.value_sats - base - spare;
+    let percent = (base + 3_000) * 100 / amount;
+    assert!((base + spare) * 100 > percent * amount);
+    assert!((base + 43 * high) * 100 <= percent * amount);
+    let built = build(SendLimits::default().with_max_fee_percent(percent));
+    let change = built
+        .change
+        .expect("change, because the fee limit asks for it");
+    assert_eq!(built.fee_sats, base + 43 * high);
+    assert_eq!(change.amount_sats, spare - 43 * high);
+}
+
+/// Outputs of two labels that together pay without change are not taken
+/// while one label can pay alone (with change): leaving no change is not
+/// worth showing that the labels belong to one wallet.
+#[test]
+fn no_change_is_not_bought_by_spending_labels_together() {
+    let source = TestSource::new();
+    let wallet = wallet();
+    let store = synced(&source, &wallet);
+    let candidates = unspent(&store);
+    let rate = 2;
+    let to = Destination::parse(
+        "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080",
+        Network::Regtest,
+    )
+    .unwrap();
+    let build = |candidates: &[DetectedOutput], amount_sats: u64| {
+        build_and_sign(
+            &wallet,
+            &source,
+            candidates,
+            &[Payment {
+                to: to.clone(),
+                amount_sats,
+            }],
+            rate,
+            &SendLimits::default(),
+        )
+    };
+    // Two outputs of different labels, each the only one of its value.
+    let unique = |d: &&DetectedOutput| {
+        d.value_sats > 5_000
+            && candidates
+                .iter()
+                .filter(|o| o.value_sats == d.value_sats)
+                .count()
+                == 1
+    };
+    let first = candidates
+        .iter()
+        .filter(unique)
+        .find(|d| d.label.is_some())
+        .unwrap();
+    let second = candidates
+        .iter()
+        .filter(unique)
+        .find(|d| d.label != first.label && d.label.is_some())
+        .unwrap();
+    let pair = [first.clone(), second.clone()];
+    let sum = first.value_sats + second.value_sats;
+    // The fee of the two of them paying one output, nothing left over.
+    let fee = {
+        let built = build(&pair, sum - 600).unwrap();
+        assert_eq!(built.change, None);
+        built.vsize * rate
+    };
+    let exact = build(&pair, sum - fee).unwrap();
+    assert!(exact.change.is_none() && exact.mixes_labels);
+
+    // With everything offered, a label that pays alone is used instead.
+    let mut alone = std::collections::BTreeMap::<Option<u32>, u64>::new();
+    for d in &candidates {
+        *alone.entry(d.label).or_default() += d.value_sats;
+    }
+    assert!(alone.values().any(|sats| *sats > sum + 5_000));
+    let built = build(&candidates, sum - fee).unwrap();
+    assert!(!built.mixes_labels);
+    let labels: std::collections::BTreeSet<_> = built
+        .inputs
+        .iter()
+        .map(|i| {
+            candidates
+                .iter()
+                .find(|c| OutPoint::new(c.txid, c.vout) == i.outpoint)
+                .unwrap()
+                .label
+        })
+        .collect();
+    assert_eq!(labels.len(), 1);
 }
 
 /// An output the user set aside is not among the unspent ones — so it is
@@ -1606,13 +1702,161 @@ fn outputs_held_back_are_listed_apart_and_not_offered() {
     assert_eq!(held.unspent_sats(), all.unspent_sats() - apart.value_sats);
     assert!(held.unspent.iter().all(|h| h.output != apart));
 
+    // A transaction built before the hold does not get to spend it: the
+    // check made right before sending finds it, among other inputs too.
+    let other = all.unspent[1].output.clone();
+    let other = OutPoint::new(other.txid, other.vout);
+    assert_eq!(
+        record.first_unavailable([&other, &outpoint]),
+        Some(outpoint)
+    );
+    assert_eq!(record.first_unavailable([&other]), None);
+
     let mut record = record;
     assert!(record.release(outpoint));
     assert!(!record.release(outpoint));
     assert_eq!(holdings(&store, 1, &record).unwrap(), all);
+    assert_eq!(record.first_unavailable([&other, &outpoint]), None);
+    // Nor does it spend what a transaction sent meanwhile spends.
+    record.record(PendingTransaction {
+        txid: apart.txid,
+        inputs: vec![other],
+        sent_at_height: 8,
+        confirmed_at: None,
+    });
+    assert_eq!(record.first_unavailable([&outpoint, &other]), Some(other));
+
+    // What can be held: an output that would otherwise be spent, or one held
+    // already. Not one being spent, and not one that is not known.
+    let now = holdings(&store, 1, &record).unwrap();
+    assert!(now.can_hold(outpoint));
+    assert!(!now.can_hold(other));
+    assert!(!now.can_hold(OutPoint::new(apart.txid, 999)));
+    record.hold_back(outpoint);
+    assert!(holdings(&store, 1, &record).unwrap().can_hold(outpoint));
+    // One with too few confirmations yet can be held too.
+    let young = holdings(&store, 1_000, &PendingSpends::default()).unwrap();
+    assert!(young.unspent.is_empty());
+    assert!(young.can_hold(outpoint));
 
     // A record written before there was such a list.
     std::fs::write(&file, r#"{"transactions":[]}"#).unwrap();
     assert!(PendingSpends::load(&file).unwrap().held_back().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A label that can pay alone is used alone, even when its oldest outputs
+/// would take more inputs than allowed, or a fee above the limits: then its
+/// other outputs, or another label, are tried before labels are mixed.
+#[test]
+fn a_label_that_can_pay_alone_is_found_past_its_oldest_outputs() {
+    let source = TestSource::new();
+    let wallet = wallet();
+    let store = synced(&source, &wallet);
+    let candidates = unspent(&store);
+    let to = Destination::parse(
+        "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080",
+        Network::Regtest,
+    )
+    .unwrap();
+    let build = |candidates: &[DetectedOutput], amount_sats: u64, rate, limits: &SendLimits| {
+        build_and_sign(
+            &wallet,
+            &source,
+            candidates,
+            &[Payment {
+                to: to.clone(),
+                amount_sats,
+            }],
+            rate,
+            limits,
+        )
+    };
+    let find = |sats: u64, label: Option<u32>| {
+        candidates
+            .iter()
+            .find(|c| c.value_sats == sats && c.label == label)
+            .unwrap_or_else(|| panic!("the fixture has {sats} sat under {label:?}"))
+            .clone()
+    };
+    let label_of = |outpoint: OutPoint| {
+        candidates
+            .iter()
+            .find(|c| OutPoint::new(c.txid, c.vout) == outpoint)
+            .unwrap()
+            .label
+    };
+    let (a15, a3) = (find(15_000, Some(0)), find(3_000, Some(0)));
+    let (n10, n20, n50) = (find(10_000, None), find(20_000, None), find(50_000, None));
+
+    // At most two inputs. No label's two oldest outputs pay 31,000 sat, but
+    // its newest one does: that one is spent, nothing else.
+    let mut two = SendLimits::default();
+    two.max_inputs = 2;
+    let offered = [
+        a15.clone(),
+        n20.clone(),
+        n10.clone(),
+        n50.clone(),
+        a3.clone(),
+    ];
+    let built = build(&offered, 31_000, 2, &two).unwrap();
+    assert!(!built.mixes_labels);
+    assert_eq!(
+        built.inputs.iter().map(|i| i.outpoint).collect::<Vec<_>>(),
+        vec![OutPoint::new(n50.txid, n50.vout)]
+    );
+
+    // The first label pays only with a fee above the limit (what is left is
+    // too little for change): the next label is used.
+    let pair = [a3.clone(), a15.clone()];
+    let fee = {
+        let built = build(&pair, 18_000 - 450, 1, &SendLimits::default()).unwrap();
+        assert_eq!(built.change, None);
+        built.vsize
+    };
+    let amount = 18_000 - fee - 200;
+    let limits = SendLimits::default().with_max_fee_sats(fee + 150);
+    assert!(build(&pair, amount, 1, &limits).is_err());
+    let offered = [a3, a15, n20, n10, n50];
+    let built = build(&offered, amount, 1, &limits).unwrap();
+    assert!(!built.mixes_labels);
+    assert!(built.inputs.iter().all(|i| label_of(i.outpoint).is_none()));
+    assert!(built.fee_sats <= fee + 150);
+
+    // One output of a label pays, but leaves too little for change: all of
+    // it would be fee, above the limit. With one more output of the same
+    // label there is change, and the fee is within the limit.
+    let a15 = find(15_000, Some(0));
+    let a3 = find(3_000, Some(0));
+    let one = {
+        let built = build(
+            std::slice::from_ref(&a15),
+            15_000 - 450,
+            1,
+            &SendLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(built.change, None);
+        built.vsize
+    };
+    let amount = 15_000 - one - 200;
+    let limits = SendLimits::default().with_max_fee_sats(one + 150);
+    assert!(build(std::slice::from_ref(&a15), amount, 1, &limits).is_err());
+    let offered = [a15, a3, find(7_000, Some(1))];
+    let built = build(&offered, amount, 1, &limits).unwrap();
+    assert!(!built.mixes_labels);
+    assert_eq!(built.inputs.len(), 2);
+    assert!(built.change.is_some());
+    assert!(built.fee_sats <= one + 150);
+
+    // What covers the amount but not the fee at the rate asked for is not
+    // enough: nothing is built that pays less than the rate.
+    for spare in [0, 50, one - 1] {
+        let short = build(&offered[..1], 15_000 - spare, 1, &SendLimits::default());
+        assert!(
+            matches!(short, Err(SendError::InsufficientFunds { .. })),
+            "{spare}: {short:?}"
+        );
+    }
 }

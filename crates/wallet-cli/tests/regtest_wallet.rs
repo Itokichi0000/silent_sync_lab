@@ -162,14 +162,12 @@ fn receive_then_send_between_two_wallets() {
     let unknown = format!("{}:7", received[0].0);
     let refused = wallet(&alice, &["hold", "--db", &db_a, "--outpoint", &unknown], "");
     assert_eq!(refused.code, Some(1));
-    assert!(refused
-        .stderr
-        .contains("is not an output this store has detected"));
+    assert!(refused.stderr.contains("cannot be held back"));
     assert!(ok(
         &alice,
         &["hold", "--db", &db_a, "--outpoint", &apart, "--release"]
     )
-    .contains("is released"));
+    .contains("is no longer held back"));
     let status = json(&alice, &["status", "--db", &db_a, "--json"]);
     assert_eq!(status["unspent"].as_array().unwrap().len(), 2);
 
@@ -229,6 +227,63 @@ fn receive_then_send_between_two_wallets() {
     ]);
     assert_eq!(verdict[0]["allowed"], true, "{verdict}");
 
+    // Held back while the confirmation is awaited: the transaction shown
+    // spends it, so nothing is sent (both outputs are inputs).
+    {
+        use std::io::Read as _;
+        let amount = amount.to_string();
+        let mut child = Command::new(BIN)
+            .args([
+                "send",
+                "--db",
+                &db_a,
+                "--core-rest-url",
+                &url,
+                "--to",
+                &address_b,
+                "--amount",
+                &amount,
+                "--fee-rate",
+                "2",
+            ])
+            .args(with_cookie)
+            .env("SILENT_WALLET_SEED", &alice)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+        let mut shown = Vec::new();
+        let mut byte = [0u8; 1];
+        while !String::from_utf8_lossy(&shown).contains("to send it: ") {
+            assert_eq!(stderr.read(&mut byte).unwrap(), 1, "the prompt never came");
+            shown.push(byte[0]);
+        }
+        assert!(ok(&alice, &["hold", "--db", &db_a, "--outpoint", &apart]).contains("is held back"));
+        child.stdin.take().unwrap().write_all(b"SEND\n").unwrap();
+        let mut rest = String::new();
+        stderr.read_to_string(&mut rest).unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(status.code(), Some(1), "{rest}");
+        assert!(
+            rest.contains("was held back or spent by another transaction")
+                && rest.contains("nothing was sent"),
+            "{rest}"
+        );
+        assert_eq!(
+            node.cli_json(&["getrawmempool"]).as_array().unwrap().len(),
+            0
+        );
+        assert!(ok(&alice, &["pending", "--db", &db_a])
+            .contains("no transaction is waiting for a block"));
+        assert!(ok(
+            &alice,
+            &["hold", "--db", &db_a, "--outpoint", &apart, "--release"]
+        )
+        .contains("is no longer held back"));
+    }
+
     // Confirmed: the node takes it.
     let sent = send("SEND\n", &with_cookie);
     assert_eq!(sent.code, Some(0), "{}", sent.stderr);
@@ -260,6 +315,14 @@ fn receive_then_send_between_two_wallets() {
     assert_eq!(waiting["spent_by_pending"].as_array().unwrap().len(), 2);
     assert_eq!(waiting["spent"], 0);
     assert!(ok(&alice, &["pending", "--db", &db_a]).contains(&txid));
+    // Nor held back: it is being spent already.
+    let held = wallet(&alice, &["hold", "--db", &db_a, "--outpoint", &apart], "");
+    assert_eq!(held.code, Some(1));
+    assert!(
+        held.stderr.contains("cannot be held back"),
+        "{}",
+        held.stderr
+    );
     let again = send("SEND\n", &with_cookie);
     assert_eq!(again.code, Some(1));
     assert!(

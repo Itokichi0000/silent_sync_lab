@@ -100,6 +100,21 @@ impl PendingSpends {
         &self.held_back
     }
 
+    /// The first of `outpoints` that must not be spent now: spent by a
+    /// recorded transaction not yet in a block, or held back. A transaction
+    /// built before the record was read last is checked with this before it
+    /// is sent — the hold or the other spend may have come after it.
+    pub fn first_unavailable<'a>(
+        &self,
+        outpoints: impl IntoIterator<Item = &'a OutPoint>,
+    ) -> Option<OutPoint> {
+        let taken = self.inputs();
+        outpoints
+            .into_iter()
+            .find(|o| taken.contains(o) || self.held_back.contains(o))
+            .copied()
+    }
+
     /// Sets an output aside. Returns whether that changed anything.
     pub fn hold_back(&mut self, outpoint: OutPoint) -> bool {
         self.held_back.insert(outpoint)

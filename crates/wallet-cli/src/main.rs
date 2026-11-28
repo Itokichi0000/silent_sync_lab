@@ -444,18 +444,21 @@ fn run(cli: Cli) -> Result<(), Failure> {
             release,
         } => {
             let (store, _) = open_store(network, &db.db)?;
-            let known = store
-                .detections()
-                .map_err(fail)?
-                .iter()
-                .any(|d| OutPoint::new(d.txid, d.vout) == outpoint);
-            if !known {
-                return Err(Failure(format!(
-                    "{outpoint} is not an output this store has detected"
-                )));
-            }
             let path = pending_path(&db.db);
             let mut pending = PendingSpends::load(&path).map_err(fail)?;
+            // Only an output that would otherwise be spent can be held back;
+            // anything held can be released.
+            if !release
+                && !holdings(&store, 1, &pending)
+                    .map_err(fail)?
+                    .can_hold(outpoint)
+            {
+                return Err(Failure(format!(
+                    "{outpoint} cannot be held back: it is not among the outputs detected \
+                     through full blocks that are not spent (it may be spent, being spent by a \
+                     transaction waiting for a block, only claimed by an index, or unknown)"
+                )));
+            }
             let changed = if release {
                 pending.release(outpoint)
             } else {
@@ -467,7 +470,7 @@ fn run(cli: Cli) -> Result<(), Failure> {
             emit(&match (release, changed) {
                 (false, true) => format!("{outpoint} is held back: it will not be spent\n"),
                 (false, false) => format!("{outpoint} was held back already\n"),
-                (true, true) => format!("{outpoint} is released: it can be spent again\n"),
+                (true, true) => format!("{outpoint} is no longer held back\n"),
                 (true, false) => format!("{outpoint} was not held back\n"),
             })
         }
@@ -727,13 +730,8 @@ fn render_built(built: &BuiltTransaction) -> String {
         )),
         None => line("change      : none".to_string()),
     }
-    if built.mixes_labels {
-        line(
-            "note        : this spends outputs received under different labels together, \
-             which shows an observer that they belong to one wallet (no single label's \
-             outputs could pay this)"
-                .to_string(),
-        );
+    for warning in built.warnings() {
+        line(format!("note        : {warning}"));
     }
     line(format!(
         "fee         : {} sat ({} vB; {} sat/vB asked for, {:.2} sat/vB paid)",
@@ -747,7 +745,8 @@ fn render_built(built: &BuiltTransaction) -> String {
         .saturating_sub(built.vsize * built.fee_rate_asked);
     if surplus > 0 {
         line(format!(
-            "              (includes {surplus} sat that were too little to return as change)"
+            "              (includes {surplus} sat kept as fee instead of a change output: too \
+             little to return, or less than a change output would cost to make and later spend)"
         ));
     }
     out
@@ -902,6 +901,14 @@ fn send(network: Network, args: SendArgs) -> Result<(), Failure> {
     // record is read afresh, in case something else changed it meanwhile.
     let txid = built.txid;
     let mut pending = PendingSpends::load(&pending_file).map_err(fail)?;
+    // While the confirmation was awaited, another command may have held an
+    // input back or spent it: then this transaction is not what was wanted.
+    if let Some(input) = pending.first_unavailable(built.inputs.iter().map(|i| &i.outpoint)) {
+        return Err(Failure(format!(
+            "{input} was held back or spent by another transaction while this one waited for \
+             confirmation; nothing was sent. Run `send` again"
+        )));
+    }
     pending.record(PendingTransaction {
         txid,
         inputs: built.inputs.iter().map(|i| i.outpoint).collect(),
@@ -916,9 +923,15 @@ fn send(network: Network, args: SendArgs) -> Result<(), Failure> {
     match rpc.send(&built.transaction) {
         Ok(_) => {}
         // The node said no, or was never asked: take the record back.
+        // (Read afresh, so that a hold or a send recorded meanwhile by
+        // another command is not written over. That narrows the window; the
+        // record is not locked: see docs/THREAT_MODEL.md.)
         Err(e) if e.means_not_done() => {
-            pending.forget(txid);
-            let note = match pending.save(&pending_file) {
+            let forgotten = PendingSpends::load(&pending_file).and_then(|mut pending| {
+                pending.forget(txid);
+                pending.save(&pending_file)
+            });
+            let note = match forgotten {
                 Ok(()) => String::new(),
                 Err(save) => format!(
                     "\n(it is still listed as pending: {save}; remove it with `pending --forget \

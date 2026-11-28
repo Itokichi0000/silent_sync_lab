@@ -195,6 +195,13 @@ pub enum ClientError {
         /// Checkpoint height the transaction was prepared at.
         prepared_at: Option<u32>,
     },
+    #[error(
+        "{0} cannot be held back: it is not among the outputs detected through full blocks \
+         that are not spent (it may be spent, being spent, only claimed by an index, or unknown)"
+    )]
+    /// [`WalletClient::hold_back`] was given an output it cannot set aside
+    /// ([`Holdings::can_hold`]).
+    CannotHold(OutPoint),
 }
 
 /// How many words a new seed phrase has.
@@ -439,6 +446,9 @@ impl fmt::Display for PreparedSend {
             "fee         : {} sat ({} vbytes; {} sat/vB asked)",
             built.fee_sats, built.vsize, built.fee_rate_asked
         )?;
+        for warning in built.warnings() {
+            writeln!(f, "note        : {warning}")?;
+        }
         let spent: u64 = built.inputs.iter().map(|i| i.value_sats).sum();
         write!(
             f,
@@ -663,9 +673,17 @@ impl WalletClient {
     /// changed anything. For an output you do not want to spend together
     /// with your others (spending outputs together shows that they belong
     /// to one wallet).
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::CannotHold`] for an output that is spent, being spent,
+    /// only claimed by an index, or not detected at all.
     pub fn hold_back(&mut self, outpoint: OutPoint) -> Result<bool, ClientError> {
         let path = pending_path(&self.config.store_path);
         let mut pending = PendingSpends::load(&path)?;
+        if !holdings(&self.store, self.config.min_confirmations, &pending)?.can_hold(outpoint) {
+            return Err(ClientError::CannotHold(outpoint));
+        }
         let changed = pending.hold_back(outpoint);
         if changed {
             pending.save(&path)?;
@@ -770,9 +788,12 @@ impl WalletClient {
         };
         let built = &prepared.built;
         let txid = built.txid;
+        // Taken: spent by a pending transaction, or held back (possibly
+        // after this one was prepared — the hold is the later wish).
         let inputs_taken = |pending: &PendingSpends| {
-            let taken = pending.inputs();
-            built.inputs.iter().any(|i| taken.contains(&i.outpoint))
+            pending
+                .first_unavailable(built.inputs.iter().map(|i| &i.outpoint))
+                .is_some()
         };
         if prepared.network != self.config.network
             || prepared.wallet_id != self.meta.wallet_id
@@ -816,9 +837,15 @@ impl WalletClient {
             // The node said no, or was never asked: take the record back.
             // (If that fails the transaction stays listed as pending, which
             // errs on the side of not spending its inputs again.)
+            // Read afresh again, so that a hold or a send recorded meanwhile
+            // by another program is not written over. (That narrows the
+            // window; the record is not locked, and programs using one store
+            // at the same time are not supported: docs/THREAT_MODEL.md.)
             Err(e) if e.means_not_done() => {
-                pending.forget(txid);
-                let _ = pending.save(&path);
+                if let Ok(mut pending) = PendingSpends::load(&path) {
+                    pending.forget(txid);
+                    let _ = pending.save(&path);
+                }
                 Err(ClientError::NotSent(e))
             }
             Err(cause) => Err(ClientError::OutcomeUnknown { txid, cause }),

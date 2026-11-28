@@ -570,8 +570,24 @@ SDK の API に関する 4 つの判断（出力ごとの tweak は渡さない�
 - **未完成 / ブロッカー**:
   - **NOT IMPLEMENTED: ペイジョイン**。サイレントペイメントのお釣りと両立せず、暗号スタックの版上げと外部との通信が要る（D-054）。所有者の設計書（Komorebi。通常の taproot アドレスを持つウォレットにペイジョインを載せ、宛先がサイレントペイメントのときは無効にする）の形で扱うのが筋で、このリポジトリのウォレット（サイレントペイメントだけを受け取る）には入れていない
   - NOT IMPLEMENTED: 先頭が 8 時間以上古いときに lock time を 0 にする Core の分岐、BIP326、金額の端数からの推定への対処、頼んでいない入金の自動判定
-  - 独立レビューは未実施（この変更に対して。D-018 の手順は次の区切りで行う）
+  - 独立レビュー: 2026-11-27 に実施（下の「送金 tx のプライバシー: 独立レビュー Result」）
   - UNVERIFIED: 実ネットワーク（signet / mainnet）での送金
+
+## 送金 tx のプライバシー: 独立レビュー Result（2026-11-27。D-018、D-054 の追記）
+
+- **やったこと**: コミット 8a16c39 を、文脈を共有しないレビュー 4 本（Claude のエージェント 2 つ: 保留と CLI／テストと無効化チェック、Codex 2 つ: send.rs の正しさ／文書の主張と実装）で見てもらい、修正の差分をさらに Codex 1 本で見てもらった。指摘はすべて手元で再現してから直した（再現できたもの: 保留後に送られる（regtest の実ノード）、ラベルを混ぜる 2 通りと払えるのに失敗する 1 通り（fixture）、無効化しても検出されない変更 4 つ）。直した内容は `docs/DECISIONS.md` D-054 の追記
+- **実装したファイル**: `crates/silent-wallet/src/send.rs`（ラベルの組ごとの選択、`settle`、`BuiltTransaction::warnings`、lock time の単体テスト）、`pending.rs`（`first_unavailable`）、`holdings.rs`（`Holdings::can_hold`）、`client.rs`（送信直前の検査、`CannotHold`、巻き戻しの読み直し、確認表示の注記）、`crates/wallet-cli/src/main.rs`（確認後の検査、`hold` の制限と文言、手数料の説明、巻き戻し）、テスト（`tests/wallet.rs`、`tests/client.rs`、`wallet-cli/tests/regtest_wallet.rs`）、`scripts/mutation_check.py`、README、`docs/THREAT_MODEL.md`、`docs/DECISIONS.md`
+- **実行したコマンド**: `cargo fmt --all -- --check`、clippy（既定と mainnet の全 feature）、`cargo test --workspace --locked`、mainnet の 2 構成、`cargo test --workspace --locked --no-fail-fast -- --ignored`（`BITCOIND_EXE` は手元の Bitcoin Core 開発ビルド v32.99.0-e211dd0186e9）、`scripts/check_embedder_view.sh`、`scripts/mutation_check.py`（`privacy:` と `wallet:`）
+- **テスト結果**: 既定の構成 251 件成功・失敗 0。mainnet の全 feature 208 件、SDK の mainnet だけの構成 70 件、どちらも失敗 0（上のコマンドをそのまま実行した `test result` 行の合計）。実ノードのテスト 12 件成功、実 Oracle が要る 2 件はバイナリが無いため失敗（従来どおり）。embedder チェック成功。無効化チェック: `privacy:` と `wallet:` の 56 項目すべて検出、生き残り 0（`docs/logs/privacy_review_mutation_check.log`）。全項目の再実行はしていない
+- **安全性で気をつけたこと**: 暗号・鍵の導出・署名は変えていない。送信直前の検査は「足す」方向だけ（送らない場合が増えるだけ）。ラベルごとの選択は、手数料の上限と「率に届く手数料」を満たす組だけを採り、最後の手数料の検査は従来どおり残した
+- **未完成 / ブロッカー**:
+  - 送信中の記録はロックしていない。読み直しは競合を狭めるだけ（`docs/THREAT_MODEL.md`）
+  - 巻き戻しの前の読み直しを検査するテストは無い。CLI の確認後の検査は実ノードのテストでだけ検査している
+  - 別ラベルの出力から出たお釣りどうしを後で一緒に使うと結び付く（お釣りはすべてラベル 0）。NOT IMPLEMENTED（出所の追跡が要る）
+  - 低レベルの `build_and_sign` には送金額の上限が無い（窓口 API と CLI が検査。以前から）
+  - NOT IMPLEMENTED: ペイジョイン（D-054。所有者の判断待ち）
+  - UNVERIFIED: 実ネットワーク（signet / mainnet）での送金
+- **次に取り組む最小タスク**: 下の「所有者の確認・判断が必要なもの」から所有者が選ぶ（signet での確認、窓口 API の次の範囲、UI と鍵の保管、ペイジョインの形）
 
 ## Phase 6（進路決定）
 

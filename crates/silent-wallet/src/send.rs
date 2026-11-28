@@ -336,6 +336,23 @@ pub struct BuiltTransaction {
 }
 
 /// A taproot output script of the usual size, for size estimates.
+impl BuiltTransaction {
+    /// What a person deciding whether to send this should be told about
+    /// what it shows an observer, beyond amounts and fee. Empty when there
+    /// is nothing to say. Shown by the CLI and by the client's summary.
+    pub fn warnings(&self) -> Vec<&'static str> {
+        let mut warnings = Vec::new();
+        if self.mixes_labels {
+            warnings.push(
+                "this spends outputs received under different labels together, which shows an \
+                 observer that they belong to one wallet (no single label's outputs could pay \
+                 this)",
+            );
+        }
+        warnings
+    }
+}
+
 fn placeholder_p2tr() -> ScriptBuf {
     let mut bytes = vec![0x51, 0x20];
     bytes.extend_from_slice(&[0x02; 32]);
@@ -677,6 +694,22 @@ pub fn build_and_sign(
     fn pick<'a>(group: &[&'a DetectedOutput], picked: Vec<usize>) -> Vec<&'a DetectedOutput> {
         picked.into_iter().map(|i| group[i]).collect()
     }
+    // Change and fee of a transaction spending `count` inputs worth
+    // `gathered`: change if what is left after the fee of a transaction
+    // *with* a change output is worth an output, otherwise the remainder is
+    // fee. Inputs that were chosen to pay without change leave none.
+    let dust = placeholder_p2tr().minimal_non_dust().to_sat();
+    let settle = |count: usize, gathered: u64, exact: bool| {
+        let change_sats = add(total, fee_for(count, &with_change))
+            .and_then(|spent| gathered.checked_sub(spent))
+            .filter(|left| *left >= dust)
+            .filter(|_| !exact);
+        let fee_sats = gathered
+            .checked_sub(total)
+            .and_then(|left| left.checked_sub(change_sats.unwrap_or(0)))
+            .ok_or(SendError::Check("the fee is negative"))?;
+        Ok::<_, SendError>((change_sats, fee_sats))
+    };
     let mut choice: Option<(Vec<&DetectedOutput>, bool)> = None;
     for (_, group) in &groups {
         if let Some(picked) = without_change(group) {
@@ -684,13 +717,38 @@ pub fn build_and_sign(
             break;
         }
     }
-    if choice.is_none() {
-        for (_, group) in &groups {
-            // A group that needs too many inputs is passed over like one
-            // that holds too little.
-            if let Ok(Some(picked)) = in_order(group) {
-                choice = Some((pick(group, picked), false));
-                break;
+    // Otherwise a group that pays alone within the limits: its outputs in
+    // the order given, or else largest first (its oldest outputs may need
+    // too many inputs). Outputs are added until the payment is covered with
+    // a fee within the limits — not merely covered: a remainder too small
+    // for change is all fee, and one more output can turn it into change.
+    // A group that cannot is passed over.
+    let within_limits = |order: &[&'_ DetectedOutput]| -> Option<Vec<usize>> {
+        let mut gathered = 0u64;
+        for (index, candidate) in order.iter().enumerate().take(limits.max_inputs) {
+            gathered = gathered.checked_add(candidate.value_sats)?;
+            let count = index + 1;
+            // Covered: the payments and the fee of a transaction without
+            // change. (Less than that would underpay the fee.)
+            if add(total, fee_for(count, &size_scripts)).is_none_or(|needed| gathered < needed) {
+                continue;
+            }
+            if matches!(settle(count, gathered, false), Ok((_, fee)) if fee_within_limits(fee)) {
+                return Some((0..count).collect());
+            }
+        }
+        None
+    };
+    'groups: for (_, group) in &groups {
+        if choice.is_some() {
+            break;
+        }
+        let mut largest_first = group.clone();
+        largest_first.sort_by_key(|d| std::cmp::Reverse(d.value_sats));
+        for order in [group, &largest_first] {
+            if let Some(picked) = within_limits(order) {
+                choice = Some((pick(order, picked), false));
+                break 'groups;
             }
         }
     }
@@ -716,18 +774,7 @@ pub fn build_and_sign(
     let mixes_labels = selected.iter().any(|d| d.label != selected[0].label);
     // The order of the inputs says nothing about the wallet.
     shuffle(&mut selected)?;
-    // Change, if what is left after the fee of a transaction *with* a change
-    // output is worth an output; otherwise the remainder is fee. Inputs that
-    // were chosen to pay without change leave none.
-    let dust = placeholder_p2tr().minimal_non_dust().to_sat();
-    let change_sats = add(total, fee_for(selected.len(), &with_change))
-        .and_then(|spent| gathered.checked_sub(spent))
-        .filter(|left| *left >= dust)
-        .filter(|_| !exact);
-    let fee_sats = gathered
-        .checked_sub(total)
-        .and_then(|left| left.checked_sub(change_sats.unwrap_or(0)))
-        .ok_or(SendError::Check("the fee is negative"))?;
+    let (change_sats, fee_sats) = settle(selected.len(), gathered, exact)?;
     if fee_sats > limits.max_fee_sats {
         return Err(SendError::FeeTooHigh {
             fee_sats,
@@ -943,4 +990,36 @@ pub fn build_and_sign(
         vsize,
         transaction,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Like Bitcoin Core: the tip mostly, and in about a tenth of the cases
+    /// anything down to 99 below it.
+    #[test]
+    fn the_lock_time_is_the_tip_or_up_to_99_below() {
+        let tip = 1_000;
+        let mut at_tip = 0;
+        let mut lowest = tip;
+        for _ in 0..2_000 {
+            let Ok(lock_time) = lock_time_like_core(tip) else {
+                panic!("no lock time")
+            };
+            let height = lock_time.to_consensus_u32();
+            assert!((tip - 99..=tip).contains(&height), "{height}");
+            if height == tip {
+                at_tip += 1;
+            }
+            lowest = lowest.min(height);
+        }
+        // Each fails by chance less often than once in 10^9.
+        assert!((1_700..2_000).contains(&at_tip), "{at_tip}");
+        assert!(lowest < tip - 50, "{lowest}");
+        // Never below the first block.
+        for _ in 0..200 {
+            assert!(matches!(lock_time_like_core(0), Ok(l) if l.to_consensus_u32() == 0));
+        }
+    }
 }
